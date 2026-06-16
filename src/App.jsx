@@ -1,0 +1,1625 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import '@patternfly/react-core/dist/styles/base.css';
+import {
+  Page,
+  PageSection,
+  Masthead,
+  MastheadMain,
+  MastheadBrand,
+  Title,
+  Card,
+  CardBody,
+  Form,
+  FormGroup,
+  TextInput,
+  Radio,
+  Checkbox,
+  Button,
+  Grid,
+  GridItem,
+  Dropdown,
+  DropdownItem,
+  DropdownList,
+  MenuToggle,
+  Tabs,
+  Tab,
+  Tooltip
+} from '@patternfly/react-core';
+
+import adoLogo from '../ado-logo-redhat.png';
+
+const openshiftApps = [
+  'aap','acs','acm','cert_manager','console','devspaces',
+  'dirsrv','eck','gitops','gitlab','grafana','kafka',
+  'oadp','openshift','pega','quay','rhbk'
+];
+
+const rhelApps = [
+  'rhel','satellite','idm','aap','dirsrv',
+  'eck','gitlab','grafana','kafka','rhbk'
+];
+
+const patchingApps = ['rhel','satellite','idm'];
+const provisionApps = ['aws_instance','openshift_virt'];
+
+const simpleComponents = [
+  'grafana','rhbk','satellite','idm','kafka',
+  'gitlab','pega','elastic','aap','jira'
+];
+
+const verbosityOptions = [
+  { value: 0, label: 'Normal' },
+  { value: 1, label: 'Verbose (-v)' },
+  { value: 2, label: 'More Verbose (-vv)' },
+  { value: 3, label: 'Debug (-vvv)' },
+  { value: 4, label: 'Connection Debug (-vvvv)' },
+  { value: 5, label: 'WinRM Debug (-vvvvv)' }
+];
+
+const defaults = {
+  scm_tool: 'gitlab',
+  environment: 'prod',
+  domain: 'prod.rhlab',
+
+  ansible: {
+    verbosity: 0
+  },
+
+  git: {
+    auto_push: true,
+    token: ''
+  },
+
+  components: ['all'],
+
+  component_apps: {
+    openshift: [...openshiftApps],
+    rhel: [...rhelApps],
+    patching: [...patchingApps],
+    provision: [...provisionApps]
+  },
+
+  component_config: {
+    grafana: {
+      hostname: '',
+      storage: '',
+      folder_name: '',
+      dashboards_source: ''
+    },
+    rhbk: {
+      hostname: '',
+      storage: '',
+      realm: '',
+      client: ''
+    },
+    satellite: {
+      hostname: '',
+      storage: '',
+      organization: '',
+      activation_key: ''
+    },
+    idm: {
+      hostname: '',
+      storage: '',
+      domain: '',
+      realm: '',
+      admin_password: '',
+      directory_manager_password: ''
+    },
+    aap: { hostname: '', storage: '' },
+    acs: { hostname: '', storage: '' },
+    acm: { hostname: '', storage: '' },
+    cert_manager: { hostname: '', storage: '' },
+    console: { hostname: '', storage: '' },
+    devspaces: { hostname: '', storage: '' },
+    dirsrv: { hostname: '', storage: '' },
+    eck: { hostname: '', storage: '' },
+    gitops: { hostname: '', storage: '' },
+    gitlab: { hostname: '', storage: '' },
+    kafka: { hostname: '', storage: '' },
+    oadp: { hostname: '', storage: '' },
+    openshift: { hostname: '', storage: '' },
+    pega: { hostname: '', storage: '' },
+    quay: { hostname: '', storage: '' },
+    rhel: { hostname: '', storage: '' },
+    elastic: { hostname: '', storage: '' },
+    jira: { hostname: '', storage: '' },
+    aws_instance: { hostname: '', storage: '' },
+    openshift_virt: { hostname: '', storage: '' }
+  },
+
+  collections: {
+    ado_bootstrap: true,
+    ado_openshift: true,
+    ado_applications: true,
+    ado_utilities: true,
+    ado_platform: true,
+    ansible_controller: true,
+    infra_aap_configuration: true,
+    infra_controller_configuration: true,
+    redhat_openshift: true,
+    kubernetes_core: true,
+    community_general: true,
+    containers_podman: true
+  },
+
+  tools: {
+    ansible_core: true,
+    ansible_navigator: true,
+    git: true,
+    podman: true,
+    python: true,
+    oc: true
+  },
+
+  aap: {
+    enabled: true,
+    hostname: 'https://aap-aap.apps.ocp.prod.rhlab',
+    version: '26',
+    organization: 'ado-lab',
+    inventory: 'ado-inventory',
+    project: 'ado-project',
+    git_url: 'https://gitlab-git.apps.ocp.prod.rhlab/redhat-lab/bootstrap-sample.git',
+    git_branch: 'main',
+    execution_environment: 'ee-supported-rhel9',
+    vault_credential_name: 'ado-vault',
+    oauth_token: '',
+    admin_username: 'admin',
+    admin_password: '',
+    vault_password: 'redhat123'
+  },
+
+  openshift: {
+    api_host: 'https://api.ocp.prod.rhlab:6443',
+    apps_domain: 'apps.ocp.prod.rhlab',
+    token: ''
+  },
+
+  jira: {
+    enabled: false,
+    url: 'https://example.atlassian.net/',
+    project_key: 'TEST',
+    custom_ac_field: 'customfield_10091',
+    templates_dir: 'templates',
+    create_subtasks: true,
+    username: '',
+    token: ''
+  }
+};
+
+function App() {
+  const [data, setData] = useState(defaults);
+  const [preview, setPreview] = useState('Click "Run Bootstrap" to generate output.');
+  const [events, setEvents] = useState('');
+  const [activeTab, setActiveTab] = useState('logs');
+  const [configTab, setConfigTab] = useState('form');
+  const [yamlDraft, setYamlDraft] = useState('');
+  const [yamlError, setYamlError] = useState('');
+  const [showVaultYaml, setShowVaultYaml] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [theme, setTheme] = useState('light');
+  const [collectionVersions, setCollectionVersions] = useState([]);
+  const [collectionsToolsOpen, setCollectionsToolsOpen] = useState(false);
+  const [aapOpen, setAapOpen] = useState(true);
+  const [openshiftOpen, setOpenshiftOpen] = useState(false);
+  const [rhelOpen, setRhelOpen] = useState(false);
+  const [patchingOpen, setPatchingOpen] = useState(false);
+  const [provisionOpen, setProvisionOpen] = useState(false);
+  const [activeConfigPanel, setActiveConfigPanel] = useState(null);
+  const [showOpenShiftToken, setShowOpenShiftToken] = useState(false);
+  const [showAapOauthToken, setShowAapOauthToken] = useState(false);
+  const [showIdmSecrets, setShowIdmSecrets] = useState(false);
+  const [showJiraToken, setShowJiraToken] = useState(false);
+  const [showGitToken, setShowGitToken] = useState(false);
+  const [runFinished, setRunFinished] = useState(false);
+  const [showRawOutput, setShowRawOutput] = useState(false);
+  const outputRef = useRef(null);
+
+  const isDark = theme === 'dark';
+
+  const pageBg = isDark ? '#121212' : '#f0f0f0';
+  const contentBg = isDark ? '#262626' : '#ffffff';
+  const cardBg = isDark ? '#262626' : '#ffffff';
+  const textColor = isDark ? '#f0f0f0' : '#151515';
+  const mutedTextColor = isDark ? '#b8bbbe' : '#6a6e73';
+  const borderColor = isDark ? '#3d3d3d' : '#d2d2d2';
+  const fieldBg = isDark ? '#3a3a3a' : '#ffffff';
+  const fieldColor = isDark ? '#f0f0f0' : '#151515';
+
+  const cardStyle = {
+    backgroundColor: cardBg,
+    color: textColor,
+    border: isDark ? 'none' : `1px solid ${borderColor}`,
+    borderRadius: isDark ? '10px' : '12px',
+    boxShadow: isDark ? 'none' : undefined
+  };
+
+  const sectionStyle = {
+    backgroundColor: pageBg,
+    color: textColor
+  };
+
+  const contentShellStyle = {
+    backgroundColor: isDark ? contentBg : 'transparent',
+    color: textColor,
+    borderRadius: isDark ? '10px' : '0',
+    padding: isDark ? '24px' : '0'
+  };
+
+  const selectStyle = {
+    height: '36px',
+    minWidth: '170px',
+    borderRadius: '4px',
+    border: `1px solid ${isDark ? '#8a8d90' : '#8a8d90'}`,
+    padding: '0 32px 0 8px',
+    background: fieldBg,
+    color: fieldColor,
+    fontSize: '14px'
+  };
+
+  useEffect(() => {
+    fetch('/api/collection-versions')
+      .then(r => r.json())
+      .then(d => setCollectionVersions(d.collections || []))
+      .catch(() => setCollectionVersions([]));
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.style.backgroundColor = pageBg;
+    document.body.style.backgroundColor = pageBg;
+    document.body.style.color = textColor;
+    document.body.style.margin = '0';
+
+    const pfPage = document.querySelector('.pf-v5-c-page');
+    const pfMain = document.querySelector('.pf-v5-c-page__main');
+    const pfMainSection = document.querySelectorAll('.pf-v5-c-page__main-section');
+    const pfInputs = document.querySelectorAll('input, select, textarea');
+
+    if (pfPage) pfPage.style.backgroundColor = pageBg;
+    if (pfMain) pfMain.style.backgroundColor = pageBg;
+
+    pfMainSection.forEach(section => {
+      section.style.backgroundColor = pageBg;
+    });
+
+    pfInputs.forEach(input => {
+      if (input.tagName.toLowerCase() === 'textarea') return;
+
+      if (isDark) {
+        input.style.backgroundColor = fieldBg;
+        input.style.color = fieldColor;
+        input.style.borderColor = '#555';
+      } else {
+        input.style.backgroundColor = '';
+        input.style.color = '';
+        input.style.borderColor = '';
+      }
+    });
+  }, [pageBg, textColor]);
+
+  useEffect(() => {
+    const styleId = 'ado-dark-theme';
+
+    let style = document.getElementById(styleId);
+
+    if (!style) {
+      style = document.createElement('style');
+      style.id = styleId;
+      document.head.appendChild(style);
+    }
+
+    style.innerHTML = isDark
+      ? `
+        .pf-v5-c-radio__label,
+        .pf-v5-c-check__label,
+        .pf-v5-c-form__label-text,
+        .pf-v5-c-title,
+        .pf-v5-c-form__helper-text,
+        .pf-v5-c-form-control,
+        .pf-v5-c-form label,
+        .pf-v5-c-card label,
+        .pf-v5-c-card span,
+        .pf-v5-c-card div,
+        .pf-v5-c-card p {
+          color: #f0f0f0 !important;
+        }
+
+        .pf-v5-c-check__description,
+        .pf-v5-c-radio__description,
+        .pf-v5-c-check,
+        .pf-v5-c-radio,
+        .pf-v5-c-check *,
+        .pf-v5-c-radio *,
+        .pf-v5-c-form__group,
+        .pf-v5-c-form__group *,
+        label,
+        label *,
+        span {
+          color: #f0f0f0 !important;
+        }
+
+        .pf-v5-c-check.pf-m-disabled,
+        .pf-v5-c-radio.pf-m-disabled,
+        .pf-v5-c-check.pf-m-disabled *,
+        .pf-v5-c-radio.pf-m-disabled *,
+        input:disabled + label,
+        input:disabled ~ label {
+          color: #b8bbbe !important;
+          opacity: 1 !important;
+        }
+      `
+      : '';
+
+  }, [isDark]);
+
+  useEffect(() => {
+    if (outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, [preview, events, activeTab]);
+
+  const set = (path, value) => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      const keys = path.split('.');
+      let obj = copy;
+
+      keys.slice(0, -1).forEach(k => {
+        if (!obj[k]) obj[k] = {};
+        obj = obj[k];
+      });
+
+      obj[keys[keys.length - 1]] = value;
+      return copy;
+    });
+  };
+
+  const ensureComponentConfig = component => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+
+      if (!copy.component_config) copy.component_config = {};
+      if (!copy.component_config[component]) copy.component_config[component] = { hostname: '', storage: '' };
+      if (copy.component_config[component].hostname === undefined) copy.component_config[component].hostname = '';
+      if (copy.component_config[component].storage === undefined) copy.component_config[component].storage = '';
+
+      return copy;
+    });
+  };
+
+  const openConfigPanel = component => {
+    ensureComponentConfig(component);
+    setActiveConfigPanel(component);
+    setConfigTab('form');
+    setYamlError('');
+
+    const componentData =
+      component === 'openshift'
+        ? data.openshift
+        : component === 'jira'
+          ? data.jira
+          : data.component_config?.[component] || { hostname: '', storage: '' };
+
+    setYamlDraft(JSON.stringify(componentData, null, 2));
+  };
+
+  const setAapEnabled = value => {
+    set('aap.enabled', value);
+    setAapOpen(value);
+  };
+
+  const toggleComponent = component => {
+    setData(prev => {
+      let next = [...prev.components];
+
+      if (component === 'all') {
+        next = ['all'];
+      } else {
+        next = next.filter(c => c !== 'all');
+
+        if (next.includes(component)) {
+          next = next.filter(c => c !== component);
+        } else {
+          if (component === 'openshift') next = next.filter(c => c !== 'rhel');
+          if (component === 'rhel') next = next.filter(c => c !== 'openshift');
+          next.push(component);
+        }
+
+        if (next.length === 0) next = ['all'];
+      }
+
+      return {
+        ...prev,
+        components: next,
+        component: next.includes('all') ? 'all' : next[0],
+        jira: {
+          ...prev.jira,
+          enabled: next.includes('all') || next.includes('jira')
+        }
+      };
+    });
+  };
+
+  const toggleComponentAndOpen = component => {
+    toggleComponent(component);
+    openConfigPanel(component);
+  };
+
+  const toggleComponentApp = (group, app) => {
+    const current = data.component_apps[group] || [];
+    const next = current.includes(app)
+      ? current.filter(item => item !== app)
+      : [...current, app];
+
+    set(`component_apps.${group}`, next);
+  };
+
+  const toggleComponentAppAndOpen = (group, app) => {
+    toggleComponentApp(group, app);
+    openConfigPanel(app);
+  };
+
+  const downloadFile = (name, content) => {
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+
+    a.href = url;
+    a.download = name;
+    a.click();
+
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadJson = () => {
+    const name = data.components.includes('all') ? 'all' : data.components.join('-');
+
+    downloadFile(
+      `ado-preflight-${data.environment || 'env'}-${name}.json`,
+      JSON.stringify(data, null, 2)
+    );
+
+    setActionsOpen(false);
+  };
+
+  const downloadLog = () => {
+    const content = activeTab === 'events' ? events : preview;
+    const suffix = activeTab === 'events' ? 'events' : 'run';
+
+    downloadFile(`ado-preflight-${data.environment || 'env'}-${suffix}.log`, content);
+  };
+
+  const resetOutput = () => {
+    setData(defaults);
+    setPreview('Click "Run Bootstrap" to generate output.');
+    setEvents('');
+    setRunFinished(false);
+    setShowRawOutput(false);
+    setActiveTab('logs');
+    setActionsOpen(false);
+    setActiveConfigPanel(null);
+    setConfigTab('form');
+    setYamlDraft('');
+    setYamlError('');
+    setShowVaultYaml(false);
+  };
+
+  const previewJson = () => {
+    setPreview(JSON.stringify(data, null, 2));
+    setActiveTab('logs');
+    setActionsOpen(false);
+  };
+
+  const toggleRawOutput = () => {
+    setShowRawOutput(!showRawOutput);
+    setActiveTab('logs');
+  };
+
+  const applyYamlDraft = () => {
+    try {
+      const parsed = JSON.parse(yamlDraft);
+
+      if (!activeConfigPanel) return;
+
+      if (activeConfigPanel === 'openshift') {
+        setData(prev => ({ ...prev, openshift: parsed }));
+      } else if (activeConfigPanel === 'jira') {
+        setData(prev => ({ ...prev, jira: parsed }));
+      } else {
+        setData(prev => ({
+          ...prev,
+          component_config: {
+            ...prev.component_config,
+            [activeConfigPanel]: parsed
+          }
+        }));
+      }
+
+      setYamlError('');
+    } catch (err) {
+      setYamlError(`Invalid YAML/JSON: ${err.message}`);
+    }
+  };
+
+  const refreshYamlDraft = () => {
+    if (!activeConfigPanel) return;
+
+    const componentData =
+      activeConfigPanel === 'openshift'
+        ? data.openshift
+        : activeConfigPanel === 'jira'
+          ? data.jira
+          : data.component_config?.[activeConfigPanel] || { hostname: '', storage: '' };
+
+    setYamlDraft(JSON.stringify(componentData, null, 2));
+    setYamlError('');
+  };
+
+  const runBootstrapInsideContainer = async () => {
+    setRunFinished(false);
+    setShowRawOutput(false);
+    setActiveTab('logs');
+    setPreview('Starting bootstrap inside container...\n');
+    setEvents('Starting bootstrap request...\n');
+
+    let keepPolling = true;
+
+    const poller = setInterval(async () => {
+      if (!keepPolling) return;
+
+      try {
+        const logs = await fetch('/api/logs');
+        const text = await logs.text();
+        setPreview(text || 'Running...');
+
+        const eventsResp = await fetch('/api/events');
+        const eventsText = await eventsResp.text();
+        setEvents(eventsText || 'No events yet.');
+      } catch (err) {
+        setPreview(`ERROR reading logs:\n${err.message}`);
+      }
+    }, 1000);
+
+    try {
+      const response = await fetch('/api/bootstrap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+
+      const result = await response.json();
+
+      const logs = await fetch('/api/logs');
+      const text = await logs.text();
+
+      const eventsResp = await fetch('/api/events');
+      const eventsText = await eventsResp.text();
+
+      setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}`);
+      setEvents(eventsText || 'No events were returned.');
+    } catch (err) {
+      setPreview(`ERROR:\n${err.message}`);
+    } finally {
+      keepPolling = false;
+      clearInterval(poller);
+      setRunFinished(true);
+    }
+  };
+
+  const renderOutput = () => {
+    if (showRawOutput) return preview;
+
+    return preview.split('\n').map((line, idx) => {
+      let color = '#f0f0f0';
+      let fontWeight = 400;
+
+      if (/FAILED!|fatal:|unreachable=|failed=[1-9]|exit code [1-9]|ERROR!/i.test(line)) {
+        color = '#ff6b6b';
+        fontWeight = 700;
+      } else if (/WARNING:|\[WARNING\]/i.test(line)) {
+        color = '#f0ab00';
+        fontWeight = 700;
+      } else if (/^ok:|\sok=|\bok: \[/.test(line)) {
+        color = '#8bc34a';
+        fontWeight = 600;
+      } else if (/^changed:|\schanged=|\bchanged: \[/.test(line)) {
+        color = '#73bcf7';
+        fontWeight = 600;
+      } else if (/^skipping:|\sskipped=|\bskipping: \[/.test(line)) {
+        color = '#b8bbbe';
+      } else if (/rescued=|\brescued:/.test(line)) {
+        color = '#ec7a08';
+        fontWeight = 600;
+      } else if (/PLAY RECAP|PLAY \[/.test(line)) {
+        color = '#2b9af3';
+        fontWeight = 700;
+      } else if (/^TASK \[/.test(line)) {
+        color = '#b2b0ea';
+        fontWeight = 700;
+      }
+
+      return (
+        <div key={idx} style={{ color, fontWeight }}>
+          {line || ' '}
+        </div>
+      );
+    });
+  };
+
+  const renderEvents = () => {
+    return (events || 'No events yet.').split('\n').map((line, idx) => {
+      const isError = /failed|error|exitCode=[1-9]|exit code [1-9]/i.test(line);
+      const isSuccess = /complete|finished exitCode=0|exit code 0/i.test(line);
+
+      let color = '#f0f0f0';
+      let fontWeight = 400;
+
+      if (isError) {
+        color = '#ff6b6b';
+        fontWeight = 700;
+      } else if (isSuccess) {
+        color = '#8bc34a';
+        fontWeight = 700;
+      }
+
+      return (
+        <div key={idx} style={{ color, fontWeight }}>
+          {line || ' '}
+        </div>
+      );
+    });
+  };
+
+  const renderComponentLabel = (component, label = component) => (
+    <button
+      type="button"
+      onClick={() => openConfigPanel(component)}
+      style={{
+        border: 'none',
+        background: 'transparent',
+        padding: 0,
+        color: isDark ? '#73bcf7' : '#0066cc',
+        cursor: 'pointer',
+        textDecoration: activeConfigPanel === component ? 'underline' : 'none',
+        fontWeight: activeConfigPanel === component ? 700 : 400
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  const renderExpandableComponent = (label, isOpen, setOpen, apps) => (
+    <div style={{ marginTop: '10px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <button
+          type="button"
+          onClick={() => setOpen(!isOpen)}
+          style={{
+            width: '28px',
+            height: '28px',
+            border: `1px solid ${borderColor}`,
+            background: fieldBg,
+            color: fieldColor,
+            borderRadius: '3px',
+            cursor: 'pointer',
+            fontWeight: 700
+          }}
+        >
+          {isOpen ? '−' : '+'}
+        </button>
+
+        <Checkbox
+          label=""
+          isChecked={data.components.includes(label)}
+          onChange={() => toggleComponentAndOpen(label)}
+        />
+
+        {renderComponentLabel(label)}
+      </div>
+
+      {isOpen && (
+        <div
+          style={{
+            marginLeft: '40px',
+            marginTop: '8px',
+            padding: '10px 12px',
+            border: `1px solid ${borderColor}`,
+            borderRadius: '4px',
+            background: isDark ? '#1f1f1f' : '#f8f8f8'
+          }}
+        >
+          <Grid hasGutter>
+            {apps.map(app => (
+              <GridItem key={app} span={4}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Checkbox
+                    label=""
+                    isChecked={(data.component_apps[label] || []).includes(app)}
+                    onChange={() => toggleComponentAppAndOpen(label, app)}
+                  />
+                  {renderComponentLabel(app)}
+                </div>
+              </GridItem>
+            ))}
+          </Grid>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderTextField = (label, path, type = 'text') => (
+    <GridItem span={6}>
+      <FormGroup label={label}>
+        <TextInput
+          type={type}
+          value={path.split('.').reduce((o, k) => (o || {})[k], data) || ''}
+          onChange={(_, v) => set(path, v)}
+        />
+      </FormGroup>
+    </GridItem>
+  );
+
+  const renderDefaultComponentConfig = component => (
+    <Grid hasGutter>
+      {renderTextField('Hostname', `component_config.${component}.hostname`)}
+      {renderTextField('Storage', `component_config.${component}.storage`)}
+    </Grid>
+  );
+
+  const renderGrafanaConfig = () => (
+    <Grid hasGutter>
+      {renderTextField('Hostname', 'component_config.grafana.hostname')}
+      {renderTextField('Storage', 'component_config.grafana.storage')}
+      {renderTextField('Folder Name', 'component_config.grafana.folder_name')}
+      {renderTextField('Folder or Git Repo for Dashboards', 'component_config.grafana.dashboards_source')}
+    </Grid>
+  );
+
+  const renderRhbkConfig = () => (
+    <Grid hasGutter>
+      {renderTextField('Hostname', 'component_config.rhbk.hostname')}
+      {renderTextField('Storage', 'component_config.rhbk.storage')}
+      {renderTextField('Realm', 'component_config.rhbk.realm')}
+      {renderTextField('Client', 'component_config.rhbk.client')}
+    </Grid>
+  );
+
+  const renderSatelliteConfig = () => (
+    <Grid hasGutter>
+      {renderTextField('Hostname', 'component_config.satellite.hostname')}
+      {renderTextField('Storage', 'component_config.satellite.storage')}
+      {renderTextField('Organization', 'component_config.satellite.organization')}
+      {renderTextField('Activation Key', 'component_config.satellite.activation_key')}
+    </Grid>
+  );
+
+  const renderIdmConfig = () => (
+    <>
+      <Button variant="link" onClick={() => setShowIdmSecrets(!showIdmSecrets)}>
+        {showIdmSecrets ? 'Hide Secrets' : 'Show Secrets'}
+      </Button>
+      <br /><br />
+      <Grid hasGutter>
+        {renderTextField('Hostname', 'component_config.idm.hostname')}
+        {renderTextField('Storage', 'component_config.idm.storage')}
+        {renderTextField('Domain', 'component_config.idm.domain')}
+        {renderTextField('Realm', 'component_config.idm.realm')}
+        {renderTextField('Admin Password', 'component_config.idm.admin_password', showIdmSecrets ? 'text' : 'password')}
+        {renderTextField('Directory Manager Password', 'component_config.idm.directory_manager_password', showIdmSecrets ? 'text' : 'password')}
+      </Grid>
+    </>
+  );
+
+  const renderOpenShiftIntegration = () => (
+    <>
+      <p style={{ color: mutedTextColor }}>This section is opened by clicking <strong>openshift</strong>.</p>
+      <Grid hasGutter>
+        <GridItem span={6}>
+          <FormGroup label="OpenShift API Host">
+            <TextInput
+              value={data.openshift.api_host}
+              onChange={(_, v) => set('openshift.api_host', v)}
+            />
+          </FormGroup>
+        </GridItem>
+
+        <GridItem span={6}>
+          <FormGroup label="OpenShift Apps Domain">
+            <TextInput
+              value={data.openshift.apps_domain}
+              onChange={(_, v) => set('openshift.apps_domain', v)}
+            />
+          </FormGroup>
+        </GridItem>
+
+        <GridItem span={12}>
+          <FormGroup label="OpenShift API Token">
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <TextInput
+                type={showOpenShiftToken ? 'text' : 'password'}
+                value={data.openshift.token}
+                onChange={(_, v) => set('openshift.token', v)}
+              />
+              <Button variant="secondary" onClick={() => setShowOpenShiftToken(!showOpenShiftToken)}>
+                {showOpenShiftToken ? 'Hide' : 'Show'}
+              </Button>
+            </div>
+          </FormGroup>
+        </GridItem>
+      </Grid>
+    </>
+  );
+
+  const renderJiraConfig = () => (
+    <>
+      <Radio
+        label="Using Jira"
+        name="jira"
+        isChecked={data.jira.enabled}
+        onChange={() => set('jira.enabled', true)}
+      />
+      <Radio
+        label="Not using Jira"
+        name="jira"
+        isChecked={!data.jira.enabled}
+        onChange={() => set('jira.enabled', false)}
+      />
+
+      {data.jira.enabled && (
+        <>
+          <br />
+          <Grid hasGutter>
+            <GridItem span={6}>
+              <FormGroup label="Jira Instance URL">
+                <TextInput value={data.jira.url} onChange={(_, v) => set('jira.url', v)} />
+              </FormGroup>
+            </GridItem>
+
+            <GridItem span={6}>
+              <FormGroup label="Jira Project Key">
+                <TextInput value={data.jira.project_key} onChange={(_, v) => set('jira.project_key', v)} />
+              </FormGroup>
+            </GridItem>
+
+            <GridItem span={6}>
+              <FormGroup label="Jira Custom AC Field">
+                <TextInput value={data.jira.custom_ac_field} onChange={(_, v) => set('jira.custom_ac_field', v)} />
+              </FormGroup>
+            </GridItem>
+
+            <GridItem span={6}>
+              <FormGroup label="Templates Directory">
+                <TextInput value={data.jira.templates_dir} onChange={(_, v) => set('jira.templates_dir', v)} />
+              </FormGroup>
+            </GridItem>
+
+            <GridItem span={6}>
+              <Checkbox
+                label="Use Jira Subtasks"
+                isChecked={data.jira.create_subtasks}
+                onChange={(_, v) => set('jira.create_subtasks', v)}
+              />
+            </GridItem>
+
+            <GridItem span={6}>
+              <FormGroup label="Jira Service Account Email">
+                <TextInput value={data.jira.username} onChange={(_, v) => set('jira.username', v)} />
+              </FormGroup>
+            </GridItem>
+
+            <GridItem span={12}>
+              <FormGroup label="Jira API Token">
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <TextInput
+                    type={showJiraToken ? 'text' : 'password'}
+                    value={data.jira.token}
+                    onChange={(_, v) => set('jira.token', v)}
+                  />
+                  <Button variant="secondary" onClick={() => setShowJiraToken(!showJiraToken)}>
+                    {showJiraToken ? 'Hide' : 'Show'}
+                  </Button>
+                </div>
+              </FormGroup>
+            </GridItem>
+          </Grid>
+        </>
+      )}
+    </>
+  );
+
+  const renderConfigForm = () => {
+    if (activeConfigPanel === 'openshift') return renderOpenShiftIntegration();
+    if (activeConfigPanel === 'jira') return renderJiraConfig();
+    if (activeConfigPanel === 'grafana') return renderGrafanaConfig();
+    if (activeConfigPanel === 'rhbk') return renderRhbkConfig();
+    if (activeConfigPanel === 'satellite') return renderSatelliteConfig();
+    if (activeConfigPanel === 'idm') return renderIdmConfig();
+    return renderDefaultComponentConfig(activeConfigPanel);
+  };
+
+  const isVaultKey = key => {
+    const k = String(key || '').toLowerCase();
+    return (
+      k.includes('password') ||
+      k.includes('token') ||
+      k.includes('secret') ||
+      k.includes('vault') ||
+      k.includes('credential')
+    );
+  };
+
+  const yamlValue = value => {
+    if (value === null || value === undefined || value === '') return '""';
+    if (typeof value === 'boolean') return value ? 'true' : 'false';
+    if (typeof value === 'number') return String(value);
+
+    const text = String(value);
+
+    if (text.includes('{{') || text.includes('}}')) {
+      return text;
+    }
+
+    if (
+      text.includes(':') ||
+      text.includes('#') ||
+      text.includes('@') ||
+      text.includes(' ') ||
+      text.startsWith('http')
+    ) {
+      return JSON.stringify(text);
+    }
+
+    return text;
+  };
+
+  const objectToYaml = obj => {
+    return Object.entries(obj || {})
+      .map(([key, value]) => `${key}: ${yamlValue(value)}`)
+      .join('\n');
+  };
+
+  const buildYamlPreview = component => {
+    let vars = {};
+    let vault = {};
+
+    if (component === 'openshift') {
+      vars = {
+        host: data.openshift.api_host,
+        app_domain: 'apps.{{ domain }}'
+      };
+
+      vault = {
+        token: data.openshift.token
+      };
+    } else if (component === 'jira') {
+      vars = {
+        url: data.jira.url,
+        project_key: data.jira.project_key,
+        custom_ac_field: data.jira.custom_ac_field,
+        templates_dir: data.jira.templates_dir,
+        create_subtasks: data.jira.create_subtasks,
+        username: data.jira.username
+      };
+
+      vault = {
+        token: data.jira.token
+      };
+    } else {
+      const source = data.component_config?.[component] || {};
+      Object.entries(source).forEach(([key, value]) => {
+        if (isVaultKey(key)) {
+          vault[key] = value;
+        } else {
+          vars[key] = value;
+        }
+      });
+    }
+
+    const vaultMasked = {};
+    Object.keys(vault).forEach(key => {
+      vaultMasked[key] = showVaultYaml ? vault[key] : '********';
+    });
+
+    const varsYaml = objectToYaml(vars);
+    const vaultYaml = Object.keys(vaultMasked).length > 0
+      ? objectToYaml(vaultMasked)
+      : '# no vault values detected for this component';
+
+    return `vars_${component}.yml:
+---
+${varsYaml}
+
+
+vault_${component}.yml:
+---
+${vaultYaml}
+`;
+  };
+
+  const renderConfigYaml = () => (
+    <>
+      <div style={{ marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontSize: '13px', color: mutedTextColor }}>
+          Generated YAML preview. Passwords, tokens, credentials, secrets, and vault values are masked by default.
+        </div>
+
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <Button variant="secondary" onClick={() => setShowVaultYaml(!showVaultYaml)}>
+            {showVaultYaml ? 'Hide vault values' : 'Show vault values'}
+          </Button>
+        </div>
+      </div>
+
+      <Grid hasGutter>
+        <GridItem span={6}>
+          <div style={{ fontWeight: 700, marginBottom: '8px' }}>
+            vars_{activeConfigPanel}.yml
+          </div>
+          <textarea
+            value={buildYamlPreview(activeConfigPanel).split(`\n\nvault_${activeConfigPanel}.yml:`)[0].replace(`vars_${activeConfigPanel}.yml:\n`, '')}
+            readOnly
+            spellCheck="false"
+            style={{
+              width: '100%',
+              minHeight: '360px',
+              background: '#151515',
+              color: '#f0f0f0',
+              fontFamily: 'monospace',
+              fontSize: '13px',
+              lineHeight: '1.45',
+              border: '1px solid #3c3c3c',
+              borderRadius: '4px',
+              padding: '14px'
+            }}
+          />
+        </GridItem>
+
+        <GridItem span={6}>
+          <div style={{ fontWeight: 700, marginBottom: '8px' }}>
+            vault_{activeConfigPanel}.yml
+          </div>
+          <textarea
+            value={
+              '---\n' +
+              buildYamlPreview(activeConfigPanel)
+                .split(`\n\nvault_${activeConfigPanel}.yml:\n---\n`)[1]
+            }
+            readOnly
+            spellCheck="false"
+            style={{
+              width: '100%',
+              minHeight: '360px',
+              background: '#151515',
+              color: '#f0f0f0',
+              fontFamily: 'monospace',
+              fontSize: '13px',
+              lineHeight: '1.45',
+              border: '1px solid #3c3c3c',
+              borderRadius: '4px',
+              padding: '14px'
+            }}
+          />
+        </GridItem>
+      </Grid>
+    </>
+  );
+
+  const renderActiveConfigPanel = () => {
+    if (!activeConfigPanel) return null;
+
+    return (
+      <>
+        <Card style={cardStyle}>
+          <CardBody>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Title headingLevel="h2">
+                {activeConfigPanel} Configuration
+              </Title>
+
+              <Button variant="plain" onClick={() => setActiveConfigPanel(null)}>
+                ×
+              </Button>
+            </div>
+
+            <div style={{ marginTop: '12px' }}>
+              <Tabs
+                activeKey={configTab}
+                onSelect={(_, key) => {
+                  if (key === 'yaml') refreshYamlDraft();
+                  setConfigTab(key);
+                }}
+              >
+                <Tab eventKey="form" title="Form" />
+                <Tab eventKey="yaml" title="YAML" />
+              </Tabs>
+            </div>
+
+            <div style={{ marginTop: '16px' }}>
+              {configTab === 'form' ? renderConfigForm() : renderConfigYaml()}
+            </div>
+          </CardBody>
+        </Card>
+        <br />
+      </>
+    );
+  };
+
+  const renderCollectionsTools = () => (
+    <>
+      <Card style={cardStyle}>
+        <CardBody>
+          <Title headingLevel="h2">Collections and Local Ansible Tools</Title>
+          <br />
+
+          <Grid hasGutter>
+            <GridItem span={6}>
+              <div style={{ fontWeight: 700, marginBottom: '8px' }}>
+                ADO Collections in Container
+              </div>
+
+              {collectionVersions.length > 0 && (
+                <div
+                  style={{
+                    marginBottom: '12px',
+                    padding: '10px',
+                    backgroundColor: isDark ? '#1f1f1f' : '#f5f5f5',
+                    borderRadius: '4px',
+                    fontSize: '13px'
+                  }}
+                >
+                  {collectionVersions.map(c => (
+                    <div key={c.file}>
+                      {c.name}: <strong>{c.version}</strong>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <FormGroup label="Required Collections">
+                {Object.keys(data.collections).map(k =>
+                  <Checkbox
+                    key={k}
+                    label={k.replaceAll('_', '.')}
+                    isChecked={data.collections[k]}
+                    onChange={(_, v) => set(`collections.${k}`, v)}
+                  />
+                )}
+              </FormGroup>
+            </GridItem>
+
+            <GridItem span={6}>
+              <FormGroup label="Local Tools">
+                {Object.keys(data.tools).map(k =>
+                  <Checkbox
+                    key={k}
+                    label={k.replaceAll('_', '-')}
+                    isChecked={data.tools[k]}
+                    onChange={(_, v) => set(`tools.${k}`, v)}
+                  />
+                )}
+              </FormGroup>
+            </GridItem>
+          </Grid>
+        </CardBody>
+      </Card>
+      <br />
+    </>
+  );
+
+  return (
+    <Page
+      masthead={
+        <Masthead
+          style={{
+            background: '#151515',
+            borderBottom: '3px solid #ee0000',
+            padding: '6px 20px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            overflow: 'visible',
+            zIndex: 3000
+          }}
+        >
+          <MastheadMain>
+            <MastheadBrand>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                <img src={adoLogo} alt="ADO" style={{ height: '54px', background: 'white', borderRadius: '6px', padding: '4px' }} />
+                <div>
+                  <div style={{ color: 'white', fontSize: '20px', fontWeight: 700 }}>
+                    Automation Development Office
+                  </div>
+                  <div style={{ color: '#d2d2d2', fontSize: '13px' }}>
+                    Ansible Automation Pre-Flight
+                  </div>
+                </div>
+              </div>
+            </MastheadBrand>
+          </MastheadMain>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', paddingRight: '28px', position: 'relative', zIndex: 6000 }}>
+            <Tooltip content={isDark ? 'Switch to light theme' : 'Switch to dark theme'}>
+              <Button
+                variant="plain"
+                aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+                onClick={() => setTheme(isDark ? 'light' : 'dark')}
+                style={{
+                  color: '#ffffff',
+                  fontSize: '18px',
+                  padding: '6px',
+                  minWidth: '32px'
+                }}
+              >
+                {isDark ? '☾' : '⚙'}
+              </Button>
+            </Tooltip>
+
+            <Dropdown
+              isOpen={helpOpen}
+              onOpenChange={(open) => setHelpOpen(open)}
+              popperProps={{
+                position: 'right',
+                appendTo: () => document.body
+              }}
+              toggle={(toggleRef) => (
+                <Button
+                  ref={toggleRef}
+                  variant="plain"
+                  onClick={() => setHelpOpen(!helpOpen)}
+                  style={{
+                    color: '#ffffff',
+                    fontSize: '16px',
+                    padding: '6px',
+                    minWidth: '32px',
+                    fontWeight: 700
+                  }}
+                >
+                  ?
+                </Button>
+              )}
+            >
+              <DropdownList style={{ minWidth: '180px' }}>
+                <DropdownItem
+                  onClick={() => {
+                    window.open(
+                      'https://github.com/Automation-Development-Office/ado',
+                      '_blank',
+                      'noopener,noreferrer'
+                    );
+                    setHelpOpen(false);
+                  }}
+                >
+                  Documentation
+                </DropdownItem>
+
+                <DropdownItem
+                  onClick={() => {
+                    setCollectionsToolsOpen(true);
+                    setHelpOpen(false);
+                  }}
+                >
+                  Show Collections
+                </DropdownItem>
+              </DropdownList>
+            </Dropdown>
+          </div>
+        </Masthead>
+      }
+    >
+      {collectionsToolsOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.55)',
+            zIndex: 5000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '32px'
+          }}
+        >
+          <div
+            style={{
+              width: '82%',
+              maxWidth: '1200px',
+              maxHeight: '82vh',
+              overflowY: 'auto',
+              background: cardBg,
+              color: textColor,
+              border: `1px solid ${borderColor}`,
+              borderRadius: '8px',
+              padding: '24px',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.45)'
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Title headingLevel="h2">Collections and Local Ansible Tools</Title>
+              <Button variant="plain" onClick={() => setCollectionsToolsOpen(false)}>
+                ×
+              </Button>
+            </div>
+
+            <br />
+
+            {renderCollectionsTools()}
+          </div>
+        </div>
+      )}
+
+      <PageSection style={{ ...sectionStyle, paddingTop: '20px', paddingBottom: '20px' }}>
+        <div style={contentShellStyle}>
+          <Title headingLevel="h1">Ansible Automation Pre-Flight Questionnaire</Title>
+          <p style={{ marginTop: '8px', color: mutedTextColor }}>
+            Generate and run component-based bootstrap automation inside a local Podman container.
+          </p>
+        </div>
+      </PageSection>
+
+      <PageSection isWidthLimited style={{ ...sectionStyle, minHeight: 'calc(100vh - 110px)', paddingTop: isDark ? '0' : undefined }}>
+        <div style={contentShellStyle}>
+        <Form>
+          <Card style={cardStyle}>
+            <CardBody>
+              <Title headingLevel="h2">Core Environment Information</Title>
+
+              <Grid hasGutter>
+                <GridItem span={6}>
+                  <FormGroup label="Environment Type" isRequired>
+                    <TextInput value={data.environment} onChange={(_, v) => set('environment', v)} />
+                  </FormGroup>
+                </GridItem>
+
+                <GridItem span={6}>
+                  <FormGroup label="Base Infrastructure Domain" isRequired>
+                    <TextInput value={data.domain} onChange={(_, v) => set('domain', v)} />
+                  </FormGroup>
+                </GridItem>
+
+                <GridItem span={12}>
+                  <FormGroup label="Bootstrap Components" isRequired>
+                    <div style={{ marginBottom: '10px', color: mutedTextColor, fontSize: '13px' }}>
+                      Click component text to populate vars/vault files.
+                    </div>
+                    
+                    <Grid hasGutter>
+                      <GridItem span={6}>
+                        <Checkbox
+                          label="all"
+                          isChecked={data.components.includes('all')}
+                          onChange={() => toggleComponent('all')}
+                        />
+
+                        {renderExpandableComponent('openshift', openshiftOpen, setOpenshiftOpen, openshiftApps)}
+                        {renderExpandableComponent('rhel', rhelOpen, setRhelOpen, rhelApps)}
+                        {renderExpandableComponent('patching', patchingOpen, setPatchingOpen, patchingApps)}
+                        {renderExpandableComponent('provision', provisionOpen, setProvisionOpen, provisionApps)}
+                      </GridItem>
+
+                      <GridItem span={6}>
+                        <Grid hasGutter>
+                          {simpleComponents.map(component => (
+                            <GridItem key={component} span={6}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Checkbox
+                                  label=""
+                                  isChecked={data.components.includes(component)}
+                                  onChange={() => toggleComponentAndOpen(component)}
+                                />
+                                {renderComponentLabel(component)}
+                              </div>
+                            </GridItem>
+                          ))}
+                        </Grid>
+                      </GridItem>
+                    </Grid>
+                  </FormGroup>
+                </GridItem>
+              </Grid>
+            </CardBody>
+          </Card>
+
+          <br />
+
+          {renderActiveConfigPanel()}
+
+          <Card style={cardStyle}>
+            <CardBody>
+              <Title headingLevel="h2">Git Configuration</Title>
+
+              <Grid hasGutter>
+                <GridItem span={4}>
+                  <FormGroup label="SCM Tool" isRequired>
+                    {['gitlab','bitbucket','github','other'].map(v =>
+                      <Radio
+                        key={v}
+                        label={v}
+                        name="scm"
+                        isChecked={data.scm_tool === v}
+                        onChange={() => set('scm_tool', v)}
+                      />
+                    )}
+                  </FormGroup>
+
+                  <br />
+
+                  <Checkbox
+                    label="Automatically commit and push generated content to Git"
+                    isChecked={data.git.auto_push}
+                    onChange={(_, v) => set('git.auto_push', v)}
+                  />
+                </GridItem>
+
+                <GridItem span={8}>
+                  <FormGroup label="Project Git Source URL">
+                    <TextInput value={data.aap.git_url} onChange={(_, v) => set('aap.git_url', v)} />
+                  </FormGroup>
+
+                  <br />
+
+                  <FormGroup label="Git Branch">
+                    <TextInput value={data.aap.git_branch} onChange={(_, v) => set('aap.git_branch', v)} />
+                  </FormGroup>
+
+                  <br />
+
+                  <FormGroup label="Git Token">
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <TextInput
+                        type={showGitToken ? 'text' : 'password'}
+                        value={data.git.token}
+                        onChange={(_, v) => set('git.token', v)}
+                      />
+                      <Button variant="secondary" onClick={() => setShowGitToken(!showGitToken)}>
+                        {showGitToken ? 'Hide' : 'Show'}
+                      </Button>
+                    </div>
+                  </FormGroup>
+                </GridItem>
+              </Grid>
+            </CardBody>
+          </Card>
+
+          <br />
+
+          <Card style={cardStyle}>
+            <CardBody>
+              <button type="button" onClick={() => data.aap.enabled && setAapOpen(!aapOpen)}
+                style={{ border: 'none', background: 'transparent', padding: 0, fontWeight: 700, cursor: data.aap.enabled ? 'pointer' : 'default', fontSize: '20px', color: textColor }}>
+                {data.aap.enabled ? (aapOpen ? '−' : '+') : ''} Ansible Automation Platform Configuration
+              </button>
+
+              <br /><br />
+
+              <Radio label="Using AAP" name="aap" isChecked={data.aap.enabled} onChange={() => setAapEnabled(true)} />
+              <Radio label="Not using AAP" name="aap" isChecked={!data.aap.enabled} onChange={() => setAapEnabled(false)} />
+
+              {data.aap.enabled && aapOpen && (
+                <>
+                  <br />
+                  <Grid hasGutter>
+                    <GridItem span={6}><FormGroup label="AAP Hostname URL"><TextInput value={data.aap.hostname} onChange={(_, v) => set('aap.hostname', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="AAP Version"><select value={data.aap.version} onChange={e => set('aap.version', e.target.value)} style={{ width: '100%', padding: '8px' }}><option value="24">2.4</option><option value="25">2.5</option><option value="26">2.6</option></select></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Organization Name"><TextInput value={data.aap.organization} onChange={(_, v) => set('aap.organization', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Inventory Name"><TextInput value={data.aap.inventory} onChange={(_, v) => set('aap.inventory', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Project Name"><TextInput value={data.aap.project} onChange={(_, v) => set('aap.project', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Execution Environment"><TextInput value={data.aap.execution_environment} onChange={(_, v) => set('aap.execution_environment', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Vault Credential Name"><TextInput value={data.aap.vault_credential_name} onChange={(_, v) => set('aap.vault_credential_name', v)} /></FormGroup></GridItem>
+
+                    <GridItem span={6}>
+                      <FormGroup label="OAuth Token">
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <TextInput type={showAapOauthToken ? 'text' : 'password'} value={data.aap.oauth_token} onChange={(_, v) => set('aap.oauth_token', v)} />
+                          <Button variant="secondary" onClick={() => setShowAapOauthToken(!showAapOauthToken)}>{showAapOauthToken ? 'Hide' : 'Show'}</Button>
+                        </div>
+                      </FormGroup>
+                    </GridItem>
+
+                    <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Admin Password"><TextInput type="password" value={data.aap.admin_password} onChange={(_, v) => set('aap.admin_password', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Vault Password"><TextInput type="password" value={data.aap.vault_password} onChange={(_, v) => set('aap.vault_password', v)} /></FormGroup></GridItem>
+                  </Grid>
+                </>
+              )}
+            </CardBody>
+          </Card>
+
+          <br />
+
+          <Card style={cardStyle}>
+            <CardBody>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+                <Title headingLevel="h2">ADO Bootstrap Console</Title>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Button
+                    variant="primary"
+                    onClick={runBootstrapInsideContainer}
+                    style={{ borderRadius: '18px', fontWeight: 600 }}
+                  >
+                    ⊕ Run Bootstrap
+                  </Button>
+
+                  <select
+                    value={data.ansible.verbosity}
+                    onChange={e => set('ansible.verbosity', Number(e.target.value))}
+                    style={selectStyle}
+                  >
+                    {verbosityOptions.map(option => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  <Dropdown
+                    isOpen={actionsOpen}
+                    onOpenChange={(open) => setActionsOpen(open)}
+                    toggle={(toggleRef) => (
+                      <MenuToggle
+                        ref={toggleRef}
+                        onClick={() => setActionsOpen(!actionsOpen)}
+                      >
+                        Actions
+                      </MenuToggle>
+                    )}
+                  >
+                    <DropdownList>
+                      <DropdownItem onClick={previewJson}>Preview JSON</DropdownItem>
+                      <DropdownItem onClick={downloadJson}>Download JSON</DropdownItem>
+                      <DropdownItem onClick={resetOutput}>Reset</DropdownItem>
+                    </DropdownList>
+                  </Dropdown>
+
+                  <Tooltip content={showRawOutput ? 'Show highlighted output' : 'Show raw output'}>
+                    <Button variant="plain" aria-label="Raw or highlighted output" onClick={toggleRawOutput} style={{ fontSize: '18px' }}>
+                      ↗
+                    </Button>
+                  </Tooltip>
+
+                  <Tooltip content={activeTab === 'events' ? 'Download events log' : 'Download Ansible run log'}>
+                    <Button variant="plain" aria-label="Download log" onClick={downloadLog} style={{ fontSize: '18px' }}>
+                      ⇩
+                    </Button>
+                  </Tooltip>
+                </div>
+              </div>
+
+              <div style={{ marginTop: '12px' }}>
+                <Tabs activeKey={activeTab} onSelect={(_, key) => setActiveTab(key)}>
+                  <Tab eventKey="logs" title="Logs" />
+                  <Tab eventKey="events" title="Events" />
+                </Tabs>
+              </div>
+
+              <div
+                ref={outputRef}
+                style={{
+                  height: '650px',
+                  overflowY: 'auto',
+                  backgroundColor: '#151515',
+                  color: '#f0f0f0',
+                  padding: '14px',
+                  fontFamily: 'monospace',
+                  whiteSpace: 'pre-wrap',
+                  borderRadius: '0 0 6px 6px',
+                  border: '1px solid #3c3c3c',
+                  borderTop: 'none',
+                  fontSize: '13px',
+                  lineHeight: '1.45'
+                }}
+              >
+                {activeTab === 'logs' ? renderOutput() : renderEvents()}
+              </div>
+            </CardBody>
+          </Card>
+        </Form>
+        </div>
+      </PageSection>
+    </Page>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App />);
