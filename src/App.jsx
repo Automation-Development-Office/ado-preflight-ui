@@ -371,9 +371,11 @@ function App() {
   const [showGitToken, setShowGitToken] = useState(false);
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
+  const [importStatus, setImportStatus] = useState('');
   const [runFinished, setRunFinished] = useState(false);
   const [showRawOutput, setShowRawOutput] = useState(false);
   const outputRef = useRef(null);
+  const importFileRef = useRef(null);
 
   const isDark = theme === 'dark';
 
@@ -602,6 +604,8 @@ function App() {
     });
   };
 
+  const groupComponents = ['openshift', 'rhel', 'patching', 'provision'];
+
   const selectedComponentAppsFrom = source => {
     if (Array.isArray(source.selected_component_apps) && source.selected_component_apps.length > 0) {
       return [...new Set(source.selected_component_apps)];
@@ -632,6 +636,128 @@ function App() {
     });
 
     return [...new Set(out.filter(Boolean))];
+  };
+
+  const deepMerge = (baseValue, incomingValue) => {
+    if (incomingValue === undefined) {
+      return Array.isArray(baseValue) ? [...baseValue] : baseValue;
+    }
+
+    if (Array.isArray(incomingValue)) {
+      return [...incomingValue];
+    }
+
+    if (
+      incomingValue &&
+      typeof incomingValue === 'object' &&
+      baseValue &&
+      typeof baseValue === 'object' &&
+      !Array.isArray(baseValue)
+    ) {
+      const merged = { ...baseValue };
+
+      Object.entries(incomingValue).forEach(([key, value]) => {
+        merged[key] = deepMerge(baseValue[key], value);
+      });
+
+      return merged;
+    }
+
+    return incomingValue;
+  };
+
+  const normalizeImportedPreflight = imported => {
+    if (!imported || typeof imported !== 'object' || Array.isArray(imported)) {
+      throw new Error('Uploaded file must contain a JSON object.');
+    }
+
+    const normalizedInput = { ...imported };
+
+    if (!Array.isArray(normalizedInput.components) || normalizedInput.components.length === 0) {
+      if (Array.isArray(normalizedInput.platform) && normalizedInput.platform.length > 0) {
+        normalizedInput.components = [...normalizedInput.platform];
+      } else if (normalizedInput.component) {
+        normalizedInput.components = [normalizedInput.component];
+      } else if (Array.isArray(normalizedInput.selected_component_apps) && normalizedInput.selected_component_apps.length > 0) {
+        normalizedInput.components = [...normalizedInput.selected_component_apps];
+      }
+    }
+
+    const merged = deepMerge(defaults, normalizedInput);
+
+    if (!Array.isArray(merged.components) || merged.components.length === 0) {
+      merged.components = ['rhel'];
+    }
+
+    merged.components = [...new Set(merged.components.filter(Boolean))];
+    merged.component = merged.components.includes('all') ? 'all' : merged.components[0];
+
+    if (!merged.component_apps) merged.component_apps = {};
+    groupComponents.forEach(group => {
+      if (!Array.isArray(merged.component_apps[group])) {
+        merged.component_apps[group] = [];
+      }
+    });
+
+    if (!merged.component_config) merged.component_config = {};
+    if (!merged.component_options) merged.component_options = {};
+    if (!merged.aap) merged.aap = {};
+    if (!Array.isArray(merged.aap.additional_credentials)) merged.aap.additional_credentials = [];
+    merged.aap.additional_credentials = merged.aap.additional_credentials.map((credential, index) => ({
+      ...credential,
+      id: credential.id || `imported-credential-${index + 1}`
+    }));
+    merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
+
+    if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
+    if (!merged.git) merged.git = { ...defaults.git };
+    if (!merged.ansible) merged.ansible = { ...defaults.ansible };
+    if (!merged.collections) merged.collections = { ...defaults.collections };
+    if (!merged.tools) merged.tools = { ...defaults.tools };
+    if (!merged.jira) merged.jira = { ...defaults.jira };
+    merged.jira.enabled = merged.components.includes('all') || merged.components.includes('jira') || merged.jira.enabled === true;
+
+    return merged;
+  };
+
+  const selectImportedConfigPanel = importedData => {
+    const selectedApps = selectedComponentAppsFrom(importedData);
+    const nextPanel = selectedApps[0] || importedData.components?.[0] || 'all';
+
+    setActiveConfigPanel(nextPanel);
+    setActiveConfigTab(nextPanel);
+    setAapOpen(importedData.aap?.enabled !== false);
+    setOpenshiftOpen(importedData.components.includes('all') || importedData.components.includes('openshift'));
+    setRhelOpen(importedData.components.includes('all') || importedData.components.includes('rhel'));
+    setPatchingOpen(importedData.components.includes('all') || importedData.components.includes('patching'));
+    setProvisionOpen(importedData.components.includes('all') || importedData.components.includes('provision'));
+    setActiveAapCredentialTab(importedData.aap?.additional_credentials?.[0]?.id || '');
+  };
+
+  const importJsonFile = async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const imported = JSON.parse(text);
+      const importedData = normalizeImportedPreflight(imported);
+
+      setData(importedData);
+      selectImportedConfigPanel(importedData);
+      setImportStatus(`Loaded ${file.name}`);
+      setPreview(JSON.stringify(importedData, null, 2));
+      setActiveTab('logs');
+      setRunFinished(false);
+      setShowRawOutput(false);
+      setYamlDraft('');
+      setYamlError('');
+      setShowVaultYaml(false);
+    } catch (err) {
+      setImportStatus(`Import failed: ${err.message}`);
+    } finally {
+      event.target.value = '';
+    }
   };
 
   const buildPreflightPayload = () => {
@@ -711,8 +837,6 @@ function App() {
     set('aap.enabled', value);
     setAapOpen(value);
   };
-
-  const groupComponents = ['openshift', 'rhel', 'patching', 'provision'];
 
   const isStandaloneDisabled = () => false;
 
@@ -842,6 +966,7 @@ function App() {
     setYamlDraft('');
     setYamlError('');
     setShowVaultYaml(false);
+    setImportStatus('');
   };
 
   const previewJson = () => {
@@ -2975,7 +3100,28 @@ ${vaultYaml}
         <Form>
           <Card style={cardStyle}>
             <CardBody>
-              <Title headingLevel="h2">Core Environment Information</Title>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                <div>
+                  <Title headingLevel="h2">Core Environment Information</Title>
+                  {importStatus && (
+                    <div style={{ color: importStatus.startsWith('Import failed') ? '#c9190b' : mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
+                      {importStatus}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <input
+                    ref={importFileRef}
+                    type="file"
+                    accept="application/json,.json"
+                    style={{ display: 'none' }}
+                    onChange={importJsonFile}
+                  />
+                  <Button variant="secondary" onClick={() => importFileRef.current?.click()}>
+                    Upload JSON
+                  </Button>
+                </div>
+              </div>
 
               <Grid hasGutter>
                 <GridItem span={6}>

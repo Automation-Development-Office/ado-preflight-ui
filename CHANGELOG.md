@@ -19,6 +19,7 @@ All notable changes to the ADO Preflight UI are documented in this file.
 - Added UI version, image, tag, pod, and Node runtime details to the collections dialog.
 - Added ADO Collection Documentation and ADO Preflight UI Documentation entries under the help menu.
 - Added markdown rendering for in-app documentation.
+- Added JSON import in Core Environment Information so saved preflight payloads can repopulate the UI.
 
 ### Changed
 
