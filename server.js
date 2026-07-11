@@ -11,6 +11,16 @@ const port = 8080;
 const workRoot = '/workspace';
 const collectionDir = '/opt/ado-collections';
 const uiDir = path.join(__dirname, 'dist');
+const packageJson = require('./package.json');
+
+const openshiftApps = [
+  'aap', 'acs', 'acm', 'cert_manager', 'console', 'devspaces',
+  'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka',
+  'oadp', 'openshift', 'pega', 'quay', 'rhbk'
+];
+const rhelApps = ['rhel', 'satellite', 'idm', 'aap', 'dirsrv', 'eck', 'gitlab', 'grafana', 'kafka', 'rhbk', 'compliance', 'stig'];
+const patchingApps = ['patching', 'satellite', 'idm'];
+const provisionApps = ['aws_instance', 'openshift_virt'];
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(uiDir));
@@ -56,6 +66,16 @@ function normalizeVerbosity(value) {
   return parsed;
 }
 
+function normalizeNonNegativeInt(value, fallback = 0) {
+  const parsed = Number.parseInt(value, 10);
+
+  if (Number.isNaN(parsed) || parsed < 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
 function verbosityFlag(level) {
   const normalized = normalizeVerbosity(level);
 
@@ -66,11 +86,192 @@ function verbosityFlag(level) {
   return `-${'v'.repeat(normalized)}`;
 }
 
+function buildAnsibleEnv(skipTlsVerify = false) {
+  const ansibleEnv = {
+    ...process.env,
+    ANSIBLE_FORCE_COLOR: 'false',
+    ANSIBLE_HOST_KEY_CHECKING: 'false',
+    ANSIBLE_COLLECTIONS_PATH: '/workspace/collections:/usr/share/ansible/collections',
+    ANSIBLE_COLLECTIONS_PATHS: '/workspace/collections:/usr/share/ansible/collections',
+    CONTROLLER_VERIFY_SSL: 'false',
+    TOWER_VERIFY_SSL: 'false',
+    REQUESTS_CA_BUNDLE: '',
+    CURL_CA_BUNDLE: '',
+    PYTHONHTTPSVERIFY: '0',
+    GIT_SSL_NO_VERIFY: 'true',
+    GIT_TERMINAL_PROMPT: '0'
+  };
+
+  if (skipTlsVerify) {
+    ansibleEnv.ANSIBLE_TLS_VERIFY = 'false';
+  }
+
+  return ansibleEnv;
+}
+
 function gitCredentialLine(repoUrl, token) {
   const u = new URL(repoUrl);
   const username = encodeURIComponent('oauth2');
   const password = encodeURIComponent(token);
   return `${u.protocol}//${username}:${password}@${u.host}\n`;
+}
+
+
+function normalizePreflightPayload(input) {
+  const data = JSON.parse(JSON.stringify(input || {}));
+
+  if (!Array.isArray(data.components) || data.components.length === 0) {
+    if (Array.isArray(data.platform) && data.platform.length > 0) {
+      data.components = data.platform.includes('all') ? ['all'] : data.platform;
+    } else if (data.component) {
+      data.components = [data.component];
+    } else {
+      data.components = ['all'];
+    }
+  }
+
+  // Do not set component=all.
+  // infra.ado.bootstrap_generate_env_vars treats preflight.component as an exact component list
+  // and will generate vars_all.yml instead of expanding platform=all.
+  if (data.components.includes('all')) {
+    delete data.component;
+    data.platform = ['all'];
+  } else {
+    data.component = data.components[0];
+    data.platform = data.components;
+  }
+
+  if (!data.git) data.git = {};
+  if (data.git.auto_push === undefined) data.git.auto_push = true;
+  if (data.git.token === undefined) data.git.token = '';
+
+  if (!data.vault) data.vault = {};
+  if (data.vault.encrypt === undefined) data.vault.encrypt = true;
+
+  if (!data.aap) data.aap = {};
+  if (data.aap.enabled === undefined) data.aap.enabled = true;
+  if (data.aap.skip_tls_verify === undefined) data.aap.skip_tls_verify = false;
+  if (!data.aap.organization) data.aap.organization = 'ADO';
+  if (!data.aap.inventory) data.aap.inventory = `${data.aap.organization}-inventory`;
+  if (!data.aap.project) data.aap.project = `${data.aap.organization}-project`;
+  if (!data.aap.vault_credential_name) data.aap.vault_credential_name = `${data.aap.organization}-vault`;
+  if (data.aap.hub_publish_ado_collection === undefined) data.aap.hub_publish_ado_collection = true;
+  if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = true;
+  data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
+  if (!Array.isArray(data.aap.additional_credentials)) data.aap.additional_credentials = [];
+  data.aap.additional_credentials = data.aap.additional_credentials.map(({ id, ...credential }) => credential);
+  if (!data.aap.machine_credential) data.aap.machine_credential = {};
+  if (!data.aap.machine_credential.name) data.aap.machine_credential.name = `${data.aap.organization}-machine`;
+  if (!data.aap.machine_credential.username) data.aap.machine_credential.username = 'cloud-user';
+  if (data.aap.machine_credential.ssh_key_data === undefined) data.aap.machine_credential.ssh_key_data = '';
+  if (data.aap.machine_credential.ssh_key_unlock === undefined) data.aap.machine_credential.ssh_key_unlock = '';
+  if (data.aap.machine_credential.become_method === undefined) data.aap.machine_credential.become_method = 'sudo';
+  if (!data.aap.machine_credential.become_username) data.aap.machine_credential.become_username = 'root';
+  if (!data.aap.git_branch) data.aap.git_branch = 'main';
+
+  if (!data.component_config) data.component_config = {};
+  if (!data.component_config.satellite) data.component_config.satellite = {};
+  if (data.component_config.satellite.service_account_username === undefined) {
+    data.component_config.satellite.service_account_username = '';
+  }
+  if (data.component_config.satellite.service_account_password === undefined) {
+    data.component_config.satellite.service_account_password = '';
+  }
+  if (data.component_config.satellite.admin_password === undefined) {
+    data.component_config.satellite.admin_password = '';
+  }
+  if (data.component_config.satellite.validate_certs === undefined) {
+    data.component_config.satellite.validate_certs = false;
+  }
+  if (data.component_config.satellite.dynamic_inventory_enabled === undefined) {
+    data.component_config.satellite.dynamic_inventory_enabled = false;
+  }
+  if (!data.component_config.satellite.credential_name) {
+    data.component_config.satellite.credential_name = 'ADO Satellite Service Account';
+  }
+  if (!data.component_config.satellite.inventory_source_name) {
+    data.component_config.satellite.inventory_source_name = 'ADO Satellite Dynamic Inventory';
+  }
+  if (data.component_config.satellite.inventory_overwrite === undefined) {
+    data.component_config.satellite.inventory_overwrite = true;
+  }
+  if (data.component_config.satellite.inventory_overwrite_vars === undefined) {
+    data.component_config.satellite.inventory_overwrite_vars = true;
+  }
+  if (data.component_config.satellite.inventory_update_on_launch === undefined) {
+    data.component_config.satellite.inventory_update_on_launch = true;
+  }
+  data.component_config.satellite.inventory_update_cache_timeout = normalizeNonNegativeInt(
+    data.component_config.satellite.inventory_update_cache_timeout,
+    0
+  );
+  data.component_config.satellite.inventory_verbosity = normalizeVerbosity(
+    data.component_config.satellite.inventory_verbosity
+  );
+  if (data.component_config.satellite.inventory_host_filter === undefined) {
+    data.component_config.satellite.inventory_host_filter = '';
+  }
+
+  if (!data.openshift) data.openshift = {};
+  if (data.openshift.skip_tls_verify === undefined) data.openshift.skip_tls_verify = true;
+  if (data.openshift.token === undefined) data.openshift.token = '';
+
+  return data;
+}
+
+function selectedComponentAppsFrom(data) {
+  if (Array.isArray(data.selected_component_apps) && data.selected_component_apps.length > 0) {
+    return [...new Set(data.selected_component_apps)];
+  }
+
+  if (Array.isArray(data.components) && data.components.includes('all')) {
+    return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...provisionApps, 'jira'])];
+  }
+
+  const out = [];
+  const groups = ['openshift', 'rhel', 'patching', 'provision'];
+
+  for (const component of data.components || []) {
+    if (groups.includes(component)) {
+      const selected = data.component_apps?.[component] || [];
+      out.push(...(selected.length > 0 ? selected : [component]));
+    } else {
+      out.push(component);
+    }
+  }
+
+  return [...new Set(out.filter(Boolean))];
+}
+
+function pruneSelectedPayload(data, selectedComponentApps) {
+  const allowedConfig = new Set(selectedComponentApps);
+  const componentConfig = {};
+  const componentOptions = {};
+
+  for (const [component, config] of Object.entries(data.component_config || {})) {
+    if (allowedConfig.has(component)) {
+      componentConfig[component] = config;
+    }
+  }
+
+  for (const [component, options] of Object.entries(data.component_options || {})) {
+    if (selectedComponentApps.includes(component)) {
+      componentOptions[component] = options;
+    }
+  }
+
+  data.component_config = componentConfig;
+  data.component_options = componentOptions;
+
+  if (!selectedComponentApps.includes('openshift')) {
+    delete data.openshift;
+  }
+
+  if (!selectedComponentApps.includes('jira') && data.jira) {
+    data.jira.enabled = false;
+  }
+
+  return data;
 }
 
 function configureGitCredentials(repoUrl, token) {
@@ -88,7 +289,7 @@ function configureGitCredentials(repoUrl, token) {
   event(`Configured Git credentials for ${new URL(repoUrl).host}`);
 }
 
-function runStream(cmd, args, cwd, eventLabel) {
+function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
   return new Promise((resolve) => {
     if (eventLabel) {
       event(eventLabel);
@@ -100,18 +301,8 @@ function runStream(cmd, args, cwd, eventLabel) {
       cwd,
       shell: false,
       env: {
-        ...process.env,
-        ANSIBLE_FORCE_COLOR: 'false',
-        ANSIBLE_HOST_KEY_CHECKING: 'false',
-        ANSIBLE_COLLECTIONS_PATH: '/workspace/collections:/usr/share/ansible/collections',
-        ANSIBLE_COLLECTIONS_PATHS: '/workspace/collections:/usr/share/ansible/collections',
-        CONTROLLER_VERIFY_SSL: 'false',
-        TOWER_VERIFY_SSL: 'false',
-        REQUESTS_CA_BUNDLE: '',
-        CURL_CA_BUNDLE: '',
-        PYTHONHTTPSVERIFY: '0',
-        GIT_SSL_NO_VERIFY: 'true',
-        GIT_TERMINAL_PROMPT: '0'
+        ...buildAnsibleEnv(),
+        ...envOverrides
       }
     });
 
@@ -141,109 +332,113 @@ function writeIfMissing(filePath, content) {
   }
 }
 
+function writeAlways(filePath, content) {
+  fs.writeFileSync(filePath, content);
+  append(`wrote:   ${filePath}\n`);
+  event(`Wrote starter file ${filePath}`);
+}
+
 function ensureStarterFiles(repoDir, envName) {
   event('Ensuring required starter files exist');
   append('\n=== Ensuring required starter files exist ===\n');
 
-  writeIfMissing(path.join(repoDir, 'run-ado-scaffolding.yml'), `---
-- name: Generate env files, playbooks, and AAP config files
-  ansible.builtin.import_playbook: 00-controller-bootstrap.yml
+  writeAlways(path.join(repoDir, 'run-ado-scaffolding.yml'), `---
+- name: Generate Bootstrap Repo and Configure AAP
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
   vars:
+    env: "{{ env | default('prod') }}"
+
     generate_env_vars: true
     generate_env_vars_force: true
+    bootstrap_generate_env_vars_force: true
     generate_env_vars_use_aap: true
+    generate_env_vars_encrypt_vault_files: true
+    bootstrap_generate_env_vars_encrypt_vault_files: true
+    bootstrap_generate_env_vars_vault_password_file: "{{ vault_password_file | default('.vault_pass') }}"
+
     generate_playbooks: true
     generate_aap_configs: true
-    apply_aap_configs: false
-
-- name: Commit and push generated repo when enabled
-  hosts: localhost
-  gather_facts: false
-  connection: local
-  tasks:
-    - name: Commit and push generated repo
-      ansible.builtin.shell: |
-        set -e
-        git config user.email "{{ generate_playbook_repo_git_email | default('ado-preflight@example.com') }}"
-        git config user.name "{{ generate_playbook_repo_git_name | default('ADO Preflight UI') }}"
-        git config http.sslVerify false
-        git add .
-        if git diff --cached --quiet; then
-          echo "No generated changes to commit."
-        else
-          git commit -m "{{ generate_playbook_repo_git_commit_message | default('Generate ADO bootstrap content') }}"
-          GIT_SSL_NO_VERIFY=true git -c http.sslVerify=false push origin HEAD
-        fi
-      args:
-        chdir: "{{ playbook_dir }}"
-      environment:
-        GIT_SSL_NO_VERIFY: "true"
-      when: generate_playbook_repo_git_push | default(false) | bool
-
-    - name: Pause for manual Git push
-      ansible.builtin.pause:
-        prompt: "Playbooks, configs, and vars are generated. Push to Git now, then press ENTER."
-      when:
-        - generate_playbook_repo_pause_for_push | default(true) | bool
-        - not (generate_playbook_repo_git_push | default(false) | bool)
-
-- name: Apply generated AAP config
-  ansible.builtin.import_playbook: 00-controller-bootstrap.yml
-  vars:
-    generate_env_vars: false
-    generate_playbooks: false
-    generate_aap_configs: false
     apply_aap_configs: true
-`);
 
-  writeIfMissing(path.join(repoDir, '00-controller-bootstrap.yml'), `---
-- name: Bootstrap generated playbook repo and AAP controller config
-  hosts: localhost
-  gather_facts: false
-  connection: local
+    bootstrap_generate_playbook_repo_git_mode: push
+    bootstrap_generate_playbook_repo_git_url: "{{ generate_playbook_repo_git_url }}"
+    bootstrap_generate_playbook_repo_git_branch: "{{ generate_playbook_repo_git_branch | default(aap_git_branch | default('main')) }}"
+    bootstrap_generate_playbook_repo_git_message: "Generate ADO bootstrap content"
 
   vars_files:
-    - group_vars/all/{{ env }}/aap_config_vars.yml
-    - group_vars/all/{{ env }}/aap_vault.yml
-
-  vars:
-    generate_env_vars: false
-    generate_playbooks: false
-    generate_aap_configs: true
-    apply_aap_configs: true
-
-    target_platform: "{{ component | default('all') }}"
-    generate_playbook_repo_component: "{{ generate_env_vars_component | default(component | default('all')) }}"
-
-    playbook_categories:
-      - all
-
-    playbook_apps:
-      - all
+    - "group_vars/all/{{ env }}/aap_config_vars.yml"
+    - "group_vars/all/{{ env }}/aap_vault.yml"
+    - "group_vars/all/{{ env }}/vault_machine_cred.yml"
 
   roles:
-    - role: ado.bootstrap.controller_bootstrap
+    - role: infra.ado.bootstrap_controller
 `);
 
-  writeIfMissing(path.join(repoDir, 'inventory'), `localhost ansible_connection=local\n`);
+  writeAlways(path.join(repoDir, '00-controller-bootstrap.yml'), `---
+- name: Bootstrap Controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
 
-  writeIfMissing(path.join(repoDir, 'ansible.cfg'), `[defaults]
-jinja2_native = True
+  vars:
+    env: "{{ env | default('prod') }}"
+
+    generate_env_vars: "{{ generate_env_vars | default(true) }}"
+    generate_playbooks: "{{ generate_playbooks | default(true) }}"
+    generate_aap_configs: "{{ generate_aap_configs | default(true) }}"
+    apply_aap_configs: "{{ apply_aap_configs | default(true) }}"
+
+  roles:
+    - role: infra.ado.bootstrap_controller
 `);
 
-  const varsDir = path.join(repoDir, 'group_vars', 'all', envName);
-  fs.mkdirSync(varsDir, { recursive: true });
-
-  writeIfMissing(path.join(varsDir, 'aap_config_vars.yml'), `---
-# Placeholder created by ADO Preflight UI.
+  writeAlways(path.join(repoDir, 'inventory'), `localhost ansible_connection=local
 `);
 
-  writeIfMissing(path.join(varsDir, 'aap_vault.yml'), `---
-# Placeholder created by ADO Preflight UI.
+  writeAlways(path.join(repoDir, 'ansible.cfg'), `[defaults]
+host_key_checking = False
+retry_files_enabled = False
+stdout_callback = default
+interpreter_python = auto_silent
+collections_paths = ./collections:/workspace/collections:/usr/share/ansible/collections
 `);
 }
 
-app.get('/api/logs', (req, res) => {
+function readTextFromCandidates(candidates) {
+  const checked = candidates.filter(Boolean);
+  const filePath = checked.find(candidate => fs.existsSync(candidate));
+
+  if (!filePath) {
+    return { text: '', filePath: '', checked };
+  }
+
+  return {
+    text: fs.readFileSync(filePath, 'utf8'),
+    filePath,
+    checked
+  };
+}
+
+function documentationFallback(title, checkedPaths) {
+  return `# ${title}
+
+Documentation was not found in the running container image.
+
+The UI checked these paths:
+
+${checkedPaths.map(candidate => `- \`${candidate}\``).join('\n')}
+
+Rebuild the UI container after copying the documentation into the image, or set the matching environment variable to the README path:
+
+- \`ADO_PREFLIGHT_UI_README\` for UI documentation
+- \`ADO_COLLECTION_README\` for ADO collection documentation
+`;
+}
+
+app.get('/api/logs' , (req, res) => {
   res.type('text/plain').send(latestLog);
 });
 
@@ -254,6 +449,70 @@ app.get('/api/events', (req, res) => {
 app.get('/api/logs/raw', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="ado-preflight-run.log"');
   res.type('text/plain').send(latestLog);
+});
+
+app.get('/api/ui-version', (req, res) => {
+  res.json({
+    version: process.env.ADO_PREFLIGHT_UI_VERSION || packageJson.version || 'unknown',
+    image: process.env.ADO_PREFLIGHT_UI_IMAGE || process.env.IMAGE_NAME || 'ado-preflight-ui',
+    imageTag: process.env.ADO_PREFLIGHT_UI_IMAGE_TAG || process.env.IMAGE_TAG || packageJson.version || 'latest',
+    podName: process.env.HOSTNAME || 'unknown',
+    nodeVersion: process.version
+  });
+});
+
+app.get('/api/readme', (req, res) => {
+  res.redirect('/api/readme/ui');
+});
+
+app.get('/api/readme/ui', (req, res) => {
+  const result = readTextFromCandidates([
+    process.env.ADO_PREFLIGHT_UI_README,
+    path.join(__dirname, 'README.md'),
+    path.join(__dirname, '..', 'README.md'),
+    path.join(process.cwd(), 'README.md'),
+    path.join('/opt', 'app-root', 'src', 'README.md'),
+    path.join('/opt', 'app-root', 'README.md'),
+    path.join('/workspace', 'ado-preflight-ui', 'README.md')
+  ]);
+
+  if (!result.text) {
+    event(`UI README not found in: ${result.checked.join(', ')}`);
+    res.type('text/plain').send(documentationFallback('ADO Preflight UI Documentation', result.checked));
+    return;
+  }
+
+  res.type('text/plain').send(result.text);
+});
+
+app.get('/api/readme/ado', (req, res) => {
+  const result = readTextFromCandidates([
+    process.env.ADO_COLLECTION_README,
+    path.join(__dirname, '..', 'ado', 'README.md'),
+    path.join(__dirname, '..', 'ado', 'README.me'),
+    path.join(__dirname, 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
+    path.join(__dirname, '..', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
+    path.join(process.cwd(), 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
+    path.join('/workspace', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
+    path.join('/usr', 'share', 'ansible', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
+    path.join('/opt', 'app-root', 'src', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
+    path.join('/opt', 'app-root', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
+    path.join('/opt', 'ado-collections', 'extracted', 'README.md'),
+    path.join('/opt', 'ado-collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
+    path.join('/opt', 'ado-collections', 'README.md'),
+    path.join('/opt', 'app-root', 'ado', 'README.md'),
+    path.join('/opt', 'app-root', 'ado', 'README.me'),
+    path.join('/workspace', 'README.md'),
+    path.join(process.cwd(), 'README.md')
+  ]);
+
+  if (!result.text) {
+    event(`ADO collection README not found in: ${result.checked.join(', ')}`);
+    res.type('text/plain').send(documentationFallback('ADO Collection Documentation', result.checked));
+    return;
+  }
+
+  res.type('text/plain').send(result.text);
 });
 
 app.get('/api/collection-versions', (req, res) => {
@@ -288,7 +547,7 @@ app.post('/api/bootstrap', async (req, res) => {
 
   event('Bootstrap started');
 
-  const data = req.body;
+  const data = normalizePreflightPayload(req.body);
   const envName = data.environment || 'prod';
   const repoUrl = data?.aap?.git_url;
 
@@ -304,38 +563,30 @@ app.post('/api/bootstrap', async (req, res) => {
       ? data.components.join(',')
       : (data.component || 'all');
 
-  const selectedComponentApps = (() => {
-    if (Array.isArray(data.components) && data.components.includes('all')) {
-      return ['all'];
-    }
-
-    const out = [];
-    const expandableGroups = ['openshift', 'rhel', 'patching', 'provision'];
-
-    for (const c of data.components || []) {
-      if (expandableGroups.includes(c)) {
-        out.push(...(data.component_apps?.[c] || []));
-      } else {
-        out.push(c);
-      }
-    }
-
-    return [...new Set(out)];
-  })();
+  const selectedComponentApps = selectedComponentAppsFrom(data);
+  data.selected_component_apps = selectedComponentApps;
+  pruneSelectedPayload(data, selectedComponentApps);
 
   const autoGitPush = data?.git?.auto_push !== false;
   const ansibleVerbosity = normalizeVerbosity(data?.ansible?.verbosity ?? data?.verbosity ?? 0);
   const ansibleVerbosityFlag = verbosityFlag(ansibleVerbosity);
+  const skipTlsVerify = data?.aap?.skip_tls_verify === true;
+  const encryptVaultFiles = data?.vault?.encrypt !== false;
+  const bootstrapEnv = buildAnsibleEnv(skipTlsVerify);
 
   append(`\nSelected Components: ${selectedComponents}\n`);
   append(`Selected Component Apps: ${selectedComponentApps.join(',')}\n`);
   append(`Auto Git Push: ${autoGitPush}\n`);
   append(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}\n`);
+  append(`Skip TLS Verification: ${skipTlsVerify}\n`);
+  append(`Encrypt Vault Files: ${encryptVaultFiles}\n`);
 
   event(`Selected components: ${selectedComponents}`);
   event(`Selected component apps: ${selectedComponentApps.join(',')}`);
   event(`Auto Git Push: ${autoGitPush}`);
   event(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}`);
+  event(`Skip TLS Verification: ${skipTlsVerify}`);
+  event(`Encrypt vault files: ${encryptVaultFiles}`);
 
   configureGitCredentials(repoUrl, gitToken);
 
@@ -360,12 +611,24 @@ echo "=== Available Collection Tarballs ==="
 ls -l ${collectionDir} || true
 
 echo ""
-echo "=== Installing ADO Collections ==="
-ansible-galaxy collection install ${collectionDir}/ado-*.tar.gz -p /workspace/collections --force
+echo "=== Installing ADO Collection ==="
+if ls ${collectionDir}/infra-ado-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install ${collectionDir}/infra-ado-*.tar.gz -p /workspace/collections --force
+else
+  ansible-galaxy collection install ${collectionDir}/ado-*.tar.gz -p /workspace/collections --force
+fi
 
 echo ""
 echo "=== Installing ansible.controller Collection ==="
 ansible-galaxy collection install ${collectionDir}/ansible-controller-*.tar.gz -p /workspace/collections --force
+
+echo ""
+echo "=== Installing awx.awx Collection ==="
+if ls ${collectionDir}/awx-awx-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install ${collectionDir}/awx-awx-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  echo "awx-awx tarball not found; skipping"
+fi
 
 echo ""
 echo "=== Installing infra.controller_configuration Collection ==="
@@ -374,6 +637,10 @@ ansible-galaxy collection install ${collectionDir}/infra-controller_configuratio
 echo ""
 echo "=== Installing infra.aap_configuration Collection ==="
 ansible-galaxy collection install ${collectionDir}/infra-aap_configuration-*.tar.gz -p /workspace/collections --force --no-deps
+
+echo ""
+echo "=== Installing community.general Collection ==="
+ansible-galaxy collection install ${collectionDir}/community-general-*.tar.gz -p /workspace/collections --force --no-deps
 
 echo ""
 echo "=== Installed Collections ==="
@@ -394,6 +661,20 @@ ansible-galaxy collection list
 
   await runStream(
     'git',
+    ['config', '--global', 'user.email', data?.git?.email || 'ado-preflight@example.local'],
+    workRoot,
+    'Configuring Git user email'
+  );
+
+  await runStream(
+    'git',
+    ['config', '--global', 'user.name', data?.git?.name || 'ADO Preflight UI'],
+    workRoot,
+    'Configuring Git user name'
+  );
+
+  await runStream(
+    'git',
     ['config', '--global', 'credential.helper', 'store'],
     workRoot,
     'Configuring Git credential helper'
@@ -408,7 +689,7 @@ ansible-galaxy collection list
 
   const cloneCode = await runStream(
     'git',
-    ['-c', 'http.sslVerify=false', 'clone', repoUrl, repoDir],
+    ['-c', 'http.sslVerify=false', 'clone', '--branch', data.aap.git_branch, '--single-branch', repoUrl, repoDir],
     workRoot,
     'Cloning Git repository'
   );
@@ -430,19 +711,28 @@ ansible-galaxy collection list
   event(`Writing preflight JSON ${preflightFile}`);
   fs.writeFileSync(preflightPath, JSON.stringify(data, null, 2));
 
-  event('Writing ado-extra-vars.json');
+  event('Writing ado-extra-vars.json for debug only; not passed to Ansible');
   fs.writeFileSync(extraVarsPath, JSON.stringify({
     component: selectedComponents,
+    components: data.components || ['all'],
+    component_apps: data.component_apps || {},
+    selected_component_apps: selectedComponentApps,
     generate_env_vars_component: selectedComponents,
     generate_playbook_repo_component: selectedComponents,
+    generate_aap_config_component: selectedComponents,
     generate_env_vars_components: selectedComponentApps,
     generate_playbook_repo_components: selectedComponentApps,
     generate_aap_config_components: selectedComponentApps,
     component_config: data.component_config || {},
     component_vars: data.component_config || {},
+    component_options: data.component_options || {},
+    machine_credential: data.aap.machine_credential || {},
     git_auto_push: autoGitPush,
+    skip_tls_verify: skipTlsVerify,
+    ansible_tls_verify: skipTlsVerify ? 'false' : 'true',
     ansible_verbosity: ansibleVerbosity,
-    ansible_verbosity_flag: ansibleVerbosityFlag
+    ansible_verbosity_flag: ansibleVerbosityFlag,
+    encrypt_vault_files: encryptVaultFiles
   }, null, 2));
 
   event('Writing vault password file');
@@ -454,9 +744,9 @@ ansible-galaxy collection list
   const code = await runStream('bash', ['-lc', `
 export ANSIBLE_COLLECTIONS_PATH=/workspace/collections:/usr/share/ansible/collections
 export ANSIBLE_COLLECTIONS_PATHS=/workspace/collections:/usr/share/ansible/collections
-export ANSIBLE_ROLES_PATH=/workspace/bootstrap-sample/roles:/workspace/collections/ansible_collections/infra/aap_configuration/roles:/usr/share/ansible/roles:/etc/ansible/roles
 export ANSIBLE_HOST_KEY_CHECKING=false
 export ANSIBLE_FORCE_COLOR=false
+${skipTlsVerify ? 'export ANSIBLE_TLS_VERIFY=false' : ''}
 export CONTROLLER_VERIFY_SSL=false
 export TOWER_VERIFY_SSL=false
 export REQUESTS_CA_BUNDLE=
@@ -469,26 +759,16 @@ cd ${repoDir}
 git config http.sslVerify false || true
 
 echo ""
-echo "=== Effective extra vars ==="
-cat ado-extra-vars.json
+echo "=== Remove old generated bootstrap content ==="
+rm -rf group_vars playbooks configs
+
+echo ""
+echo "=== Effective preflight JSON ==="
+cat ${preflightFile}
 
 echo ""
 echo "=== Starter files check ==="
 ls -l run-ado-scaffolding.yml 00-controller-bootstrap.yml inventory ansible.cfg
-ls -l group_vars/all/${envName}/aap_config_vars.yml group_vars/all/${envName}/aap_vault.yml
-
-echo ""
-echo "=== Copy infra.aap_configuration roles into repo roles path ==="
-mkdir -p /workspace/bootstrap-sample/roles
-
-for role_path in /workspace/collections/ansible_collections/infra/aap_configuration/roles/*; do
-  role_name="$(basename "$role_path")"
-  fq_role="/workspace/bootstrap-sample/roles/infra.aap_configuration.\${role_name}"
-
-  rm -rf "\${fq_role}"
-  mkdir -p "\${fq_role}"
-  cp -a "\${role_path}/." "\${fq_role}/"
-done
 
 echo ""
 echo "=== Run bootstrap scaffolding ==="
@@ -498,20 +778,28 @@ ansible-playbook \\
   run-ado-scaffolding.yml \\
   ${ansibleVerbosityFlag} \\
   -e preflight_json=${preflightFile} \\
-  -e @ado-extra-vars.json \\
   -e env=${envName} \\
   -e controller_validate_certs=false \\
   -e controller_verify_ssl=false \\
   -e tower_verify_ssl=false \\
   -e validate_certs=false \\
   -e verify_ssl=false \\
+  -e skip_tls_verify=${skipTlsVerify ? 'true' : 'false'} \\
+  -e ansible_tls_verify=${skipTlsVerify ? 'false' : 'true'} \\
   -e generate_playbook_repo_pause_for_push=false \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_commit=${autoGitPush ? 'true' : 'false'} \\
+  -e generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\
+  -e generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
+  -e bootstrap_generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e generate_playbook_repo_git_commit_message="Generate ADO bootstrap content for ${envName}" \\
-  -e generate_env_vars_encrypt_vault_files=false \\
+  -e bootstrap_generate_env_vars_force=true \\
+  -e generate_env_vars_force=true \\
+  -e generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
+  -e bootstrap_generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
+  -e bootstrap_generate_env_vars_vault_password_file=.vault_pass \\
   --vault-password-file .vault_pass
-`], workRoot, 'Running ansible-playbook');
+`], workRoot, 'Running ansible-playbook', bootstrapEnv);
 
   event(`Bootstrap finished exitCode=${code}`);
 
@@ -525,6 +813,8 @@ ansible-playbook \\
     autoGitPush,
     ansibleVerbosity,
     ansibleVerbosityFlag,
+    skipTlsVerify,
+    encryptVaultFiles,
     gitTokenProvided: Boolean(gitToken)
   });
 });

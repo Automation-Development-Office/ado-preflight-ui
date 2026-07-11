@@ -111,13 +111,13 @@ const defaults = {
     token: ''
   },
 
-  components: ['rhel'],
+  components: ['all'],
 
   component_apps: {
-    openshift: [],
-    rhel: [],
-    patching: [],
-    provision: []
+    openshift: [...openshiftApps],
+    rhel: [...rhelApps],
+    patching: [...patchingApps],
+    provision: [...provisionApps]
   },
 
   component_config: {
@@ -131,39 +131,13 @@ const defaults = {
       hostname: '',
       storage: '',
       realm: '',
-      client: '',
-      idp_name: '',
-      idp_alias: '',
-      idp_provider: 'oidc',
-      federation_name: '',
-      federation_provider: 'ldap',
-      federation_ldap_url: '',
-      federation_bind_dn: '',
-      federation_bind_password: '',
-      group_mapper_name: '',
-      group_mapper_claim: 'groups',
-      client_scope_name: '',
-      client_scope_protocol: 'openid-connect',
-      client_mapper_name: '',
-      client_mapper_claim: ''
+      client: ''
     },
     satellite: {
       hostname: '',
+      storage: '',
       organization: '',
-      activation_key: '',
-      service_account_username: '',
-      service_account_password: '',
-      admin_password: '',
-      validate_certs: false,
-      dynamic_inventory_enabled: false,
-      credential_name: 'ADO Satellite Service Account',
-      inventory_source_name: 'ADO Satellite Dynamic Inventory',
-      inventory_overwrite: true,
-      inventory_overwrite_vars: true,
-      inventory_update_on_launch: true,
-      inventory_update_cache_timeout: 0,
-      inventory_verbosity: 0,
-      inventory_host_filter: ''
+      activation_key: ''
     },
     idm: {
       hostname: '',
@@ -190,15 +164,18 @@ const defaults = {
     quay: { hostname: '', storage: '' },
     rhel: {
       hostname: '',
+      storage: '',
       compliance_profile: 'PCI-DSS',
       stig_profile: 'RHEL 9 STIG'
     },
     compliance: {
       hostname: '',
+      storage: '',
       profile: 'PCI-DSS'
     },
     stig: {
       hostname: '',
+      storage: '',
       profile: 'RHEL 9 STIG'
     },
     elastic: { hostname: '', storage: '' },
@@ -241,25 +218,13 @@ const defaults = {
     enabled: true,
     hostname: 'https://aap-aap.apps.ocp.prod.rhlab',
     version: '26',
-    organization: 'ADO',
-    inventory: 'ADO-inventory',
-    project: 'ADO-project',
+    organization: 'ado-lab',
+    inventory: 'ado-inventory',
+    project: 'ado-project',
     git_url: 'https://gitlab-git.apps.ocp.prod.rhlab/redhat-lab/bootstrap-sample.git',
     git_branch: 'main',
     execution_environment: 'ee-supported-rhel9',
-    vault_credential_name: 'ADO-vault',
-    skip_tls_verify: false,
-    hub_publish_ado_collection: true,
-    hub_mark_ado_validated: true,
-    additional_credentials: [],
-    machine_credential: {
-      name: 'ADO-machine',
-      username: 'cloud-user',
-      ssh_key_data: '',
-      ssh_key_unlock: '',
-      become_method: 'sudo',
-      become_username: 'root'
-    },
+    vault_credential_name: 'ado-vault',
     oauth_token: '',
     admin_username: 'admin',
     admin_password: '',
@@ -269,7 +234,6 @@ const defaults = {
   openshift: {
     api_host: 'https://api.ocp.prod.rhlab:6443',
     apps_domain: 'apps.ocp.prod.rhlab',
-    skip_tls_verify: true,
     token: ''
   },
 
@@ -349,11 +313,6 @@ function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [theme, setTheme] = useState('light');
   const [collectionVersions, setCollectionVersions] = useState([]);
-  const [uiVersion, setUiVersion] = useState(null);
-  const [readmeMarkdown, setReadmeMarkdown] = useState('');
-  const [adoReadmeMarkdown, setAdoReadmeMarkdown] = useState('');
-  const [documentationOpen, setDocumentationOpen] = useState(false);
-  const [documentationType, setDocumentationType] = useState('ui');
   const [collectionsToolsOpen, setCollectionsToolsOpen] = useState(false);
   const [aapOpen, setAapOpen] = useState(true);
   const [openshiftOpen, setOpenshiftOpen] = useState(false);
@@ -364,13 +323,9 @@ function App() {
   const [activeConfigTab, setActiveConfigTab] = useState('all');
   const [showOpenShiftToken, setShowOpenShiftToken] = useState(false);
   const [showAapOauthToken, setShowAapOauthToken] = useState(false);
-  const [showMachineCredentialSecrets, setShowMachineCredentialSecrets] = useState(false);
-  const [showSatelliteSecrets, setShowSatelliteSecrets] = useState(false);
   const [showIdmSecrets, setShowIdmSecrets] = useState(false);
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
-  const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('hub');
-  const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
   const [runFinished, setRunFinished] = useState(false);
   const [showRawOutput, setShowRawOutput] = useState(false);
   const outputRef = useRef(null);
@@ -422,27 +377,6 @@ function App() {
       .then(r => r.json())
       .then(d => setCollectionVersions(d.collections || []))
       .catch(() => setCollectionVersions([]));
-
-    fetch('/api/ui-version')
-      .then(r => r.json())
-      .then(d => setUiVersion(d))
-      .catch(() => setUiVersion(null));
-
-    fetch('/api/readme/ui')
-      .then(r => {
-        if (!r.ok) throw new Error('UI README request failed');
-        return r.text();
-      })
-      .then(text => setReadmeMarkdown(text))
-      .catch(() => setReadmeMarkdown('# ADO Preflight UI documentation unavailable'));
-
-    fetch('/api/readme/ado')
-      .then(r => {
-        if (!r.ok) throw new Error('ADO README request failed');
-        return r.text();
-      })
-      .then(text => setAdoReadmeMarkdown(text))
-      .catch(() => setAdoReadmeMarkdown('# ADO Collection documentation unavailable'));
   }, []);
 
   useEffect(() => {
@@ -555,136 +489,14 @@ function App() {
     });
   };
 
-  const newCredentialId = () => `cred-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-  const credentialTabKey = (credential, index) => credential.id || `credential-${index}`;
-
-  const setAapHubValidated = value => {
-    setData(prev => {
-      const copy = JSON.parse(JSON.stringify(prev));
-      if (!copy.aap) copy.aap = {};
-      copy.aap.hub_publish_ado_collection = value;
-      copy.aap.hub_mark_ado_validated = value;
-      return copy;
-    });
-  };
-
-  const derivedAapNames = org => {
-    const prefix = (org || 'ADO').trim() || 'ADO';
-    return {
-      inventory: `${prefix}-inventory`,
-      project: `${prefix}-project`,
-      vault_credential_name: `${prefix}-vault`,
-      machine_credential_name: `${prefix}-machine`
-    };
-  };
-
-  const setAapOrganization = value => {
-    setData(prev => {
-      const copy = JSON.parse(JSON.stringify(prev));
-      const previous = copy.aap?.organization || 'ADO';
-      const oldNames = derivedAapNames(previous);
-      const newNames = derivedAapNames(value);
-
-      if (!copy.aap) copy.aap = {};
-      copy.aap.organization = value;
-      if (!copy.aap.inventory || copy.aap.inventory === oldNames.inventory) copy.aap.inventory = newNames.inventory;
-      if (!copy.aap.project || copy.aap.project === oldNames.project) copy.aap.project = newNames.project;
-      if (!copy.aap.vault_credential_name || copy.aap.vault_credential_name === oldNames.vault_credential_name) {
-        copy.aap.vault_credential_name = newNames.vault_credential_name;
-      }
-      if (!copy.aap.machine_credential) copy.aap.machine_credential = {};
-      if (!copy.aap.machine_credential.name || copy.aap.machine_credential.name === oldNames.machine_credential_name) {
-        copy.aap.machine_credential.name = newNames.machine_credential_name;
-      }
-
-      return copy;
-    });
-  };
-
-  const selectedComponentAppsFrom = source => {
-    if (Array.isArray(source.selected_component_apps) && source.selected_component_apps.length > 0) {
-      return [...new Set(source.selected_component_apps)];
-    }
-
-    if (Array.isArray(source.components) && source.components.includes('all')) {
-      return [
-        ...new Set([
-          ...openshiftApps,
-          ...rhelApps,
-          ...patchingApps,
-          ...provisionApps,
-          'jira'
-        ])
-      ];
-    }
-
-    const out = [];
-    const expandableGroups = ['openshift', 'rhel', 'patching', 'provision'];
-
-    (source.components || []).forEach(component => {
-      if (expandableGroups.includes(component)) {
-        const selected = source.component_apps?.[component] || [];
-        out.push(...(selected.length > 0 ? selected : [component]));
-      } else {
-        out.push(component);
-      }
-    });
-
-    return [...new Set(out.filter(Boolean))];
-  };
-
-  const buildPreflightPayload = () => {
-    const payload = JSON.parse(JSON.stringify(data));
-    const selectedApps = selectedComponentAppsFrom(payload);
-    const allowedConfig = new Set(selectedApps);
-    const selectedConfig = {};
-    const selectedOptions = {};
-
-    Object.entries(payload.component_config || {}).forEach(([component, config]) => {
-      if (allowedConfig.has(component)) {
-        selectedConfig[component] = config;
-      }
-    });
-
-    Object.entries(payload.component_options || {}).forEach(([component, options]) => {
-      if (selectedApps.includes(component)) {
-        selectedOptions[component] = options;
-      }
-    });
-
-    payload.selected_component_apps = selectedApps;
-    payload.component_config = selectedConfig;
-    payload.component_options = selectedOptions;
-    if (payload.aap) {
-      payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
-      payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
-        const { id, ...credentialPayload } = credential;
-        return credentialPayload;
-      });
-    }
-
-    if (!selectedApps.includes('openshift')) {
-      delete payload.openshift;
-    }
-
-    if (!selectedApps.includes('jira')) {
-      payload.jira = { ...(payload.jira || {}), enabled: false };
-    }
-
-    return payload;
-  };
-
   const ensureComponentConfig = component => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
 
       if (!copy.component_config) copy.component_config = {};
-      if (!copy.component_config[component]) copy.component_config[component] = { hostname: '' };
+      if (!copy.component_config[component]) copy.component_config[component] = { hostname: '', storage: '' };
       if (copy.component_config[component].hostname === undefined) copy.component_config[component].hostname = '';
-      if (!['rhel', 'satellite', 'compliance', 'stig'].includes(component) && copy.component_config[component].storage === undefined) {
-        copy.component_config[component].storage = '';
-      }
+      if (copy.component_config[component].storage === undefined) copy.component_config[component].storage = '';
 
       return copy;
     });
@@ -714,7 +526,11 @@ function App() {
 
   const groupComponents = ['openshift', 'rhel', 'patching', 'provision'];
 
-  const isStandaloneDisabled = () => false;
+  const isStandaloneDisabled = () => {
+    return data.components.includes('all') ||
+      data.components.includes('openshift') ||
+      data.components.includes('rhel');
+  };
 
   const toggleComponent = component => {
     setData(prev => {
@@ -729,9 +545,17 @@ function App() {
       } else if (groupComponents.includes(component)) {
         next = wasSelected ? [] : [component];
       } else {
-        next = wasSelected
-          ? current.filter(c => c !== component)
-          : [...current.filter(c => c !== 'all' && !groupComponents.includes(c)), component];
+        if (
+          current.includes('all') ||
+          current.includes('openshift') ||
+          current.includes('rhel')
+        ) {
+          next = current;
+        } else {
+          next = wasSelected
+            ? current.filter(c => c !== component)
+            : [...current.filter(c => !groupComponents.includes(c)), component];
+        }
       }
 
       copy.components = next;
@@ -810,12 +634,11 @@ function App() {
   };
 
   const downloadJson = () => {
-    const payload = buildPreflightPayload();
-    const name = payload.components.includes('all') ? 'all' : payload.components.join('-');
+    const name = data.components.includes('all') ? 'all' : data.components.join('-');
 
     downloadFile(
-      `ado-preflight-${payload.environment || 'env'}-${name}.json`,
-      JSON.stringify(payload, null, 2)
+      `ado-preflight-${data.environment || 'env'}-${name}.json`,
+      JSON.stringify(data, null, 2)
     );
 
     setActionsOpen(false);
@@ -845,7 +668,7 @@ function App() {
   };
 
   const previewJson = () => {
-    setPreview(JSON.stringify(buildPreflightPayload(), null, 2));
+    setPreview(JSON.stringify(data, null, 2));
     setActiveTab('logs');
     setActionsOpen(false);
   };
@@ -924,7 +747,7 @@ function App() {
       const response = await fetch('/api/bootstrap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPreflightPayload())
+        body: JSON.stringify(data)
       });
 
       const result = await response.json();
@@ -953,45 +776,23 @@ function App() {
       let color = '#f0f0f0';
       let fontWeight = 400;
 
-      const failedMatch = line.match(/failed=(\d+)/);
-      const unreachableMatch = line.match(/unreachable=(\d+)/);
-      const rescuedMatch = line.match(/rescued=(\d+)/);
-
-      const failedCount = failedMatch ? Number(failedMatch[1]) : 0;
-      const unreachableCount = unreachableMatch ? Number(unreachableMatch[1]) : 0;
-      const rescuedCount = rescuedMatch ? Number(rescuedMatch[1]) : 0;
-
-      const isRecapLine = /^\S+\s*:\s*ok=\d+/.test(line);
-      const hasHardFailure =
-        /FAILED!|fatal:|exit code [1-9]\d*|ERROR!/i.test(line) ||
-        failedCount > 0 ||
-        unreachableCount > 0;
-
-      if (isRecapLine) {
-        if (failedCount > 0 || unreachableCount > 0) {
-          color = '#ff6b6b';
-          fontWeight = 700;
-        } else if (rescuedCount > 0) {
-          color = '#ec7a08';
-          fontWeight = 700;
-        } else {
-          color = '#f0f0f0';
-          fontWeight = 600;
-        }
-      } else if (hasHardFailure) {
+      if (/FAILED!|fatal:|unreachable=|failed=[1-9]|exit code [1-9]|ERROR!/i.test(line)) {
         color = '#ff6b6b';
         fontWeight = 700;
       } else if (/WARNING:|\[WARNING\]/i.test(line)) {
         color = '#f0ab00';
         fontWeight = 700;
-      } else if (/^ok:|\bok: \[/.test(line)) {
+      } else if (/^ok:|\sok=|\bok: \[/.test(line)) {
         color = '#8bc34a';
         fontWeight = 600;
-      } else if (/^changed:|\bchanged: \[/.test(line)) {
+      } else if (/^changed:|\schanged=|\bchanged: \[/.test(line)) {
         color = '#73bcf7';
         fontWeight = 600;
-      } else if (/^skipping:|\bskipping: \[/.test(line)) {
+      } else if (/^skipping:|\sskipped=|\bskipping: \[/.test(line)) {
         color = '#b8bbbe';
+      } else if (/rescued=|\brescued:/.test(line)) {
+        color = '#ec7a08';
+        fontWeight = 600;
       } else if (/PLAY RECAP|PLAY \[/.test(line)) {
         color = '#2b9af3';
         fontWeight = 700;
@@ -1097,105 +898,6 @@ function App() {
     </>
   );
 
-  const rhbkDetailTabLabels = {
-    client: 'Client',
-    idp: 'IDP',
-    group_mapper: 'Group Mapper',
-    client_scopes: 'Client Scopes',
-    federation: 'Federation',
-    client_mappers: 'Client Mappers'
-  };
-
-  const getRhbkDetailTabs = () => {
-    const selected = data.component_options?.rhbk || [];
-    return ['client', 'idp', 'group_mapper', 'client_scopes', 'federation', 'client_mappers']
-      .filter(option => selected.includes(option));
-  };
-
-  const renderRhbkDetailFields = tab => {
-    switch (tab) {
-      case 'client':
-        return (
-          <Grid hasGutter>
-            {renderTextField('Client ID', 'component_config.rhbk.client')}
-            {renderTextField('Client Name', 'component_config.rhbk.client_name')}
-            {renderTextField('Redirect URIs', 'component_config.rhbk.client_redirect_uris')}
-            {renderTextField('Web Origins', 'component_config.rhbk.client_web_origins')}
-          </Grid>
-        );
-      case 'idp':
-        return (
-          <Grid hasGutter>
-            {renderTextField('IDP Name', 'component_config.rhbk.idp_name')}
-            {renderTextField('IDP Alias', 'component_config.rhbk.idp_alias')}
-            {renderTextField('IDP Provider', 'component_config.rhbk.idp_provider')}
-            {renderTextField('Client ID', 'component_config.rhbk.idp_client_id')}
-            {renderTextField('Client Secret', 'component_config.rhbk.idp_client_secret', 'password')}
-            {renderTextField('Discovery URL', 'component_config.rhbk.idp_discovery_url')}
-          </Grid>
-        );
-      case 'group_mapper':
-        return (
-          <Grid hasGutter>
-            {renderTextField('Mapper Name', 'component_config.rhbk.group_mapper_name')}
-            {renderTextField('Claim Name', 'component_config.rhbk.group_mapper_claim')}
-            {renderTextField('Group Path', 'component_config.rhbk.group_mapper_group_path')}
-            {renderTextField('Sync Mode', 'component_config.rhbk.group_mapper_sync_mode')}
-          </Grid>
-        );
-      case 'client_scopes':
-        return (
-          <Grid hasGutter>
-            {renderTextField('Client Scope Name', 'component_config.rhbk.client_scope_name')}
-            {renderTextField('Protocol', 'component_config.rhbk.client_scope_protocol')}
-            {renderTextField('Description', 'component_config.rhbk.client_scope_description')}
-          </Grid>
-        );
-      case 'federation':
-        return (
-          <Grid hasGutter>
-            {renderTextField('Federation Name', 'component_config.rhbk.federation_name')}
-            {renderTextField('Provider', 'component_config.rhbk.federation_provider')}
-            {renderTextField('LDAP URL', 'component_config.rhbk.federation_ldap_url')}
-            {renderTextField('Bind DN', 'component_config.rhbk.federation_bind_dn')}
-            {renderTextField('Bind Password', 'component_config.rhbk.federation_bind_password', 'password')}
-            {renderTextField('Users DN', 'component_config.rhbk.federation_users_dn')}
-          </Grid>
-        );
-      case 'client_mappers':
-        return (
-          <Grid hasGutter>
-            {renderTextField('Mapper Name', 'component_config.rhbk.client_mapper_name')}
-            {renderTextField('Claim Name', 'component_config.rhbk.client_mapper_claim')}
-            {renderTextField('User Attribute', 'component_config.rhbk.client_mapper_user_attribute')}
-            {renderTextField('Token Claim Type', 'component_config.rhbk.client_mapper_claim_type')}
-          </Grid>
-        );
-      default:
-        return null;
-    }
-  };
-
-  const renderRhbkDetailTabs = () => {
-    const tabs = getRhbkDetailTabs();
-    if (tabs.length === 0) return null;
-
-    const selectedTab = tabs.includes(activeRhbkDetailTab) ? activeRhbkDetailTab : tabs[0];
-
-    return (
-      <div style={{ marginTop: '18px' }}>
-        <Tabs activeKey={selectedTab} onSelect={(_, key) => setActiveRhbkDetailTab(key)}>
-          {tabs.map(tab => (
-            <Tab key={tab} eventKey={tab} title={rhbkDetailTabLabels[tab]} />
-          ))}
-        </Tabs>
-        <div style={{ marginTop: '16px' }}>
-          {renderRhbkDetailFields(selectedTab)}
-        </div>
-      </div>
-    );
-  };
-
   const renderRhbkConfig = () => (
     <>
       {renderComponentOptions('rhbk', 'RHBK Options', 'Select which RHBK resources to configure.')}
@@ -1203,388 +905,20 @@ function App() {
         {renderTextField('Hostname / URL', 'component_config.rhbk.hostname')}
         {renderTextField('Storage Class', 'component_config.rhbk.storage')}
         {renderTextField('Realm', 'component_config.rhbk.realm')}
+        {renderTextField('Client', 'component_config.rhbk.client')}
       </Grid>
-      {renderRhbkDetailTabs()}
     </>
   );
-
-
-  const renderMachineCredentialConfig = () => {
-    const credential = data.aap.machine_credential || defaults.aap.machine_credential;
-
-    return (
-      <div
-        style={{
-          padding: '14px',
-          border: `1px solid ${borderColor}`,
-          borderRadius: '6px',
-          background: isDark ? '#1f1f1f' : '#fafafa',
-          marginTop: '16px',
-          marginBottom: '16px'
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
-          <div>
-            <div style={{ fontWeight: 700, marginBottom: '4px' }}>
-              AAP Machine Credential
-            </div>
-            <div style={{ color: mutedTextColor, fontSize: '13px' }}>
-              Used by RHEL, Satellite, and patching jobs for SSH access.
-            </div>
-          </div>
-
-          <Button
-            variant="secondary"
-            onClick={() => setShowMachineCredentialSecrets(!showMachineCredentialSecrets)}
-          >
-            {showMachineCredentialSecrets ? 'Hide SSH Key' : 'Show SSH Key'}
-          </Button>
-        </div>
-
-        <br />
-
-        <Grid hasGutter>
-          <GridItem span={6}>
-            <FormGroup label="Credential Name">
-              <TextInput
-                value={credential.name}
-                onChange={(_, v) => set('aap.machine_credential.name', v)}
-              />
-            </FormGroup>
-          </GridItem>
-
-          <GridItem span={6}>
-            <FormGroup label="SSH Username">
-              <TextInput
-                value={credential.username}
-                onChange={(_, v) => set('aap.machine_credential.username', v)}
-              />
-            </FormGroup>
-          </GridItem>
-
-          <GridItem span={6}>
-            <FormGroup label="Become Method">
-              <select
-                value={credential.become_method}
-                onChange={e => set('aap.machine_credential.become_method', e.target.value)}
-                style={{ width: '100%', padding: '8px' }}
-              >
-                <option value="">None</option>
-                <option value="sudo">sudo</option>
-                <option value="su">su</option>
-                <option value="pbrun">pbrun</option>
-                <option value="dzdo">dzdo</option>
-              </select>
-            </FormGroup>
-          </GridItem>
-
-          <GridItem span={6}>
-            <FormGroup label="Become Username">
-              <TextInput
-                value={credential.become_username}
-                onChange={(_, v) => set('aap.machine_credential.become_username', v)}
-              />
-            </FormGroup>
-          </GridItem>
-
-          <GridItem span={12}>
-            <FormGroup label="SSH Private Key">
-              <textarea
-                value={
-                  showMachineCredentialSecrets
-                    ? credential.ssh_key_data
-                    : credential.ssh_key_data
-                      ? '********'
-                      : ''
-                }
-                onChange={e => {
-                  if (showMachineCredentialSecrets) {
-                    set('aap.machine_credential.ssh_key_data', e.target.value);
-                  }
-                }}
-                readOnly={!showMachineCredentialSecrets}
-                spellCheck="false"
-                rows={8}
-                style={{
-                  width: '100%',
-                  background: fieldBg,
-                  color: fieldColor,
-                  border: `1px solid ${borderColor}`,
-                  borderRadius: '4px',
-                  padding: '8px',
-                  fontFamily: 'monospace'
-                }}
-              />
-            </FormGroup>
-          </GridItem>
-
-          <GridItem span={12}>
-            <FormGroup label="Private Key Passphrase">
-              <TextInput
-                type={showMachineCredentialSecrets ? 'text' : 'password'}
-                value={credential.ssh_key_unlock}
-                onChange={(_, v) => set('aap.machine_credential.ssh_key_unlock', v)}
-              />
-            </FormGroup>
-          </GridItem>
-        </Grid>
-      </div>
-    );
-  };
-
-  const addAapCredential = () => {
-    const id = newCredentialId();
-    setData(prev => {
-      const copy = JSON.parse(JSON.stringify(prev));
-      if (!copy.aap) copy.aap = {};
-      if (!Array.isArray(copy.aap.additional_credentials)) copy.aap.additional_credentials = [];
-      copy.aap.additional_credentials.push({
-        id,
-        name: '',
-        credential_type: 'Machine',
-        username: '',
-        password: '',
-        host: '',
-        token: '',
-        ssh_key_data: '',
-        ssh_key_unlock: '',
-        become_method: 'sudo',
-        become_username: 'root'
-      });
-      return copy;
-    });
-    setActiveAapCredentialTab(id);
-  };
-
-  const removeAapCredential = index => {
-    const currentCredentials = data.aap.additional_credentials || [];
-    const nextCredentials = currentCredentials.filter((_, i) => i !== index);
-    const nextCredential = nextCredentials[index] || nextCredentials[index - 1];
-    const nextCredentialIndex = nextCredentials.indexOf(nextCredential);
-    const nextTab = nextCredential
-      ? credentialTabKey(nextCredential, nextCredentialIndex)
-      : 'hub';
-
-    setData(prev => {
-      const copy = JSON.parse(JSON.stringify(prev));
-      copy.aap.additional_credentials = (copy.aap.additional_credentials || []).filter((_, i) => i !== index);
-      return copy;
-    });
-    setActiveAapCredentialTab(nextTab);
-  };
-
-  const renderAapCredentialFields = (credential, index) => (
-    <Grid hasGutter>
-      <GridItem span={12}>
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <Tooltip content="Remove credential">
-            <Button variant="plain" onClick={() => removeAapCredential(index)}>X</Button>
-          </Tooltip>
-        </div>
-      </GridItem>
-      <GridItem span={4}>
-        <FormGroup label="Credential Name">
-          <TextInput value={credential.name} onChange={(_, v) => set(`aap.additional_credentials.${index}.name`, v)} />
-        </FormGroup>
-      </GridItem>
-      <GridItem span={4}>
-        <FormGroup label="Credential Type">
-          <select
-            value={credential.credential_type}
-            onChange={e => set(`aap.additional_credentials.${index}.credential_type`, e.target.value)}
-            style={{ width: '100%', padding: '8px' }}
-          >
-            <option value="Machine">Machine</option>
-            <option value="Source Control">Source Control</option>
-            <option value="Vault">Vault</option>
-            <option value="Red Hat Satellite 6">Red Hat Satellite 6</option>
-            <option value="OpenShift or Kubernetes API Bearer Token">OpenShift or Kubernetes API Bearer Token</option>
-          </select>
-        </FormGroup>
-      </GridItem>
-      <GridItem span={4}>
-        <FormGroup label="Host / URL">
-          <TextInput value={credential.host} onChange={(_, v) => set(`aap.additional_credentials.${index}.host`, v)} />
-        </FormGroup>
-      </GridItem>
-      <GridItem span={4}>
-        <FormGroup label="Username">
-          <TextInput value={credential.username} onChange={(_, v) => set(`aap.additional_credentials.${index}.username`, v)} />
-        </FormGroup>
-      </GridItem>
-      <GridItem span={4}>
-        <FormGroup label="Password">
-          <TextInput type="password" value={credential.password} onChange={(_, v) => set(`aap.additional_credentials.${index}.password`, v)} />
-        </FormGroup>
-      </GridItem>
-      <GridItem span={4}>
-        <FormGroup label="Token">
-          <TextInput type="password" value={credential.token} onChange={(_, v) => set(`aap.additional_credentials.${index}.token`, v)} />
-        </FormGroup>
-      </GridItem>
-      <GridItem span={4}>
-        <FormGroup label="Become Method">
-          <TextInput value={credential.become_method} onChange={(_, v) => set(`aap.additional_credentials.${index}.become_method`, v)} />
-        </FormGroup>
-      </GridItem>
-      <GridItem span={4}>
-        <FormGroup label="Become Username">
-          <TextInput value={credential.become_username} onChange={(_, v) => set(`aap.additional_credentials.${index}.become_username`, v)} />
-        </FormGroup>
-      </GridItem>
-      <GridItem span={12}>
-        <FormGroup label="SSH Private Key">
-          <textarea
-            value={credential.ssh_key_data || ''}
-            onChange={e => set(`aap.additional_credentials.${index}.ssh_key_data`, e.target.value)}
-            rows={4}
-            style={{
-              width: '100%',
-              background: fieldBg,
-              color: fieldColor,
-              border: `1px solid ${borderColor}`,
-              borderRadius: '4px',
-              padding: '8px',
-              fontFamily: 'monospace'
-            }}
-          />
-        </FormGroup>
-      </GridItem>
-    </Grid>
-  );
-
-  const renderAdditionalAapCredentials = () => {
-    const credentials = data.aap.additional_credentials || [];
-    const activeCredentialIndex = credentials.findIndex(
-      (credential, index) => credentialTabKey(credential, index) === activeAapCredentialTab
-    );
-    const selectedCredentialIndex = activeCredentialIndex >= 0 ? activeCredentialIndex : -1;
-    const activeCredentialTab = selectedCredentialIndex >= 0 ? activeAapCredentialTab : 'hub';
-
-    return (
-      <div
-        style={{
-          padding: '14px',
-          border: `1px solid ${borderColor}`,
-          borderRadius: '6px',
-          background: isDark ? '#1f1f1f' : '#fafafa',
-          marginTop: '16px'
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
-          <div>
-            <div style={{ fontWeight: 700, marginBottom: '4px' }}>Add Additional Credentials</div>
-            <div style={{ color: mutedTextColor, fontSize: '13px' }}>
-              Add extra AAP credentials during bootstrap.
-            </div>
-          </div>
-          <Button variant="secondary" onClick={addAapCredential}>Add Credential</Button>
-        </div>
-
-        <div style={{ marginTop: '12px' }}>
-          <Tabs activeKey={activeCredentialTab} onSelect={(_, key) => setActiveAapCredentialTab(key)}>
-            <Tab eventKey="hub" title="Hub" />
-            {credentials.map((credential, index) => (
-              <Tab
-                key={credentialTabKey(credential, index)}
-                eventKey={credentialTabKey(credential, index)}
-                title={credential.name || `Credential ${index + 1}`}
-              />
-            ))}
-          </Tabs>
-        </div>
-
-        <div style={{ marginTop: '16px' }}>
-          {selectedCredentialIndex >= 0 ? (
-            renderAapCredentialFields(credentials[selectedCredentialIndex], selectedCredentialIndex)
-          ) : (
-            <Checkbox
-              label="Add infra.ado collection to validated content in AAP Hub"
-              isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
-              onChange={(_, v) => setAapHubValidated(v)}
-            />
-          )}
-        </div>
-      </div>
-    );
-  };
 
   const renderSatelliteConfig = () => (
     <>
       {renderComponentOptions('satellite', 'Satellite Options', 'Select which Satellite resources to configure.')}
-      <Button variant="link" onClick={() => setShowSatelliteSecrets(!showSatelliteSecrets)}>
-        {showSatelliteSecrets ? 'Hide Service Account' : 'Show Service Account'}
-      </Button>
-      <br /><br />
       <Grid hasGutter>
         {renderTextField('Hostname / URL', 'component_config.satellite.hostname')}
+        {renderTextField('Storage Class', 'component_config.satellite.storage')}
         {renderTextField('Organization', 'component_config.satellite.organization')}
         {renderTextField('Activation Key', 'component_config.satellite.activation_key')}
-        {renderTextField('Service Account Username', 'component_config.satellite.service_account_username')}
-        {renderTextField('Service Account Password', 'component_config.satellite.service_account_password', showSatelliteSecrets ? 'text' : 'password')}
-        {renderTextField('Admin Password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password')}
-        <GridItem span={12}>
-          <FormGroup label="Satellite Dynamic Inventory">
-            <Checkbox
-              id="satellite-dynamic-inventory"
-              label="Create AAP Satellite inventory source"
-              isChecked={data.component_config.satellite.dynamic_inventory_enabled}
-              onChange={(_, v) => set('component_config.satellite.dynamic_inventory_enabled', v)}
-            />
-          </FormGroup>
-        </GridItem>
-        {data.component_config.satellite.dynamic_inventory_enabled && (
-          <>
-            {renderTextField('Satellite Credential Name', 'component_config.satellite.credential_name')}
-            {renderTextField('Inventory Source Name', 'component_config.satellite.inventory_source_name')}
-            {renderTextField('Inventory Host Filter', 'component_config.satellite.inventory_host_filter')}
-            {renderTextField('Update Cache Timeout', 'component_config.satellite.inventory_update_cache_timeout', 'number')}
-            {renderTextField('Inventory Verbosity', 'component_config.satellite.inventory_verbosity', 'number')}
-            <GridItem span={4}>
-              <FormGroup label="Overwrite Hosts">
-                <Checkbox
-                  id="satellite-inventory-overwrite"
-                  label="Overwrite"
-                  isChecked={data.component_config.satellite.inventory_overwrite}
-                  onChange={(_, v) => set('component_config.satellite.inventory_overwrite', v)}
-                />
-              </FormGroup>
-            </GridItem>
-            <GridItem span={4}>
-              <FormGroup label="Overwrite Vars">
-                <Checkbox
-                  id="satellite-inventory-overwrite-vars"
-                  label="Overwrite variables"
-                  isChecked={data.component_config.satellite.inventory_overwrite_vars}
-                  onChange={(_, v) => set('component_config.satellite.inventory_overwrite_vars', v)}
-                />
-              </FormGroup>
-            </GridItem>
-            <GridItem span={4}>
-              <FormGroup label="Update On Launch">
-                <Checkbox
-                  id="satellite-inventory-update-on-launch"
-                  label="Update on launch"
-                  isChecked={data.component_config.satellite.inventory_update_on_launch}
-                  onChange={(_, v) => set('component_config.satellite.inventory_update_on_launch', v)}
-                />
-              </FormGroup>
-            </GridItem>
-          </>
-        )}
-        <GridItem span={6}>
-          <FormGroup label="Validate Satellite TLS">
-            <Checkbox
-              id="satellite-validate-certs"
-              label="Validate certificates"
-              isChecked={data.component_config.satellite.validate_certs}
-              onChange={(_, v) => set('component_config.satellite.validate_certs', v)}
-            />
-          </FormGroup>
-        </GridItem>
       </Grid>
-
-      {renderMachineCredentialConfig()}
     </>
   );
 
@@ -1806,8 +1140,6 @@ function App() {
         'Patching Options',
         'Select which patching-related components to include.'
       )}
-
-      {renderMachineCredentialConfig()}
     </>
   );
 
@@ -1903,9 +1235,8 @@ function App() {
         </GridItem>
 
         {renderTextField('Hostname', 'component_config.rhel.hostname')}
+        {renderTextField('Storage', 'component_config.rhel.storage')}
       </Grid>
-
-      {renderMachineCredentialConfig()}
     </>
   );
 
@@ -1945,17 +1276,6 @@ function App() {
             <TextInput
               value={data.openshift.apps_domain}
               onChange={(_, v) => set('openshift.apps_domain', v)}
-            />
-          </FormGroup>
-        </GridItem>
-
-        <GridItem span={12}>
-          <FormGroup label="OpenShift TLS Certificate Verification">
-            <Checkbox
-              id="openshift-skip-tls-verify"
-              label="Skip TLS certificate verification for self-signed certificates"
-              isChecked={data.openshift.skip_tls_verify}
-              onChange={(_, v) => set('openshift.skip_tls_verify', v)}
             />
           </FormGroup>
         </GridItem>
@@ -2334,7 +1654,7 @@ ${vaultYaml}
 
   const renderActiveConfigPanel = () => {
     const visibleTabs = getVisibleConfigTabs();
-    const selectedTab = visibleTabs.includes(activeConfigTab) ? activeConfigTab : (visibleTabs[0] || 'all');
+    const selectedTab = visibleTabs.includes(activeConfigTab) ? activeConfigTab : 'all';
 
     return (
       <>
@@ -2375,294 +1695,11 @@ ${vaultYaml}
     );
   };
 
-  const renderInlineMarkdown = text => {
-    const parts = String(text || '').split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
-
-    return parts.map((part, index) => {
-      if (part.startsWith('`') && part.endsWith('`')) {
-        return <code key={index}>{part.slice(1, -1)}</code>;
-      }
-      if (part.startsWith('**') && part.endsWith('**')) {
-        return <strong key={index}>{part.slice(2, -2)}</strong>;
-      }
-      return <React.Fragment key={index}>{part}</React.Fragment>;
-    });
-  };
-
-  const renderMarkdownDocument = markdown => {
-    const lines = String(markdown || '').split('\n');
-    const elements = [];
-    let codeLines = [];
-    let listItems = [];
-    let orderedListItems = [];
-    let tableLines = [];
-    let paragraphLines = [];
-    let inCode = false;
-
-    const flushParagraph = () => {
-      if (paragraphLines.length === 0) return;
-      elements.push(
-        <p key={`p-${elements.length}`} style={{ lineHeight: 1.55 }}>
-          {renderInlineMarkdown(paragraphLines.join(' '))}
-        </p>
-      );
-      paragraphLines = [];
-    };
-
-    const flushList = () => {
-      if (listItems.length === 0) return;
-      elements.push(
-        <ul key={`ul-${elements.length}`} style={{ paddingLeft: '24px', lineHeight: 1.55 }}>
-          {listItems.map((item, index) => (
-            <li key={index}>{renderInlineMarkdown(item)}</li>
-          ))}
-        </ul>
-      );
-      listItems = [];
-    };
-
-    const flushOrderedList = () => {
-      if (orderedListItems.length === 0) return;
-      elements.push(
-        <ol key={`ol-${elements.length}`} style={{ paddingLeft: '24px', lineHeight: 1.55 }}>
-          {orderedListItems.map((item, index) => (
-            <li key={index}>{renderInlineMarkdown(item)}</li>
-          ))}
-        </ol>
-      );
-      orderedListItems = [];
-    };
-
-    const flushTable = () => {
-      if (tableLines.length === 0) return;
-      const rows = tableLines
-        .filter(line => !/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line))
-        .map(line => line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim()));
-
-      if (rows.length > 0) {
-        const [header, ...body] = rows;
-        elements.push(
-          <div key={`table-${elements.length}`} style={{ overflowX: 'auto', margin: '12px 0' }}>
-            <table
-              style={{
-                width: '100%',
-                borderCollapse: 'collapse',
-                border: `1px solid ${borderColor}`,
-                fontSize: '14px'
-              }}
-            >
-              <thead>
-                <tr>
-                  {header.map((cell, index) => (
-                    <th
-                      key={index}
-                      style={{
-                        textAlign: 'left',
-                        padding: '8px',
-                        border: `1px solid ${borderColor}`,
-                        background: isDark ? '#1f1f1f' : '#f5f5f5'
-                      }}
-                    >
-                      {renderInlineMarkdown(cell)}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {body.map((row, rowIndex) => (
-                  <tr key={rowIndex}>
-                    {row.map((cell, cellIndex) => (
-                      <td
-                        key={cellIndex}
-                        style={{
-                          padding: '8px',
-                          border: `1px solid ${borderColor}`,
-                          verticalAlign: 'top'
-                        }}
-                      >
-                        {renderInlineMarkdown(cell)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        );
-      }
-
-      tableLines = [];
-    };
-
-    const flushCode = () => {
-      elements.push(
-        <pre
-          key={`code-${elements.length}`}
-          style={{
-            background: isDark ? '#151515' : '#f5f5f5',
-            color: isDark ? '#f0f0f0' : '#151515',
-            border: `1px solid ${borderColor}`,
-            borderRadius: '4px',
-            padding: '12px',
-            overflowX: 'auto'
-          }}
-        >
-          <code>{codeLines.join('\n')}</code>
-        </pre>
-      );
-      codeLines = [];
-    };
-
-    lines.forEach(line => {
-      if (line.startsWith('```')) {
-        if (inCode) {
-          flushCode();
-          inCode = false;
-        } else {
-          flushParagraph();
-          flushList();
-          flushOrderedList();
-          flushTable();
-          inCode = true;
-          codeLines = [];
-        }
-        return;
-      }
-
-      if (inCode) {
-        codeLines.push(line);
-        return;
-      }
-
-      if (line.trim() === '---') {
-        flushParagraph();
-        flushList();
-        flushOrderedList();
-        flushTable();
-        elements.push(<hr key={`hr-${elements.length}`} style={{ borderColor }} />);
-        return;
-      }
-
-      const heading = line.match(/^(#{1,3})\s+(.*)$/);
-      if (heading) {
-        flushParagraph();
-        flushList();
-        flushOrderedList();
-        flushTable();
-        const level = heading[1].length;
-        const fontSize = level === 1 ? '24px' : level === 2 ? '20px' : '17px';
-        elements.push(
-          <div
-            key={`h-${elements.length}`}
-            style={{
-              fontSize,
-              fontWeight: 700,
-              marginTop: level === 1 ? '18px' : '16px',
-              marginBottom: '8px'
-            }}
-          >
-            {renderInlineMarkdown(heading[2])}
-          </div>
-        );
-        return;
-      }
-
-      if (line.startsWith('- ')) {
-        flushParagraph();
-        flushOrderedList();
-        flushTable();
-        listItems.push(line.slice(2));
-        return;
-      }
-
-      const orderedItem = line.match(/^\d+\.\s+(.*)$/);
-      if (orderedItem) {
-        flushParagraph();
-        flushList();
-        flushTable();
-        orderedListItems.push(orderedItem[1]);
-        return;
-      }
-
-      if (line.includes('|') && line.trim().length > 0) {
-        flushParagraph();
-        flushList();
-        flushOrderedList();
-        tableLines.push(line);
-        return;
-      }
-
-      if (line.trim() === '') {
-        flushParagraph();
-        flushList();
-        flushOrderedList();
-        flushTable();
-        return;
-      }
-
-      paragraphLines.push(line.trim());
-    });
-
-    if (inCode) flushCode();
-    flushParagraph();
-    flushList();
-    flushOrderedList();
-    flushTable();
-
-    return elements;
-  };
-
-  const renderDocumentation = () => (
-    <Card style={cardStyle}>
-      <CardBody>
-        <Title headingLevel="h2">
-          {documentationType === 'ado' ? 'ADO Collection Documentation' : 'ADO Preflight UI Documentation'}
-        </Title>
-        <div style={{ marginTop: '16px', maxWidth: '980px' }}>
-          {renderMarkdownDocument(documentationType === 'ado' ? adoReadmeMarkdown : readmeMarkdown)}
-        </div>
-      </CardBody>
-    </Card>
-  );
-
   const renderCollectionsTools = () => (
     <>
       <Card style={cardStyle}>
         <CardBody>
           <Title headingLevel="h2">Bootstrap Environment</Title>
-          <br />
-
-          <div style={{ fontWeight: 700, marginBottom: '8px' }}>
-            ADO Pre-Flight UI Version
-          </div>
-
-          <Grid hasGutter>
-            {[
-              ['UI Version', uiVersion?.version || 'unknown'],
-              ['Image', uiVersion?.image || 'unknown'],
-              ['Image Tag', uiVersion?.imageTag || 'unknown'],
-              ['Pod / Container', uiVersion?.podName || 'unknown'],
-              ['Node.js', uiVersion?.nodeVersion || 'unknown']
-            ].map(([label, value]) => (
-              <GridItem key={label} span={4}>
-                <div
-                  style={{
-                    padding: '10px 12px',
-                    backgroundColor: isDark ? '#1f1f1f' : '#f5f5f5',
-                    borderRadius: '4px',
-                    border: `1px solid ${borderColor}`,
-                    minHeight: '58px'
-                  }}
-                >
-                  <div style={{ color: mutedTextColor, fontSize: '12px', marginBottom: '4px' }}>
-                    {label}
-                  </div>
-                  <strong style={{ overflowWrap: 'anywhere' }}>{value}</strong>
-                </div>
-              </GridItem>
-            ))}
-          </Grid>
-
           <br />
 
           <Grid hasGutter>
@@ -2839,25 +1876,18 @@ ${vaultYaml}
                 </Button>
               )}
             >
-              <DropdownList style={{ minWidth: '260px' }}>
+              <DropdownList style={{ minWidth: '180px' }}>
                 <DropdownItem
                   onClick={() => {
-                    setDocumentationType('ado');
-                    setDocumentationOpen(true);
+                    window.open(
+                      'https://github.com/Automation-Development-Office/ado',
+                      '_blank',
+                      'noopener,noreferrer'
+                    );
                     setHelpOpen(false);
                   }}
                 >
-                  ADO Collection Documentation
-                </DropdownItem>
-
-                <DropdownItem
-                  onClick={() => {
-                    setDocumentationType('ui');
-                    setDocumentationOpen(true);
-                    setHelpOpen(false);
-                  }}
-                >
-                  ADO Preflight UI Documentation
+                  Documentation
                 </DropdownItem>
 
                 <DropdownItem
@@ -2911,49 +1941,6 @@ ${vaultYaml}
             <br />
 
             {renderCollectionsTools()}
-          </div>
-        </div>
-      )}
-
-      {documentationOpen && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.55)',
-            zIndex: 5000,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '32px'
-          }}
-        >
-          <div
-            style={{
-              width: '82%',
-              maxWidth: '1200px',
-              maxHeight: '82vh',
-              overflowY: 'auto',
-              background: cardBg,
-              color: textColor,
-              border: `1px solid ${borderColor}`,
-              borderRadius: '8px',
-              padding: '24px',
-              boxShadow: '0 12px 32px rgba(0,0,0,0.45)'
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <Title headingLevel="h2">
-                {documentationType === 'ado' ? 'ADO Collection Documentation' : 'ADO Preflight UI Documentation'}
-              </Title>
-              <Button variant="plain" onClick={() => setDocumentationOpen(false)}>
-                ×
-              </Button>
-            </div>
-
-            <br />
-
-            {renderDocumentation()}
           </div>
         </div>
       )}
@@ -3015,7 +2002,7 @@ ${vaultYaml}
                                 <Checkbox
                                   label=""
                                   isChecked={data.components.includes(component)}
-                                  isDisabled={isStandaloneDisabled()}
+                    isDisabled={isStandaloneDisabled()}
                                   onChange={() => toggleComponentAndOpen(component)}
                                 />
                                 {renderComponentLabel(component)}
@@ -3112,20 +2099,11 @@ ${vaultYaml}
                   <Grid hasGutter>
                     <GridItem span={6}><FormGroup label="AAP Hostname URL"><TextInput value={data.aap.hostname} onChange={(_, v) => set('aap.hostname', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="AAP Version"><select value={data.aap.version} onChange={e => set('aap.version', e.target.value)} style={{ width: '100%', padding: '8px' }}><option value="24">2.4</option><option value="25">2.5</option><option value="26">2.6</option></select></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Organization Name"><TextInput value={data.aap.organization} onChange={(_, v) => setAapOrganization(v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Organization Name"><TextInput value={data.aap.organization} onChange={(_, v) => set('aap.organization', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="Inventory Name"><TextInput value={data.aap.inventory} onChange={(_, v) => set('aap.inventory', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="Project Name"><TextInput value={data.aap.project} onChange={(_, v) => set('aap.project', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="Execution Environment"><TextInput value={data.aap.execution_environment} onChange={(_, v) => set('aap.execution_environment', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="Vault Credential Name"><TextInput value={data.aap.vault_credential_name} onChange={(_, v) => set('aap.vault_credential_name', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}>
-                      <FormGroup label="TLS Certificate Verification">
-                        <Checkbox
-                          label="Skip TLS certificate verification for self-signed certificates"
-                          isChecked={data.aap.skip_tls_verify}
-                          onChange={(_, v) => set('aap.skip_tls_verify', v)}
-                        />
-                      </FormGroup>
-                    </GridItem>
 
                     <GridItem span={6}>
                       <FormGroup label="OAuth Token">
@@ -3140,8 +2118,6 @@ ${vaultYaml}
                     <GridItem span={6}><FormGroup label="Admin Password"><TextInput type="password" value={data.aap.admin_password} onChange={(_, v) => set('aap.admin_password', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="Vault Password"><TextInput type="password" value={data.aap.vault_password} onChange={(_, v) => set('aap.vault_password', v)} /></FormGroup></GridItem>
                   </Grid>
-
-                  {renderAdditionalAapCredentials()}
                 </>
               )}
             </CardBody>
