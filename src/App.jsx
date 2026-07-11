@@ -369,7 +369,7 @@ function App() {
   const [showIdmSecrets, setShowIdmSecrets] = useState(false);
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
-  const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('hub');
+  const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
   const [runFinished, setRunFinished] = useState(false);
   const [showRawOutput, setShowRawOutput] = useState(false);
@@ -1363,7 +1363,7 @@ function App() {
     const nextCredentialIndex = nextCredentials.indexOf(nextCredential);
     const nextTab = nextCredential
       ? credentialTabKey(nextCredential, nextCredentialIndex)
-      : 'hub';
+      : '';
 
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
@@ -1458,8 +1458,12 @@ function App() {
     const activeCredentialIndex = credentials.findIndex(
       (credential, index) => credentialTabKey(credential, index) === activeAapCredentialTab
     );
-    const selectedCredentialIndex = activeCredentialIndex >= 0 ? activeCredentialIndex : -1;
-    const activeCredentialTab = selectedCredentialIndex >= 0 ? activeAapCredentialTab : 'hub';
+    const selectedCredentialIndex = activeCredentialIndex >= 0
+      ? activeCredentialIndex
+      : (credentials.length > 0 ? 0 : -1);
+    const activeCredentialTab = selectedCredentialIndex >= 0
+      ? credentialTabKey(credentials[selectedCredentialIndex], selectedCredentialIndex)
+      : '';
 
     return (
       <div
@@ -1481,28 +1485,27 @@ function App() {
           <Button variant="secondary" onClick={addAapCredential}>Add Credential</Button>
         </div>
 
-        <div style={{ marginTop: '12px' }}>
-          <Tabs activeKey={activeCredentialTab} onSelect={(_, key) => setActiveAapCredentialTab(key)}>
-            <Tab eventKey="hub" title="Hub" />
-            {credentials.map((credential, index) => (
-              <Tab
-                key={credentialTabKey(credential, index)}
-                eventKey={credentialTabKey(credential, index)}
-                title={credential.name || `Credential ${index + 1}`}
-              />
-            ))}
-          </Tabs>
-        </div>
+        {credentials.length > 0 && (
+          <div style={{ marginTop: '12px' }}>
+            <Tabs activeKey={activeCredentialTab} onSelect={(_, key) => setActiveAapCredentialTab(key)}>
+              {credentials.map((credential, index) => (
+                <Tab
+                  key={credentialTabKey(credential, index)}
+                  eventKey={credentialTabKey(credential, index)}
+                  title={credential.name || `Credential ${index + 1}`}
+                />
+              ))}
+            </Tabs>
+          </div>
+        )}
 
         <div style={{ marginTop: '16px' }}>
           {selectedCredentialIndex >= 0 ? (
             renderAapCredentialFields(credentials[selectedCredentialIndex], selectedCredentialIndex)
           ) : (
-            <Checkbox
-              label="Add infra.ado collection to validated content in AAP Hub"
-              isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
-              onChange={(_, v) => setAapHubValidated(v)}
-            />
+            <div style={{ color: mutedTextColor, fontSize: '13px' }}>
+              No additional credentials added.
+            </div>
           )}
         </div>
       </div>
@@ -3123,6 +3126,15 @@ ${vaultYaml}
                           label="Skip TLS certificate verification for self-signed certificates"
                           isChecked={data.aap.skip_tls_verify}
                           onChange={(_, v) => set('aap.skip_tls_verify', v)}
+                        />
+                      </FormGroup>
+                    </GridItem>
+                    <GridItem span={6}>
+                      <FormGroup label="AAP Hub">
+                        <Checkbox
+                          label="Add infra.ado collection to validated content in AAP Hub"
+                          isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
+                          onChange={(_, v) => setAapHubValidated(v)}
                         />
                       </FormGroup>
                     </GridItem>
