@@ -3121,6 +3121,18 @@ ${vaultYaml}
                     <GridItem span={6}><FormGroup label="Execution Environment"><TextInput value={data.aap.execution_environment} onChange={(_, v) => set('aap.execution_environment', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="Vault Credential Name"><TextInput value={data.aap.vault_credential_name} onChange={(_, v) => set('aap.vault_credential_name', v)} /></FormGroup></GridItem>
                     <GridItem span={6}>
+                      <FormGroup label="OAuth Token">
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <TextInput type={showAapOauthToken ? 'text' : 'password'} value={data.aap.oauth_token} onChange={(_, v) => set('aap.oauth_token', v)} />
+                          <Button variant="secondary" onClick={() => setShowAapOauthToken(!showAapOauthToken)}>{showAapOauthToken ? 'Hide' : 'Show'}</Button>
+                        </div>
+                      </FormGroup>
+                    </GridItem>
+
+                    <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Admin Password"><TextInput type="password" value={data.aap.admin_password} onChange={(_, v) => set('aap.admin_password', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}><FormGroup label="Vault Password"><TextInput type="password" value={data.aap.vault_password} onChange={(_, v) => set('aap.vault_password', v)} /></FormGroup></GridItem>
+                    <GridItem span={6}>
                       <FormGroup label="TLS Certificate Verification">
                         <Checkbox
                           label="Skip TLS certificate verification for self-signed certificates"
@@ -3138,19 +3150,6 @@ ${vaultYaml}
                         />
                       </FormGroup>
                     </GridItem>
-
-                    <GridItem span={6}>
-                      <FormGroup label="OAuth Token">
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          <TextInput type={showAapOauthToken ? 'text' : 'password'} value={data.aap.oauth_token} onChange={(_, v) => set('aap.oauth_token', v)} />
-                          <Button variant="secondary" onClick={() => setShowAapOauthToken(!showAapOauthToken)}>{showAapOauthToken ? 'Hide' : 'Show'}</Button>
-                        </div>
-                      </FormGroup>
-                    </GridItem>
-
-                    <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Admin Password"><TextInput type="password" value={data.aap.admin_password} onChange={(_, v) => set('aap.admin_password', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Vault Password"><TextInput type="password" value={data.aap.vault_password} onChange={(_, v) => set('aap.vault_password', v)} /></FormGroup></GridItem>
                   </Grid>
 
                   {renderAdditionalAapCredentials()}

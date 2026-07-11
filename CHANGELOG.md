@@ -25,7 +25,7 @@ All notable changes to the ADO Preflight UI are documented in this file.
 - The generated payload now keeps selected component configuration only, instead of sending unselected or blank component sections.
 - Single component selections now stay selected correctly when preparing bootstrap payloads.
 - RHEL and Satellite configuration no longer show the OpenShift-only storage field.
-- Moved the AAP Hub publishing control into the main AAP configuration area beside TLS verification.
+- Moved the AAP Hub publishing and TLS verification controls below the AAP entry fields.
 - Additional credential removal now targets the selected credential instead of removing the wrong entry.
 - Additional credentials now render as tabs instead of stacking multiple large cards on the main page.
 - The UI README was rewritten as an operator-focused guide for first-time ADO and UI users.
