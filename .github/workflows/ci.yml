@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Smoke test server
+        run: |
+          node server.js &
+          server_pid=$!
+          trap "kill ${server_pid}" EXIT
+
+          for attempt in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8080/ >/dev/null; then
+              break
+            fi
+            if [ "${attempt}" -eq 30 ]; then
+              echo "Server did not become ready in time"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          curl -sf http://127.0.0.1:8080/ | grep -q '<div id="root">'
+          curl -sf http://127.0.0.1:8080/api/events
+
+      - name: Lint GitHub Actions workflows
+        run: |
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          actionlint -color
