@@ -230,18 +230,15 @@ function normalizePreflightPayload(input) {
 }
 
 function selectedComponentAppsFrom(data) {
-  if (Array.isArray(data.selected_component_apps) && data.selected_component_apps.length > 0) {
-    return [...new Set(data.selected_component_apps)];
-  }
-
   if (Array.isArray(data.components) && data.components.includes('all')) {
     return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...provisionApps, 'jira'])];
   }
 
   const out = [];
   const groups = ['openshift', 'rhel', 'patching', 'provision'];
+  const components = Array.isArray(data.components) ? data.components : [];
 
-  for (const component of data.components || []) {
+  for (const component of components) {
     if (groups.includes(component)) {
       const selected = data.component_apps?.[component] || [];
       out.push(...(selected.length > 0 ? selected : [component]));
@@ -250,7 +247,17 @@ function selectedComponentAppsFrom(data) {
     }
   }
 
-  return [...new Set(out.filter(Boolean))];
+  const derived = [...new Set(out.filter(Boolean))];
+
+  if (derived.length > 0) {
+    return derived;
+  }
+
+  if (Array.isArray(data.selected_component_apps) && data.selected_component_apps.length > 0) {
+    return [...new Set(data.selected_component_apps)];
+  }
+
+  return [];
 }
 
 function pruneSelectedPayload(data, selectedComponentApps) {

@@ -626,10 +626,6 @@ function App() {
   const groupComponents = ['openshift', 'rhel', 'patching', 'provision'];
 
   const selectedComponentAppsFrom = source => {
-    if (Array.isArray(source.selected_component_apps) && source.selected_component_apps.length > 0) {
-      return [...new Set(source.selected_component_apps)];
-    }
-
     if (Array.isArray(source.components) && source.components.includes('all')) {
       return [
         ...new Set([
@@ -644,8 +640,9 @@ function App() {
 
     const out = [];
     const expandableGroups = ['openshift', 'rhel', 'patching', 'provision'];
+    const components = Array.isArray(source.components) ? source.components : [];
 
-    (source.components || []).forEach(component => {
+    components.forEach(component => {
       if (expandableGroups.includes(component)) {
         const selected = source.component_apps?.[component] || [];
         out.push(...(selected.length > 0 ? selected : [component]));
@@ -654,7 +651,17 @@ function App() {
       }
     });
 
-    return [...new Set(out.filter(Boolean))];
+    const derived = [...new Set(out.filter(Boolean))];
+
+    if (derived.length > 0) {
+      return derived;
+    }
+
+    if (Array.isArray(source.selected_component_apps) && source.selected_component_apps.length > 0) {
+      return [...new Set(source.selected_component_apps)];
+    }
+
+    return [];
   };
 
   const deepMerge = (baseValue, incomingValue) => {

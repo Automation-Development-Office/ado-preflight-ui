@@ -40,6 +40,9 @@ All notable changes to the ADO Preflight UI are documented in this file.
 
 ### Fixed
 
+- JSON import now ignores stale `selected_component_apps` when richer
+  `components` and `component_apps` selections are present, so older saved
+  preflight files keep Satellite, IDM, Compliance, and STIG selections.
 - Documentation modals no longer display raw JSON error bodies when a README is missing.
 - Documentation endpoints now return readable markdown fallback text and log missing container paths to the server events.
 - Documentation fetches now fail cleanly if a route returns a non-success response.
