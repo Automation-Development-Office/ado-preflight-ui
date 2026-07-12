@@ -54,7 +54,16 @@ const componentOptionDefaults = {
   grafana: ['datasources', 'folders', 'dashboards'],
   rhbk: ['realm', 'client', 'idp', 'federation', 'group_mapper', 'client_scopes', 'client_mappers'],
   satellite: ['satellite_server_install', 'satellite_client_tools', 'satellite_content_view', 'satellite_capsule_install'],
-  idm: ['idm_server_install', 'idm_replica_install', 'idm_client_tools', 'mfa'],
+  idm: [
+    'idm_server_install',
+    'idm_replica_install',
+    'idm_client_tools',
+    'idm_dns_install',
+    'idm_ad_trust_install',
+    'idm_cert_install',
+    'idm_custom_cert',
+    'mfa'
+  ],
   rhel: ['compliance', 'stig'],
   compliance: ['pci_dss', 'nist_800_53', 'cis', 'stig'],
   stig: ['rhel_8_stig', 'rhel_9_stig']
@@ -78,6 +87,10 @@ const componentOptionLabels = {
   idm_server_install: 'IDM Server Install',
   idm_replica_install: 'IDM Replica Install',
   idm_client_tools: 'IDM Client Tools',
+  idm_dns_install: 'Install DNS',
+  idm_ad_trust_install: 'Install AD Trust',
+  idm_cert_install: 'Install Certificate Services',
+  idm_custom_cert: 'Use Custom Certificate',
   mfa: 'MFA',
   compliance: 'Compliance',
   stig: 'STIG Hardening',
@@ -167,9 +180,15 @@ const defaults = {
     },
     idm: {
       hostname: '',
-      storage: '',
       domain: '',
       realm: '',
+      replica_hostname: '',
+      replica_install_dns: true,
+      replica_install_ca: true,
+      auto_forwarders: true,
+      custom_cert_file: '',
+      custom_cert_key_file: '',
+      custom_cert_chain_file: '',
       admin_password: '',
       directory_manager_password: ''
     },
@@ -700,6 +719,9 @@ function App() {
     });
 
     if (!merged.component_config) merged.component_config = {};
+    if (merged.component_config.idm) {
+      delete merged.component_config.idm.storage;
+    }
     if (!merged.component_options) merged.component_options = {};
     if (!merged.aap) merged.aap = {};
     if (!Array.isArray(merged.aap.additional_credentials)) merged.aap.additional_credentials = [];
@@ -769,7 +791,10 @@ function App() {
 
     Object.entries(payload.component_config || {}).forEach(([component, config]) => {
       if (allowedConfig.has(component)) {
-        selectedConfig[component] = config;
+        selectedConfig[component] = { ...config };
+        if (component === 'idm') {
+          delete selectedConfig[component].storage;
+        }
       }
     });
 
@@ -808,8 +833,11 @@ function App() {
       if (!copy.component_config) copy.component_config = {};
       if (!copy.component_config[component]) copy.component_config[component] = { hostname: '' };
       if (copy.component_config[component].hostname === undefined) copy.component_config[component].hostname = '';
-      if (!['rhel', 'satellite', 'compliance', 'stig'].includes(component) && copy.component_config[component].storage === undefined) {
+      if (!['rhel', 'satellite', 'idm', 'compliance', 'stig'].includes(component) && copy.component_config[component].storage === undefined) {
         copy.component_config[component].storage = '';
+      }
+      if (component === 'idm') {
+        delete copy.component_config[component].storage;
       }
 
       return copy;
@@ -1191,9 +1219,35 @@ function App() {
     );
   };
 
-  const renderTextField = (label, path, type = 'text') => (
+  const labelWithHelp = (label, help) => {
+    if (!help) return label;
+
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+        <span>{label}</span>
+        <Tooltip content={help}>
+          <button
+            type="button"
+            aria-label={`${label} help`}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              color: isDark ? '#73bcf7' : '#0066cc',
+              cursor: 'help',
+              fontWeight: 700,
+              padding: 0
+            }}
+          >
+            ?
+          </button>
+        </Tooltip>
+      </span>
+    );
+  };
+
+  const renderTextField = (label, path, type = 'text', help = '') => (
     <GridItem span={6}>
-      <FormGroup label={label}>
+      <FormGroup label={labelWithHelp(label, help)}>
         <TextInput
           type={type}
           value={path.split('.').reduce((o, k) => (o || {})[k], data) || ''}
@@ -1362,7 +1416,7 @@ function App() {
             variant="secondary"
             onClick={() => setShowMachineCredentialSecrets(!showMachineCredentialSecrets)}
           >
-            {showMachineCredentialSecrets ? 'Hide SSH Key' : 'Show SSH Key'}
+            {showMachineCredentialSecrets ? 'Hide Passphrase' : 'Show Passphrase'}
           </Button>
         </div>
 
@@ -1415,19 +1469,8 @@ function App() {
           <GridItem span={12}>
             <FormGroup label="SSH Private Key">
               <textarea
-                value={
-                  showMachineCredentialSecrets
-                    ? credential.ssh_key_data
-                    : credential.ssh_key_data
-                      ? '********'
-                      : ''
-                }
-                onChange={e => {
-                  if (showMachineCredentialSecrets) {
-                    set('aap.machine_credential.ssh_key_data', e.target.value);
-                  }
-                }}
-                readOnly={!showMachineCredentialSecrets}
+                value={credential.ssh_key_data || ''}
+                onChange={e => set('aap.machine_credential.ssh_key_data', e.target.value)}
                 spellCheck="false"
                 rows={8}
                 style={{
@@ -1637,6 +1680,25 @@ function App() {
     );
   };
 
+  const satelliteHelp = {
+    hostname: 'Satellite server hostname or URL. Example: sat.server.lab or https://sat.server.lab. Hostnames are normalized to https:// for generated Satellite config.',
+    organization: 'Satellite organization used for activation keys, content, and inventory. Example: Lab.',
+    activationKey: 'Activation key used when registering RHEL hosts to Satellite. Example: rhel-9.',
+    serviceAccountUsername: 'Satellite service account username for API and inventory operations. Example: svc_aap_satellite.',
+    serviceAccountPassword: 'Password for the Satellite service account. Stored in generated vault files.',
+    adminPassword: 'Optional Satellite admin password for bootstrap tasks that still require admin access. Stored in generated vault files.',
+    dynamicInventory: 'Creates an AAP inventory source that reads hosts from Satellite 6.',
+    credentialName: 'AAP credential name for the Satellite service account. Example: ADO Satellite Service Account.',
+    inventorySourceName: 'AAP inventory source name. Example: ADO Satellite Dynamic Inventory.',
+    inventoryHostFilter: 'Optional Satellite search filter. Example: hostgroup = RHEL9 or organization = Lab.',
+    updateCacheTimeout: 'Seconds to reuse cached inventory data before refreshing. Example: 0 disables cache reuse.',
+    inventoryVerbosity: 'Inventory source sync verbosity from 0 to 5.',
+    overwriteHosts: 'Allow the inventory sync to update existing hosts in the AAP inventory.',
+    overwriteVars: 'Allow the inventory sync to update variables on existing AAP hosts.',
+    updateOnLaunch: 'Run a Satellite inventory sync automatically when a job using this inventory launches.',
+    skipTls: 'Disable Satellite certificate validation for self-signed or lab certificates.'
+  };
+
   const renderSatelliteConfig = () => (
     <>
       {renderComponentOptions('satellite', 'Satellite Options', 'Select which Satellite resources to configure.')}
@@ -1645,14 +1707,14 @@ function App() {
       </Button>
       <br /><br />
       <Grid hasGutter>
-        {renderTextField('Hostname / URL', 'component_config.satellite.hostname')}
-        {renderTextField('Organization', 'component_config.satellite.organization')}
-        {renderTextField('Activation Key', 'component_config.satellite.activation_key')}
-        {renderTextField('Service Account Username', 'component_config.satellite.service_account_username')}
-        {renderTextField('Service Account Password', 'component_config.satellite.service_account_password', showSatelliteSecrets ? 'text' : 'password')}
-        {renderTextField('Admin Password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password')}
+        {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
+        {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
+        {renderTextField('Activation Key', 'component_config.satellite.activation_key', 'text', satelliteHelp.activationKey)}
+        {renderTextField('Service Account Username', 'component_config.satellite.service_account_username', 'text', satelliteHelp.serviceAccountUsername)}
+        {renderTextField('Service Account Password', 'component_config.satellite.service_account_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.serviceAccountPassword)}
+        {renderTextField('Admin Password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.adminPassword)}
         <GridItem span={12}>
-          <FormGroup label="Satellite Dynamic Inventory">
+          <FormGroup label={labelWithHelp('Satellite Dynamic Inventory', satelliteHelp.dynamicInventory)}>
             <Checkbox
               id="satellite-dynamic-inventory"
               label="Create AAP Satellite inventory source"
@@ -1663,13 +1725,13 @@ function App() {
         </GridItem>
         {data.component_config.satellite.dynamic_inventory_enabled && (
           <>
-            {renderTextField('Satellite Credential Name', 'component_config.satellite.credential_name')}
-            {renderTextField('Inventory Source Name', 'component_config.satellite.inventory_source_name')}
-            {renderTextField('Inventory Host Filter', 'component_config.satellite.inventory_host_filter')}
-            {renderTextField('Update Cache Timeout', 'component_config.satellite.inventory_update_cache_timeout', 'number')}
-            {renderTextField('Inventory Verbosity', 'component_config.satellite.inventory_verbosity', 'number')}
+            {renderTextField('Satellite Credential Name', 'component_config.satellite.credential_name', 'text', satelliteHelp.credentialName)}
+            {renderTextField('Inventory Source Name', 'component_config.satellite.inventory_source_name', 'text', satelliteHelp.inventorySourceName)}
+            {renderTextField('Inventory Host Filter', 'component_config.satellite.inventory_host_filter', 'text', satelliteHelp.inventoryHostFilter)}
+            {renderTextField('Update Cache Timeout', 'component_config.satellite.inventory_update_cache_timeout', 'number', satelliteHelp.updateCacheTimeout)}
+            {renderTextField('Inventory Verbosity', 'component_config.satellite.inventory_verbosity', 'number', satelliteHelp.inventoryVerbosity)}
             <GridItem span={4}>
-              <FormGroup label="Overwrite Hosts">
+              <FormGroup label={labelWithHelp('Overwrite Hosts', satelliteHelp.overwriteHosts)}>
                 <Checkbox
                   id="satellite-inventory-overwrite"
                   label="Overwrite"
@@ -1679,7 +1741,7 @@ function App() {
               </FormGroup>
             </GridItem>
             <GridItem span={4}>
-              <FormGroup label="Overwrite Vars">
+              <FormGroup label={labelWithHelp('Overwrite Vars', satelliteHelp.overwriteVars)}>
                 <Checkbox
                   id="satellite-inventory-overwrite-vars"
                   label="Overwrite variables"
@@ -1689,7 +1751,7 @@ function App() {
               </FormGroup>
             </GridItem>
             <GridItem span={4}>
-              <FormGroup label="Update On Launch">
+              <FormGroup label={labelWithHelp('Update On Launch', satelliteHelp.updateOnLaunch)}>
                 <Checkbox
                   id="satellite-inventory-update-on-launch"
                   label="Update on launch"
@@ -1701,12 +1763,12 @@ function App() {
           </>
         )}
         <GridItem span={6}>
-          <FormGroup label="Validate Satellite TLS">
+          <FormGroup label={labelWithHelp('TLS Certificate Verification', satelliteHelp.skipTls)}>
             <Checkbox
-              id="satellite-validate-certs"
-              label="Validate certificates"
-              isChecked={data.component_config.satellite.validate_certs}
-              onChange={(_, v) => set('component_config.satellite.validate_certs', v)}
+              id="satellite-skip-tls-verify"
+              label="Skip TLS certificate verification for self-signed certificates"
+              isChecked={!data.component_config.satellite.validate_certs}
+              onChange={(_, v) => set('component_config.satellite.validate_certs', !v)}
             />
           </FormGroup>
         </GridItem>
@@ -1716,24 +1778,74 @@ function App() {
     </>
   );
 
-  const renderIdmConfig = () => (
-    <>
-      {renderComponentOptions('idm', 'IDM Options', 'Select which IDM resources to configure.')}
+  const renderIdmConfig = () => {
+    const selected = data.component_options?.idm || [];
+    const showReplica = selected.includes('idm_replica_install');
+    const showDns = selected.includes('idm_dns_install');
+    const showCustomCert = selected.includes('idm_custom_cert');
 
-      <Button variant="link" onClick={() => setShowIdmSecrets(!showIdmSecrets)}>
-        {showIdmSecrets ? 'Hide Secrets' : 'Show Secrets'}
-      </Button>
-      <br /><br />
-      <Grid hasGutter>
-        {renderTextField('Hostname', 'component_config.idm.hostname')}
-        {renderTextField('Storage', 'component_config.idm.storage')}
-        {renderTextField('Domain', 'component_config.idm.domain')}
-        {renderTextField('Realm', 'component_config.idm.realm')}
-        {renderTextField('Admin Password', 'component_config.idm.admin_password', showIdmSecrets ? 'text' : 'password')}
-        {renderTextField('Directory Manager Password', 'component_config.idm.directory_manager_password', showIdmSecrets ? 'text' : 'password')}
-      </Grid>
-    </>
-  );
+    return (
+      <>
+        {renderComponentOptions('idm', 'IDM Options', 'Select which IDM resources to configure.')}
+
+        <Button variant="link" onClick={() => setShowIdmSecrets(!showIdmSecrets)}>
+          {showIdmSecrets ? 'Hide Secrets' : 'Show Secrets'}
+        </Button>
+        <br /><br />
+        <Grid hasGutter>
+          {renderTextField('Hostname', 'component_config.idm.hostname')}
+          {renderTextField('Domain', 'component_config.idm.domain')}
+          {renderTextField('Realm', 'component_config.idm.realm')}
+          {showReplica && renderTextField('IPA Replica Hostname', 'component_config.idm.replica_hostname')}
+          {showReplica && (
+            <>
+              <GridItem span={6}>
+                <FormGroup label="Replica DNS">
+                  <Checkbox
+                    id="idm-replica-install-dns"
+                    label="Install DNS on replica"
+                    isChecked={data.component_config.idm.replica_install_dns}
+                    onChange={(_, v) => set('component_config.idm.replica_install_dns', v)}
+                  />
+                </FormGroup>
+              </GridItem>
+              <GridItem span={6}>
+                <FormGroup label="Replica Certificate Services">
+                  <Checkbox
+                    id="idm-replica-install-ca"
+                    label="Install certificate services on replica"
+                    isChecked={data.component_config.idm.replica_install_ca}
+                    onChange={(_, v) => set('component_config.idm.replica_install_ca', v)}
+                  />
+                </FormGroup>
+              </GridItem>
+            </>
+          )}
+          {showDns && (
+            <GridItem span={6}>
+              <FormGroup label="DNS Forwarders">
+                <Checkbox
+                  id="idm-auto-forwarders"
+                  label="Configure auto forwarders"
+                  isChecked={data.component_config.idm.auto_forwarders}
+                  onChange={(_, v) => set('component_config.idm.auto_forwarders', v)}
+                />
+              </FormGroup>
+            </GridItem>
+          )}
+          {showCustomCert && (
+            <>
+              {renderTextField('Custom Certificate File', 'component_config.idm.custom_cert_file')}
+              {renderTextField('Custom Certificate Key File', 'component_config.idm.custom_cert_key_file')}
+              {renderTextField('Custom Certificate Chain File', 'component_config.idm.custom_cert_chain_file')}
+            </>
+          )}
+          {renderTextField('Admin Password', 'component_config.idm.admin_password', showIdmSecrets ? 'text' : 'password')}
+          {renderTextField('Directory Manager Password', 'component_config.idm.directory_manager_password', showIdmSecrets ? 'text' : 'password')}
+        </Grid>
+      </>
+    );
+  };
 
   const toggleComponentOption = (component, option) => {
     setData(prev => {

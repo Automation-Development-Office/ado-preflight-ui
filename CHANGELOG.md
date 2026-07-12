@@ -6,6 +6,9 @@ All notable changes to the ADO Preflight UI are documented in this file.
 
 ### Added
 
+- Added IDM install options for DNS, AD trust, certificate services, custom certificates, replica hostname, replica DNS/CA install toggles, and auto forwarders.
+- Added Satellite field help tooltips with examples for hostname/URL, organization, activation key, service account, dynamic inventory, inventory source behavior, and TLS behavior.
+- Added an ADO Bootstrap Recap at the end of UI runs with AAP server, organization, selected components, project, generated job templates, workflows, credentials, inventories, and installed `infra.ado` collection status.
 - Added AAP TLS certificate verification control so self-signed controller certificates can be skipped from the UI and passed into the bootstrap run.
 - Added OpenShift TLS certificate verification control, defaulting to skip verification for self-signed OpenShift API certificates.
 - Added AAP additional credential entry support with tabbed credential forms.
@@ -23,6 +26,9 @@ All notable changes to the ADO Preflight UI are documented in this file.
 
 ### Changed
 
+- IDM configuration no longer shows or exports a storage field.
+- Satellite TLS handling now uses the same "Skip TLS certificate verification for self-signed certificates" wording as AAP and remains skipped by default.
+- The AAP Machine Credential SSH private key textarea is editable immediately so keys can be pasted without first toggling secret visibility.
 - The generated payload now keeps selected component configuration only, instead of sending unselected or blank component sections.
 - Single component selections now stay selected correctly when preparing bootstrap payloads.
 - RHEL and Satellite configuration no longer show the OpenShift-only storage field.

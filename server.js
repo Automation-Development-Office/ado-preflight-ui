@@ -212,6 +212,16 @@ function normalizePreflightPayload(input) {
     data.component_config.satellite.inventory_host_filter = '';
   }
 
+  if (!data.component_config.idm) data.component_config.idm = {};
+  delete data.component_config.idm.storage;
+  if (data.component_config.idm.replica_hostname === undefined) data.component_config.idm.replica_hostname = '';
+  if (data.component_config.idm.replica_install_dns === undefined) data.component_config.idm.replica_install_dns = true;
+  if (data.component_config.idm.replica_install_ca === undefined) data.component_config.idm.replica_install_ca = true;
+  if (data.component_config.idm.auto_forwarders === undefined) data.component_config.idm.auto_forwarders = true;
+  if (data.component_config.idm.custom_cert_file === undefined) data.component_config.idm.custom_cert_file = '';
+  if (data.component_config.idm.custom_cert_key_file === undefined) data.component_config.idm.custom_cert_key_file = '';
+  if (data.component_config.idm.custom_cert_chain_file === undefined) data.component_config.idm.custom_cert_chain_file = '';
+
   if (!data.openshift) data.openshift = {};
   if (data.openshift.skip_tls_verify === undefined) data.openshift.skip_tls_verify = true;
   if (data.openshift.token === undefined) data.openshift.token = '';
@@ -250,7 +260,10 @@ function pruneSelectedPayload(data, selectedComponentApps) {
 
   for (const [component, config] of Object.entries(data.component_config || {})) {
     if (allowedConfig.has(component)) {
-      componentConfig[component] = config;
+      componentConfig[component] = { ...config };
+      if (component === 'idm') {
+        delete componentConfig[component].storage;
+      }
     }
   }
 
@@ -436,6 +449,65 @@ Rebuild the UI container after copying the documentation into the image, or set 
 - \`ADO_PREFLIGHT_UI_README\` for UI documentation
 - \`ADO_COLLECTION_README\` for ADO collection documentation
 `;
+}
+
+function cleanYamlName(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^['"]|['"]$/g, '')
+    .trim();
+}
+
+function readConfigNames(filePath) {
+  if (!fs.existsSync(filePath)) return [];
+
+  const names = [];
+  const text = fs.readFileSync(filePath, 'utf8');
+  const namePattern = /^(?:-\s+|\s{2}-\s+)name:\s*(.+?)\s*$/gm;
+  let match = namePattern.exec(text);
+
+  while (match) {
+    const name = cleanYamlName(match[1]);
+    if (name && !names.includes(name)) {
+      names.push(name);
+    }
+    match = namePattern.exec(text);
+  }
+
+  return names;
+}
+
+function appendListRecap(lines, label, values) {
+  lines.push(`${label}:`);
+
+  if (!values || values.length === 0) {
+    lines.push('  none');
+    return;
+  }
+
+  values.forEach(value => lines.push(`  - ${value}`));
+}
+
+function buildBootstrapRecap(data, repoDir, selectedComponentApps, collectionInstalled) {
+  const controllerDir = path.join(repoDir, 'configs', 'controller');
+  const workflowsDir = path.join(repoDir, 'configs', 'workflows');
+  const lines = [
+    '',
+    '=== ADO Bootstrap Recap ===',
+    `AAP Server: ${data?.aap?.hostname || 'not configured'}`,
+    `Organization: ${data?.aap?.organization || 'not configured'}`,
+    `Project Name: ${data?.aap?.project || 'not configured'}`
+  ];
+
+  appendListRecap(lines, 'Components', selectedComponentApps);
+  appendListRecap(lines, 'Job Templates', readConfigNames(path.join(controllerDir, 'job_templates.yml')));
+  appendListRecap(lines, 'Workflow Templates', readConfigNames(path.join(workflowsDir, 'bootstrap_workflows.yml')));
+  appendListRecap(lines, 'Credentials', readConfigNames(path.join(controllerDir, 'credentials.yml')));
+  appendListRecap(lines, 'Inventories', readConfigNames(path.join(controllerDir, 'inventories.yml')));
+  lines.push(`Installed infra.ado collection: ${collectionInstalled ? 'yes' : 'no'}`);
+  lines.push('');
+
+  return lines.join('\n');
 }
 
 app.get('/api/logs' , (req, res) => {
@@ -801,6 +873,13 @@ ansible-playbook \\
   --vault-password-file .vault_pass
 `], workRoot, 'Running ansible-playbook', bootstrapEnv);
 
+  const bootstrapRecap = buildBootstrapRecap(
+    data,
+    repoDir,
+    selectedComponentApps,
+    collectionInstallCode === 0
+  );
+  append(bootstrapRecap);
   event(`Bootstrap finished exitCode=${code}`);
 
   res.json({
@@ -815,6 +894,7 @@ ansible-playbook \\
     ansibleVerbosityFlag,
     skipTlsVerify,
     encryptVaultFiles,
+    bootstrapRecap,
     gitTokenProvided: Boolean(gitToken)
   });
 });
