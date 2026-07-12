@@ -116,6 +116,104 @@ function gitCredentialLine(repoUrl, token) {
   return `${u.protocol}//${username}:${password}@${u.host}\n`;
 }
 
+function selectedComponentAppsFrom(data) {
+  if (Array.isArray(data.components) && data.components.includes('all')) {
+    return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...provisionApps, 'jira'])];
+  }
+
+  const out = [];
+  const groups = ['openshift', 'rhel', 'patching', 'provision'];
+  const components = Array.isArray(data.components) ? data.components : [];
+
+  for (const component of components) {
+    if (groups.includes(component)) {
+      const selected = data.component_apps?.[component] || [];
+      out.push(...(selected.length > 0 ? selected : [component]));
+    } else {
+      out.push(component);
+    }
+  }
+
+  const derived = [...new Set(out.filter(Boolean))];
+
+  if (derived.length > 0) {
+    return derived;
+  }
+
+  if (Array.isArray(data.selected_component_apps) && data.selected_component_apps.length > 0) {
+    return [...new Set(data.selected_component_apps)];
+  }
+
+  return [];
+}
+
+function defaultComponentConfig(component) {
+  const config = ['rhel', 'satellite', 'idm', 'compliance', 'stig'].includes(component)
+    ? { hostname: '' }
+    : { hostname: '', storage: '' };
+
+  if (component === 'satellite') {
+    Object.assign(config, {
+      organization: '',
+      activation_key: '',
+      service_account_username: '',
+      service_account_password: '',
+      admin_password: '',
+      validate_certs: false,
+      dynamic_inventory_enabled: true,
+      credential_name: 'ADO Satellite Service Account',
+      inventory_source_name: 'ADO Satellite Dynamic Inventory',
+      inventory_overwrite: true,
+      inventory_overwrite_vars: true,
+      inventory_update_on_launch: true,
+      inventory_update_cache_timeout: 0,
+      inventory_verbosity: 0,
+      inventory_host_filter: ''
+    });
+  }
+
+  if (component === 'idm') {
+    Object.assign(config, {
+      domain: '',
+      realm: '',
+      replica_hostname: '',
+      replica_install_dns: true,
+      replica_install_ca: true,
+      auto_forwarders: true,
+      custom_cert_file: '',
+      custom_cert_key_file: '',
+      custom_cert_chain_file: '',
+      admin_password: '',
+      directory_manager_password: ''
+    });
+  }
+
+  return config;
+}
+
+function hydrateSelectedComponentConfigs(data) {
+  const selectedComponentApps = selectedComponentAppsFrom(data);
+
+  if (!data.component_config) data.component_config = {};
+
+  for (const component of selectedComponentApps) {
+    data.component_config[component] = {
+      ...defaultComponentConfig(component),
+      ...(data.component_config[component] || {})
+    };
+
+    if (component === 'satellite' && data.component_config[component].dynamic_inventory_enabled === undefined) {
+      data.component_config[component].dynamic_inventory_enabled = true;
+    }
+
+    if (component === 'idm') {
+      delete data.component_config[component].storage;
+    }
+  }
+
+  return data;
+}
+
 
 function normalizePreflightPayload(input) {
   const data = JSON.parse(JSON.stringify(input || {}));
@@ -170,6 +268,7 @@ function normalizePreflightPayload(input) {
   if (!data.aap.git_branch) data.aap.git_branch = 'main';
 
   if (!data.component_config) data.component_config = {};
+  hydrateSelectedComponentConfigs(data);
   if (!data.component_config.satellite) data.component_config.satellite = {};
   if (data.component_config.satellite.service_account_username === undefined) {
     data.component_config.satellite.service_account_username = '';
@@ -184,7 +283,7 @@ function normalizePreflightPayload(input) {
     data.component_config.satellite.validate_certs = false;
   }
   if (data.component_config.satellite.dynamic_inventory_enabled === undefined) {
-    data.component_config.satellite.dynamic_inventory_enabled = false;
+    data.component_config.satellite.dynamic_inventory_enabled = true;
   }
   if (!data.component_config.satellite.credential_name) {
     data.component_config.satellite.credential_name = 'ADO Satellite Service Account';
@@ -227,37 +326,6 @@ function normalizePreflightPayload(input) {
   if (data.openshift.token === undefined) data.openshift.token = '';
 
   return data;
-}
-
-function selectedComponentAppsFrom(data) {
-  if (Array.isArray(data.components) && data.components.includes('all')) {
-    return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...provisionApps, 'jira'])];
-  }
-
-  const out = [];
-  const groups = ['openshift', 'rhel', 'patching', 'provision'];
-  const components = Array.isArray(data.components) ? data.components : [];
-
-  for (const component of components) {
-    if (groups.includes(component)) {
-      const selected = data.component_apps?.[component] || [];
-      out.push(...(selected.length > 0 ? selected : [component]));
-    } else {
-      out.push(component);
-    }
-  }
-
-  const derived = [...new Set(out.filter(Boolean))];
-
-  if (derived.length > 0) {
-    return derived;
-  }
-
-  if (Array.isArray(data.selected_component_apps) && data.selected_component_apps.length > 0) {
-    return [...new Set(data.selected_component_apps)];
-  }
-
-  return [];
 }
 
 function pruneSelectedPayload(data, selectedComponentApps) {

@@ -168,7 +168,7 @@ const defaults = {
       service_account_password: '',
       admin_password: '',
       validate_certs: false,
-      dynamic_inventory_enabled: false,
+      dynamic_inventory_enabled: true,
       credential_name: 'ADO Satellite Service Account',
       inventory_source_name: 'ADO Satellite Dynamic Inventory',
       inventory_overwrite: true,
@@ -692,6 +692,67 @@ function App() {
     return incomingValue;
   };
 
+  const defaultComponentConfig = component => {
+    const fallback = ['rhel', 'satellite', 'idm', 'compliance', 'stig'].includes(component)
+      ? { hostname: '' }
+      : { hostname: '', storage: '' };
+    const base = defaults.component_config?.[component] || fallback;
+    const config = JSON.parse(JSON.stringify(base));
+
+    if (component === 'satellite') {
+      config.dynamic_inventory_enabled = config.dynamic_inventory_enabled !== false;
+      if (config.validate_certs === undefined) config.validate_certs = false;
+      if (!config.credential_name) config.credential_name = 'ADO Satellite Service Account';
+      if (!config.inventory_source_name) config.inventory_source_name = 'ADO Satellite Dynamic Inventory';
+      if (config.inventory_overwrite === undefined) config.inventory_overwrite = true;
+      if (config.inventory_overwrite_vars === undefined) config.inventory_overwrite_vars = true;
+      if (config.inventory_update_on_launch === undefined) config.inventory_update_on_launch = true;
+      if (config.inventory_update_cache_timeout === undefined) config.inventory_update_cache_timeout = 0;
+      if (config.inventory_verbosity === undefined) config.inventory_verbosity = 0;
+      if (config.inventory_host_filter === undefined) config.inventory_host_filter = '';
+    }
+
+    if (component === 'idm') {
+      delete config.storage;
+      if (config.replica_hostname === undefined) config.replica_hostname = '';
+      if (config.replica_install_dns === undefined) config.replica_install_dns = true;
+      if (config.replica_install_ca === undefined) config.replica_install_ca = true;
+      if (config.auto_forwarders === undefined) config.auto_forwarders = true;
+      if (config.custom_cert_file === undefined) config.custom_cert_file = '';
+      if (config.custom_cert_key_file === undefined) config.custom_cert_key_file = '';
+      if (config.custom_cert_chain_file === undefined) config.custom_cert_chain_file = '';
+      if (config.admin_password === undefined) config.admin_password = '';
+      if (config.directory_manager_password === undefined) config.directory_manager_password = '';
+    }
+
+    return config;
+  };
+
+  const hydrateSelectedComponentConfigs = source => {
+    const hydrated = JSON.parse(JSON.stringify(source || {}));
+    const selectedApps = selectedComponentAppsFrom(hydrated);
+
+    if (!hydrated.component_config) hydrated.component_config = {};
+
+    selectedApps.forEach(component => {
+      const defaultsForComponent = defaultComponentConfig(component);
+      hydrated.component_config[component] = deepMerge(
+        defaultsForComponent,
+        hydrated.component_config[component] || {}
+      );
+
+      if (component === 'satellite' && hydrated.component_config[component].dynamic_inventory_enabled === undefined) {
+        hydrated.component_config[component].dynamic_inventory_enabled = true;
+      }
+
+      if (component === 'idm') {
+        delete hydrated.component_config[component].storage;
+      }
+    });
+
+    return hydrated;
+  };
+
   const normalizeImportedPreflight = imported => {
     if (!imported || typeof imported !== 'object' || Array.isArray(imported)) {
       throw new Error('Uploaded file must contain a JSON object.');
@@ -709,7 +770,7 @@ function App() {
       }
     }
 
-    const merged = deepMerge(defaults, normalizedInput);
+    let merged = deepMerge(defaults, normalizedInput);
 
     if (!Array.isArray(merged.components) || merged.components.length === 0) {
       merged.components = ['rhel'];
@@ -729,6 +790,7 @@ function App() {
     if (merged.component_config.idm) {
       delete merged.component_config.idm.storage;
     }
+    merged = hydrateSelectedComponentConfigs(merged);
     if (!merged.component_options) merged.component_options = {};
     if (!merged.aap) merged.aap = {};
     if (!Array.isArray(merged.aap.additional_credentials)) merged.aap.additional_credentials = [];
@@ -790,7 +852,7 @@ function App() {
   };
 
   const buildPreflightPayload = () => {
-    const payload = JSON.parse(JSON.stringify(data));
+    const payload = hydrateSelectedComponentConfigs(data);
     const selectedApps = selectedComponentAppsFrom(payload);
     const allowedConfig = new Set(selectedApps);
     const selectedConfig = {};
@@ -838,7 +900,7 @@ function App() {
       const copy = JSON.parse(JSON.stringify(prev));
 
       if (!copy.component_config) copy.component_config = {};
-      if (!copy.component_config[component]) copy.component_config[component] = { hostname: '' };
+      if (!copy.component_config[component]) copy.component_config[component] = defaultComponentConfig(component);
       if (copy.component_config[component].hostname === undefined) copy.component_config[component].hostname = '';
       if (!['rhel', 'satellite', 'idm', 'compliance', 'stig'].includes(component) && copy.component_config[component].storage === undefined) {
         copy.component_config[component].storage = '';

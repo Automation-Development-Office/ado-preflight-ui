@@ -40,6 +40,10 @@ All notable changes to the ADO Preflight UI are documented in this file.
 
 ### Fixed
 
+- JSON import and export now hydrate selected Satellite and IDM configuration
+  sections when older preflight files are missing `component_config.satellite`
+  or `component_config.idm`, and selected Satellite defaults dynamic inventory
+  creation on.
 - JSON import now ignores stale `selected_component_apps` when richer
   `components` and `component_apps` selections are present, so older saved
   preflight files keep Satellite, IDM, Compliance, and STIG selections.
