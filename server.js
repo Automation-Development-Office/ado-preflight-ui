@@ -1,7 +1,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 
 process.env.NODE_OPTIONS = '--max-old-space-size=256';
 
@@ -76,6 +76,15 @@ function normalizeNonNegativeInt(value, fallback = 0) {
   return parsed;
 }
 
+function normalizeOrgScopedName(value, org, fallbackSuffix) {
+  const prefix = String(org || 'ADO').trim() || 'ADO';
+  const fallback = `${prefix}-${fallbackSuffix}`;
+  const raw = String(value || fallback).trim() || fallback;
+  const cleaned = raw.replace(/\s+/g, '-');
+
+  return cleaned.startsWith(`${prefix}-`) ? cleaned : `${prefix}-${cleaned}`;
+}
+
 function verbosityFlag(level) {
   const normalized = normalizeVerbosity(level);
 
@@ -147,6 +156,26 @@ function selectedComponentAppsFrom(data) {
   return [];
 }
 
+function pruneInactiveComponentApps(data) {
+  const groups = ['openshift', 'rhel', 'patching', 'provision'];
+  const components = Array.isArray(data.components) ? data.components : [];
+  const allSelected = components.includes('all');
+
+  if (!data.component_apps) data.component_apps = {};
+
+  for (const group of groups) {
+    if (!Array.isArray(data.component_apps[group])) {
+      data.component_apps[group] = [];
+    }
+
+    if (!allSelected && !components.includes(group)) {
+      data.component_apps[group] = [];
+    }
+  }
+
+  return data;
+}
+
 function defaultComponentConfig(component) {
   const config = ['rhel', 'satellite', 'idm', 'compliance', 'stig'].includes(component)
     ? { hostname: '' }
@@ -193,6 +222,7 @@ function defaultComponentConfig(component) {
 
 function hydrateSelectedComponentConfigs(data) {
   const selectedComponentApps = selectedComponentAppsFrom(data);
+  const allowedConfig = new Set(selectedComponentApps);
 
   if (!data.component_config) data.component_config = {};
 
@@ -210,6 +240,10 @@ function hydrateSelectedComponentConfigs(data) {
       delete data.component_config[component].storage;
     }
   }
+
+  data.component_config = Object.fromEntries(
+    Object.entries(data.component_config).filter(([component]) => allowedConfig.has(component))
+  );
 
   return data;
 }
@@ -238,6 +272,7 @@ function normalizePreflightPayload(input) {
     data.component = data.components[0];
     data.platform = data.components;
   }
+  pruneInactiveComponentApps(data);
 
   if (!data.git) data.git = {};
   if (data.git.auto_push === undefined) data.git.auto_push = true;
@@ -250,16 +285,16 @@ function normalizePreflightPayload(input) {
   if (data.aap.enabled === undefined) data.aap.enabled = true;
   if (data.aap.skip_tls_verify === undefined) data.aap.skip_tls_verify = false;
   if (!data.aap.organization) data.aap.organization = 'ADO';
-  if (!data.aap.inventory) data.aap.inventory = `${data.aap.organization}-inventory`;
-  if (!data.aap.project) data.aap.project = `${data.aap.organization}-project`;
-  if (!data.aap.vault_credential_name) data.aap.vault_credential_name = `${data.aap.organization}-vault`;
+  data.aap.inventory = normalizeOrgScopedName(data.aap.inventory, data.aap.organization, 'inventory');
+  data.aap.project = normalizeOrgScopedName(data.aap.project, data.aap.organization, 'project');
+  data.aap.vault_credential_name = normalizeOrgScopedName(data.aap.vault_credential_name, data.aap.organization, 'vault');
   if (data.aap.hub_publish_ado_collection === undefined) data.aap.hub_publish_ado_collection = true;
   if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = true;
   data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
   if (!Array.isArray(data.aap.additional_credentials)) data.aap.additional_credentials = [];
   data.aap.additional_credentials = data.aap.additional_credentials.map(({ id, ...credential }) => credential);
   if (!data.aap.machine_credential) data.aap.machine_credential = {};
-  if (!data.aap.machine_credential.name) data.aap.machine_credential.name = `${data.aap.organization}-machine`;
+  data.aap.machine_credential.name = normalizeOrgScopedName(data.aap.machine_credential.name, data.aap.organization, 'machine');
   if (!data.aap.machine_credential.username) data.aap.machine_credential.username = 'cloud-user';
   if (data.aap.machine_credential.ssh_key_data === undefined) data.aap.machine_credential.ssh_key_data = '';
   if (data.aap.machine_credential.ssh_key_unlock === undefined) data.aap.machine_credential.ssh_key_unlock = '';
@@ -269,61 +304,88 @@ function normalizePreflightPayload(input) {
 
   if (!data.component_config) data.component_config = {};
   hydrateSelectedComponentConfigs(data);
-  if (!data.component_config.satellite) data.component_config.satellite = {};
-  if (data.component_config.satellite.service_account_username === undefined) {
-    data.component_config.satellite.service_account_username = '';
-  }
-  if (data.component_config.satellite.service_account_password === undefined) {
-    data.component_config.satellite.service_account_password = '';
-  }
-  if (data.component_config.satellite.admin_password === undefined) {
-    data.component_config.satellite.admin_password = '';
-  }
-  if (data.component_config.satellite.validate_certs === undefined) {
-    data.component_config.satellite.validate_certs = false;
-  }
-  if (data.component_config.satellite.dynamic_inventory_enabled === undefined) {
-    data.component_config.satellite.dynamic_inventory_enabled = true;
-  }
-  if (!data.component_config.satellite.credential_name) {
-    data.component_config.satellite.credential_name = 'ADO Satellite Service Account';
-  }
-  if (!data.component_config.satellite.inventory_source_name) {
-    data.component_config.satellite.inventory_source_name = 'ADO Satellite Dynamic Inventory';
-  }
-  if (data.component_config.satellite.inventory_overwrite === undefined) {
-    data.component_config.satellite.inventory_overwrite = true;
-  }
-  if (data.component_config.satellite.inventory_overwrite_vars === undefined) {
-    data.component_config.satellite.inventory_overwrite_vars = true;
-  }
-  if (data.component_config.satellite.inventory_update_on_launch === undefined) {
-    data.component_config.satellite.inventory_update_on_launch = true;
-  }
-  data.component_config.satellite.inventory_update_cache_timeout = normalizeNonNegativeInt(
-    data.component_config.satellite.inventory_update_cache_timeout,
-    0
-  );
-  data.component_config.satellite.inventory_verbosity = normalizeVerbosity(
-    data.component_config.satellite.inventory_verbosity
-  );
-  if (data.component_config.satellite.inventory_host_filter === undefined) {
-    data.component_config.satellite.inventory_host_filter = '';
+  const selectedComponentApps = selectedComponentAppsFrom(data);
+
+  if (selectedComponentApps.includes('satellite')) {
+    if (!data.component_config.satellite) data.component_config.satellite = {};
+    if (data.component_config.satellite.service_account_username === undefined) {
+      data.component_config.satellite.service_account_username = '';
+    }
+    if (data.component_config.satellite.service_account_password === undefined) {
+      data.component_config.satellite.service_account_password = '';
+    }
+    if (data.component_config.satellite.admin_password === undefined) {
+      data.component_config.satellite.admin_password = '';
+    }
+    if (data.component_config.satellite.validate_certs === undefined) {
+      data.component_config.satellite.validate_certs = false;
+    }
+    if (data.component_config.satellite.dynamic_inventory_enabled === undefined) {
+      data.component_config.satellite.dynamic_inventory_enabled = true;
+    }
+    if (!data.component_config.satellite.credential_name) {
+      data.component_config.satellite.credential_name = 'ADO Satellite Service Account';
+    }
+    if (!data.component_config.satellite.inventory_source_name) {
+      data.component_config.satellite.inventory_source_name = 'ADO Satellite Dynamic Inventory';
+    }
+    if (data.component_config.satellite.inventory_overwrite === undefined) {
+      data.component_config.satellite.inventory_overwrite = true;
+    }
+    if (data.component_config.satellite.inventory_overwrite_vars === undefined) {
+      data.component_config.satellite.inventory_overwrite_vars = true;
+    }
+    if (data.component_config.satellite.inventory_update_on_launch === undefined) {
+      data.component_config.satellite.inventory_update_on_launch = true;
+    }
+    data.component_config.satellite.inventory_update_cache_timeout = normalizeNonNegativeInt(
+      data.component_config.satellite.inventory_update_cache_timeout,
+      0
+    );
+    data.component_config.satellite.inventory_verbosity = normalizeVerbosity(
+      data.component_config.satellite.inventory_verbosity
+    );
+    if (data.component_config.satellite.inventory_host_filter === undefined) {
+      data.component_config.satellite.inventory_host_filter = '';
+    }
   }
 
-  if (!data.component_config.idm) data.component_config.idm = {};
-  delete data.component_config.idm.storage;
-  if (data.component_config.idm.replica_hostname === undefined) data.component_config.idm.replica_hostname = '';
-  if (data.component_config.idm.replica_install_dns === undefined) data.component_config.idm.replica_install_dns = true;
-  if (data.component_config.idm.replica_install_ca === undefined) data.component_config.idm.replica_install_ca = true;
-  if (data.component_config.idm.auto_forwarders === undefined) data.component_config.idm.auto_forwarders = true;
-  if (data.component_config.idm.custom_cert_file === undefined) data.component_config.idm.custom_cert_file = '';
-  if (data.component_config.idm.custom_cert_key_file === undefined) data.component_config.idm.custom_cert_key_file = '';
-  if (data.component_config.idm.custom_cert_chain_file === undefined) data.component_config.idm.custom_cert_chain_file = '';
+  if (selectedComponentApps.includes('idm')) {
+    if (!data.component_config.idm) data.component_config.idm = {};
+    delete data.component_config.idm.storage;
+    if (data.component_config.idm.replica_hostname === undefined) data.component_config.idm.replica_hostname = '';
+    if (data.component_config.idm.replica_install_dns === undefined) data.component_config.idm.replica_install_dns = true;
+    if (data.component_config.idm.replica_install_ca === undefined) data.component_config.idm.replica_install_ca = true;
+    if (data.component_config.idm.auto_forwarders === undefined) data.component_config.idm.auto_forwarders = true;
+    if (data.component_config.idm.custom_cert_file === undefined) data.component_config.idm.custom_cert_file = '';
+    if (data.component_config.idm.custom_cert_key_file === undefined) data.component_config.idm.custom_cert_key_file = '';
+    if (data.component_config.idm.custom_cert_chain_file === undefined) data.component_config.idm.custom_cert_chain_file = '';
+  }
 
   if (!data.openshift) data.openshift = {};
   if (data.openshift.skip_tls_verify === undefined) data.openshift.skip_tls_verify = true;
   if (data.openshift.token === undefined) data.openshift.token = '';
+  if (data.openshift.admin_username === undefined) data.openshift.admin_username = 'admin';
+  if (data.openshift.admin_password === undefined) data.openshift.admin_password = '';
+  if (data.openshift.admin_role === undefined) data.openshift.admin_role = 'cluster-admin';
+  if (data.openshift.banner_text === undefined) data.openshift.banner_text = 'Hello! ADO OpenShift';
+  if (data.openshift.banner_location === undefined) data.openshift.banner_location = 'BannerTop';
+  if (data.openshift.banner_background_color === undefined) data.openshift.banner_background_color = '#1f7a1f';
+  if (data.openshift.banner_text_color === undefined) data.openshift.banner_text_color = '#ffffff';
+
+  if (!data.component_config.cert_manager) data.component_config.cert_manager = {};
+  if (data.component_config.cert_manager.mode === undefined) data.component_config.cert_manager.mode = 'cert';
+  if (data.component_config.cert_manager.tls_crt === undefined) data.component_config.cert_manager.tls_crt = '';
+  if (data.component_config.cert_manager.tls_key === undefined) data.component_config.cert_manager.tls_key = '';
+  if (data.component_config.cert_manager.idm_acme_directory_url === undefined) data.component_config.cert_manager.idm_acme_directory_url = '';
+  if (data.component_config.cert_manager.idm_ca_bundle_file === undefined) data.component_config.cert_manager.idm_ca_bundle_file = '';
+  if (data.component_config.cert_manager.awspca_namespace === undefined) data.component_config.cert_manager.awspca_namespace = 'cert-manager';
+  if (data.component_config.cert_manager.awspca_secret_name === undefined) data.component_config.cert_manager.awspca_secret_name = 'awspca-creds';
+  if (data.component_config.cert_manager.awspca_issuer_name === undefined) data.component_config.cert_manager.awspca_issuer_name = 'awspca-clusterissuer';
+  if (data.component_config.cert_manager.awspca_region === undefined) data.component_config.cert_manager.awspca_region = 'us-gov-west-1';
+  if (data.component_config.cert_manager.awspca_pca_arn === undefined) data.component_config.cert_manager.awspca_pca_arn = '';
+  if (data.component_config.cert_manager.awspca_access_key_id === undefined) data.component_config.cert_manager.awspca_access_key_id = '';
+  if (data.component_config.cert_manager.awspca_secret_access_key === undefined) data.component_config.cert_manager.awspca_secret_access_key = '';
 
   return data;
 }
@@ -510,6 +572,93 @@ function readTextFromCandidates(candidates) {
   };
 }
 
+function adoCollectionRoots() {
+  ensureAdoCollectionExtracted();
+
+  return [
+    process.env.ADO_COLLECTION_ROOT,
+    path.join(__dirname, '..', 'ado'),
+    path.join(__dirname, 'collections', 'ansible_collections', 'infra', 'ado'),
+    path.join(__dirname, '..', 'collections', 'ansible_collections', 'infra', 'ado'),
+    path.join(process.cwd(), 'collections', 'ansible_collections', 'infra', 'ado'),
+    path.join('/workspace', 'collections', 'ansible_collections', 'infra', 'ado'),
+    path.join('/usr', 'share', 'ansible', 'collections', 'ansible_collections', 'infra', 'ado'),
+    path.join('/opt', 'app-root', 'src', 'collections', 'ansible_collections', 'infra', 'ado'),
+    path.join('/opt', 'app-root', 'collections', 'ansible_collections', 'infra', 'ado'),
+    path.join('/opt', 'ado-collections', 'extracted'),
+    path.join('/opt', 'ado-collections', 'ansible_collections', 'infra', 'ado'),
+    path.join('/opt', 'app-root', 'ado')
+  ].filter(Boolean);
+}
+
+function adoCollectionReadmeCandidates() {
+  return [
+    process.env.ADO_COLLECTION_README,
+    ...adoCollectionRoots().flatMap(root => [
+      path.join(root, 'README.md'),
+      path.join(root, 'README.me')
+    ]),
+    path.join('/opt', 'ado-collections', 'README.md'),
+    path.join('/opt', 'app-root', 'ado', 'README.me'),
+    path.join('/workspace', 'README.md'),
+    path.join(process.cwd(), 'README.md')
+  ];
+}
+
+function latestAdoCollectionArchive() {
+  const candidates = [
+    process.env.ADO_COLLECTION_ARCHIVE,
+    path.join(__dirname, 'collections'),
+    path.join('/opt', 'ado-collections')
+  ].filter(Boolean);
+
+  const archives = [];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      archives.push(candidate);
+      continue;
+    }
+
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      for (const fileName of fs.readdirSync(candidate)) {
+        if (/^infra-ado-.*\.tar\.gz$/.test(fileName)) {
+          archives.push(path.join(candidate, fileName));
+        }
+      }
+    }
+  }
+
+  return archives.sort().pop() || '';
+}
+
+function ensureAdoCollectionExtracted() {
+  const extractRoot = path.join('/opt', 'ado-collections', 'extracted');
+  const expectedReadme = path.join(extractRoot, 'README.md');
+  const expectedRoles = path.join(extractRoot, 'roles');
+
+  if (fs.existsSync(expectedReadme) && fs.existsSync(expectedRoles)) {
+    return;
+  }
+
+  const archive = latestAdoCollectionArchive();
+  if (!archive) {
+    return;
+  }
+
+  try {
+    fs.mkdirSync(extractRoot, { recursive: true });
+    execFileSync('tar', ['-xzf', archive, '-C', extractRoot], {
+      stdio: 'ignore'
+    });
+    event(`Extracted ADO collection documentation from ${archive}`);
+  } catch (err) {
+    event(`Failed extracting ADO collection documentation: ${err.message}`);
+  }
+}
+
 function documentationFallback(title, checkedPaths) {
   return `# ${title}
 
@@ -533,11 +682,23 @@ function cleanYamlName(value) {
     .trim();
 }
 
-function readConfigNames(filePath) {
-  if (!fs.existsSync(filePath)) return [];
+function listYamlFiles(dirPath) {
+  if (!fs.existsSync(dirPath)) return [];
+
+  return fs.readdirSync(dirPath)
+    .filter(fileName => /\.(yml|yaml)$/.test(fileName))
+    .map(fileName => path.join(dirPath, fileName));
+}
+
+function readConfigNames(filePaths) {
+  const paths = Array.isArray(filePaths) ? filePaths : [filePaths];
+  const existingPaths = paths.filter(filePath => filePath && fs.existsSync(filePath));
+  if (existingPaths.length === 0) return [];
 
   const names = [];
-  const text = fs.readFileSync(filePath, 'utf8');
+  const text = existingPaths
+    .map(filePath => fs.readFileSync(filePath, 'utf8'))
+    .join('\n');
   const namePattern = /^(?:-\s+|\s{2}-\s+)name:\s*(.+?)\s*$/gm;
   let match = namePattern.exec(text);
 
@@ -563,22 +724,40 @@ function appendListRecap(lines, label, values) {
   values.forEach(value => lines.push(`  - ${value}`));
 }
 
+function readFirstConfigName(files, fallback = 'not configured') {
+  const names = readConfigNames(files);
+  return names[0] || fallback;
+}
+
 function buildBootstrapRecap(data, repoDir, selectedComponentApps, collectionInstalled) {
   const controllerDir = path.join(repoDir, 'configs', 'controller');
+  const jobTemplatesDir = path.join(repoDir, 'configs', 'job_templates');
   const workflowsDir = path.join(repoDir, 'configs', 'workflows');
+  const projectName = readFirstConfigName(
+    path.join(controllerDir, 'projects.yml'),
+    data?.aap?.project || 'not configured'
+  );
   const lines = [
     '',
     '=== ADO Bootstrap Recap ===',
     `AAP Server: ${data?.aap?.hostname || 'not configured'}`,
     `Organization: ${data?.aap?.organization || 'not configured'}`,
-    `Project Name: ${data?.aap?.project || 'not configured'}`
+    `Project Name: ${projectName}`
   ];
 
   appendListRecap(lines, 'Components', selectedComponentApps);
-  appendListRecap(lines, 'Job Templates', readConfigNames(path.join(controllerDir, 'job_templates.yml')));
-  appendListRecap(lines, 'Workflow Templates', readConfigNames(path.join(workflowsDir, 'bootstrap_workflows.yml')));
+  appendListRecap(lines, 'Job Templates', readConfigNames([
+    path.join(controllerDir, 'job_templates.yml'),
+    ...listYamlFiles(jobTemplatesDir)
+  ]));
+  appendListRecap(lines, 'Workflow Templates', readConfigNames([
+    path.join(workflowsDir, 'bootstrap_workflows.yml'),
+    ...listYamlFiles(workflowsDir)
+  ]));
   appendListRecap(lines, 'Credentials', readConfigNames(path.join(controllerDir, 'credentials.yml')));
   appendListRecap(lines, 'Inventories', readConfigNames(path.join(controllerDir, 'inventories.yml')));
+  appendListRecap(lines, 'Inventory Sources', readConfigNames(path.join(controllerDir, 'inventory_sources.yml')));
+  appendListRecap(lines, 'Hosts', readConfigNames(path.join(controllerDir, 'hosts.yml')));
   lines.push(`Installed infra.ado collection: ${collectionInstalled ? 'yes' : 'no'}`);
   lines.push('');
 
@@ -633,25 +812,7 @@ app.get('/api/readme/ui', (req, res) => {
 });
 
 app.get('/api/readme/ado', (req, res) => {
-  const result = readTextFromCandidates([
-    process.env.ADO_COLLECTION_README,
-    path.join(__dirname, '..', 'ado', 'README.md'),
-    path.join(__dirname, '..', 'ado', 'README.me'),
-    path.join(__dirname, 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
-    path.join(__dirname, '..', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
-    path.join(process.cwd(), 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
-    path.join('/workspace', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
-    path.join('/usr', 'share', 'ansible', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
-    path.join('/opt', 'app-root', 'src', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
-    path.join('/opt', 'app-root', 'collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
-    path.join('/opt', 'ado-collections', 'extracted', 'README.md'),
-    path.join('/opt', 'ado-collections', 'ansible_collections', 'infra', 'ado', 'README.md'),
-    path.join('/opt', 'ado-collections', 'README.md'),
-    path.join('/opt', 'app-root', 'ado', 'README.md'),
-    path.join('/opt', 'app-root', 'ado', 'README.me'),
-    path.join('/workspace', 'README.md'),
-    path.join(process.cwd(), 'README.md')
-  ]);
+  const result = readTextFromCandidates(adoCollectionReadmeCandidates());
 
   if (!result.text) {
     event(`ADO collection README not found in: ${result.checked.join(', ')}`);
@@ -660,6 +821,38 @@ app.get('/api/readme/ado', (req, res) => {
   }
 
   res.type('text/plain').send(result.text);
+});
+
+app.get('/api/readme/ado/role/:roleName', (req, res) => {
+  const roleName = String(req.params.roleName || '').trim();
+
+  if (!/^[A-Za-z0-9_.-]+$/.test(roleName)) {
+    res.status(400).type('text/plain').send('# Invalid role documentation request');
+    return;
+  }
+
+  const checked = [];
+
+  for (const root of adoCollectionRoots()) {
+    const collectionRoot = path.resolve(root);
+    const candidate = path.resolve(collectionRoot, 'roles', roleName, 'README.md');
+    checked.push(candidate);
+
+    if (!candidate.startsWith(`${collectionRoot}${path.sep}`)) {
+      continue;
+    }
+
+    if (fs.existsSync(candidate)) {
+      res.type('text/plain').send(fs.readFileSync(candidate, 'utf8'));
+      return;
+    }
+  }
+
+  event(`ADO role README not found for ${roleName}: ${checked.join(', ')}`);
+  res
+    .status(404)
+    .type('text/plain')
+    .send(documentationFallback(`ADO Role Documentation: ${roleName}`, checked));
 });
 
 app.get('/api/collection-versions', (req, res) => {
@@ -933,6 +1126,10 @@ ansible-playbook \\
   -e verify_ssl=false \\
   -e skip_tls_verify=${skipTlsVerify ? 'true' : 'false'} \\
   -e ansible_tls_verify=${skipTlsVerify ? 'false' : 'true'} \\
+  -e generate_playbooks=true \\
+  -e generate_aap_configs=true \\
+  -e apply_aap_configs=true \\
+  -e bootstrap_controller_apply_aap_configs=true \\
   -e generate_playbook_repo_pause_for_push=false \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_commit=${autoGitPush ? 'true' : 'false'} \\

@@ -243,9 +243,16 @@ RHEL configuration includes:
 - Compliance profile
 - STIG profile
 - RHEL hostname
+- Additional RHEL hosts
 - Optional machine credential configuration
 
-RHEL no longer asks for storage. Storage is only relevant to OpenShift-style components.
+The first RHEL hostname is written to `component_config.rhel.hostname`.
+Additional RHEL hosts are written to `component_config.rhel.hosts`, one host
+per line. The generated AAP config places those hosts in
+`<organization>-RHEL-Inventory`.
+
+RHEL no longer asks for storage. Storage is only relevant to OpenShift-style
+components.
 
 ### Satellite
 
@@ -263,6 +270,10 @@ Satellite configuration includes:
 Satellite no longer asks for storage.
 
 If dynamic inventory is enabled, the generated AAP controller config includes a Satellite 6 inventory source.
+The Satellite server host is placed in
+`<organization>-Satellite-Server-Inventory`. The Satellite dynamic inventory
+source is attached to `<organization>-RHEL-Inventory` because the hosts returned
+by Satellite are managed RHEL targets.
 
 ### RHBK
 
@@ -292,8 +303,12 @@ OpenShift configuration includes:
 - OpenShift apps domain
 - OpenShift API token
 - Skip TLS certificate verification
+- Admin HTPasswd username, password, and role
+- Console banner text, location, background color, and text color
+- Cert-manager source settings when the `cert_manager` app is selected
 
 The OpenShift skip TLS option defaults to enabled for self-signed environments.
+Cert-manager can be configured for a custom certificate, IdM ACME, or AWS PCA.
 
 ### Grafana
 
@@ -438,6 +453,9 @@ This maps to the same behavior as running with:
 ### Organization-Based Names
 
 The organization name drives the default names for generated AAP objects. Job templates and workflow templates are also prefixed with the organization.
+Generated AAP labels also use the organization name, so an organization named
+`ADO` creates the `ADO` label along with component labels such as
+`ADO | rhel`, `ADO | satellite`, and `ADO | bootstrap`.
 
 Examples:
 
@@ -452,6 +470,54 @@ or:
 MYORG | RHEL Patch Host
 MYORG | Patching Workflow
 ```
+
+### Generated Inventories
+
+The UI and CLI generate separate inventories so job templates target the right
+systems:
+
+- `<organization>-inventory` contains only `localhost`.
+- `<organization>-RHEL-Inventory` contains static RHEL hosts and the Satellite
+  dynamic inventory source when dynamic inventory is enabled.
+- `<organization>-IDM-Inventory` contains IDM server and replica hosts.
+- `<organization>-Satellite-Server-Inventory` contains the Satellite server
+  host.
+
+### Generated Workflows
+
+When RHEL, Satellite, and IDM are selected together, the UI generates the
+focused patching workflow:
+
+```text
+Register Host to Satellite
+RHEL Patch Host
+IdM Manage Client
+```
+
+When RHEL, Satellite, IDM, Compliance, and STIG are selected together, the UI
+generates the RHEL workflow:
+
+```text
+Register Host to Satellite
+RHEL Patch Host
+IdM Manage Client
+RHEL Compliance
+RHEL STIG Hardening
+```
+
+When Satellite is selected, the UI generates the Satellite server workflow:
+
+```text
+Satellite Server Install
+Satellite Server Configure
+```
+
+When OpenShift is selected, the UI generates an OpenShift workflow. It starts
+with admin HTPasswd and console/cert-manager preparation, then includes the
+selected OpenShift application job templates, such as RHBK, Grafana, GitLab,
+Pega, Kafka, AAP, ECK, GitOps, 389ds, OADP, Quay, ACS, and ACM. Workflow nodes
+for unselected apps are pruned before AAP apply, so partial OpenShift selections
+remain valid.
 
 ---
 
@@ -576,6 +642,7 @@ A generated bootstrap repository normally contains:
 │           ├── vars_satellite.yml
 │           └── vault_satellite.yml
 ├── playbooks/
+│   ├── idm/
 │   ├── rhel/
 │   └── satellite/
 └── configs/
@@ -585,6 +652,16 @@ A generated bootstrap repository normally contains:
 ```
 
 The exact directories depend on selected components.
+
+For RHEL and Satellite selections, generated playbooks can include:
+
+- `playbooks/rhel/ado-patch-host-bootstrap.yml`
+- `playbooks/rhel/ado-compliance-bootstrap.yml`
+- `playbooks/rhel/ado-stig-hardening-bootstrap.yml`
+- `playbooks/satellite/ado-register-to-satellite-bootstrap.yml`
+- `playbooks/satellite/ado-install-satellite-bootstrap.yml`
+- `playbooks/satellite/ado-configure-satellite-bootstrap.yml`
+- `playbooks/satellite/ado-manage-content-view-bootstrap.yml`
 
 ---
 
@@ -623,6 +700,21 @@ The modal shows:
 
 This helps confirm which UI image and collection set you are actually running.
 
+## 📚 In-App Documentation
+
+Use the question mark menu in the top-right of the UI to open:
+
+- **ADO Collection Documentation**
+- **ADO Preflight UI Documentation**
+
+The ADO Collection Documentation page renders the collection `README.md`. Role
+README links in the role documentation table can be clicked in the UI. For
+example, clicking `roles/bootstrap_controller/README.md` opens the
+`bootstrap_controller` role README inside the same documentation modal.
+
+The role README loader only serves files matching `roles/<role>/README.md`
+from known ADO collection locations in the running container or local checkout.
+
 ---
 
 ## ✅ Validation Checklist
@@ -634,7 +726,11 @@ After a successful run, validate:
 - Unselected components did not generate config directories.
 - Vault files are encrypted when encryption is enabled.
 - AAP organization exists.
-- AAP inventory exists.
+- `ADO-inventory` or `<organization>-inventory` exists and contains only
+  `localhost`.
+- Component inventories exist when selected, such as
+  `<organization>-RHEL-Inventory`, `<organization>-IDM-Inventory`, and
+  `<organization>-Satellite-Server-Inventory`.
 - AAP project points to the correct Git repo and branch.
 - AAP credentials exist.
 - AAP job templates are prefixed with the organization.

@@ -195,7 +195,22 @@ const defaults = {
     aap: { hostname: '', storage: '' },
     acs: { hostname: '', storage: '' },
     acm: { hostname: '', storage: '' },
-    cert_manager: { hostname: '', storage: '' },
+    cert_manager: {
+      hostname: '',
+      storage: '',
+      mode: 'cert',
+      tls_crt: '',
+      tls_key: '',
+      idm_acme_directory_url: '',
+      idm_ca_bundle_file: '',
+      awspca_namespace: 'cert-manager',
+      awspca_secret_name: 'awspca-creds',
+      awspca_issuer_name: 'awspca-clusterissuer',
+      awspca_region: 'us-gov-west-1',
+      awspca_pca_arn: '',
+      awspca_access_key_id: '',
+      awspca_secret_access_key: ''
+    },
     console: { hostname: '', storage: '' },
     devspaces: { hostname: '', storage: '' },
     dirsrv: { hostname: '', storage: '' },
@@ -289,6 +304,13 @@ const defaults = {
     api_host: 'https://api.ocp.prod.rhlab:6443',
     apps_domain: 'apps.ocp.prod.rhlab',
     skip_tls_verify: true,
+    admin_username: 'admin',
+    admin_password: '',
+    admin_role: 'cluster-admin',
+    banner_text: 'Hello! ADO OpenShift',
+    banner_location: 'BannerTop',
+    banner_background_color: '#1f7a1f',
+    banner_text_color: '#ffffff',
     token: ''
   },
 
@@ -600,6 +622,15 @@ function App() {
     };
   };
 
+  const normalizeOrgScopedName = (value, org, fallbackSuffix) => {
+    const prefix = (org || 'ADO').trim() || 'ADO';
+    const fallback = `${prefix}-${fallbackSuffix}`;
+    const raw = String(value || fallback).trim() || fallback;
+    const cleaned = raw.replace(/\s+/g, '-');
+
+    return cleaned.startsWith(`${prefix}-`) ? cleaned : `${prefix}-${cleaned}`;
+  };
+
   const setAapOrganization = value => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
@@ -662,6 +693,26 @@ function App() {
     }
 
     return [];
+  };
+
+  const pruneInactiveComponentApps = source => {
+    const pruned = JSON.parse(JSON.stringify(source || {}));
+    const components = Array.isArray(pruned.components) ? pruned.components : [];
+    const allSelected = components.includes('all');
+
+    if (!pruned.component_apps) pruned.component_apps = {};
+
+    groupComponents.forEach(group => {
+      if (!Array.isArray(pruned.component_apps[group])) {
+        pruned.component_apps[group] = [];
+      }
+
+      if (!allSelected && !components.includes(group)) {
+        pruned.component_apps[group] = [];
+      }
+    });
+
+    return pruned;
   };
 
   const deepMerge = (baseValue, incomingValue) => {
@@ -731,6 +782,7 @@ function App() {
   const hydrateSelectedComponentConfigs = source => {
     const hydrated = JSON.parse(JSON.stringify(source || {}));
     const selectedApps = selectedComponentAppsFrom(hydrated);
+    const allowedConfig = new Set(selectedApps);
 
     if (!hydrated.component_config) hydrated.component_config = {};
 
@@ -749,6 +801,10 @@ function App() {
         delete hydrated.component_config[component].storage;
       }
     });
+
+    hydrated.component_config = Object.fromEntries(
+      Object.entries(hydrated.component_config).filter(([component]) => allowedConfig.has(component))
+    );
 
     return hydrated;
   };
@@ -785,6 +841,7 @@ function App() {
         merged.component_apps[group] = [];
       }
     });
+    merged = pruneInactiveComponentApps(merged);
 
     if (!merged.component_config) merged.component_config = {};
     if (merged.component_config.idm) {
@@ -852,7 +909,7 @@ function App() {
   };
 
   const buildPreflightPayload = () => {
-    const payload = hydrateSelectedComponentConfigs(data);
+    const payload = hydrateSelectedComponentConfigs(pruneInactiveComponentApps(data));
     const selectedApps = selectedComponentAppsFrom(payload);
     const allowedConfig = new Set(selectedApps);
     const selectedConfig = {};
@@ -877,6 +934,12 @@ function App() {
     payload.component_config = selectedConfig;
     payload.component_options = selectedOptions;
     if (payload.aap) {
+      const org = payload.aap.organization || 'ADO';
+      payload.aap.inventory = normalizeOrgScopedName(payload.aap.inventory, org, 'inventory');
+      payload.aap.project = normalizeOrgScopedName(payload.aap.project, org, 'project');
+      payload.aap.vault_credential_name = normalizeOrgScopedName(payload.aap.vault_credential_name, org, 'vault');
+      if (!payload.aap.machine_credential) payload.aap.machine_credential = {};
+      payload.aap.machine_credential.name = normalizeOrgScopedName(payload.aap.machine_credential.name, org, 'machine');
       payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
       payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
         const { id, ...credentialPayload } = credential;
@@ -1321,6 +1384,19 @@ function App() {
           type={type}
           value={path.split('.').reduce((o, k) => (o || {})[k], data) || ''}
           onChange={(_, v) => set(path, v)}
+        />
+      </FormGroup>
+    </GridItem>
+  );
+
+  const renderTextAreaField = (label, path, help = '', rows = 5) => (
+    <GridItem span={12}>
+      <FormGroup label={labelWithHelp(label, help)}>
+        <textarea
+          value={path.split('.').reduce((o, k) => (o || {})[k], data) || ''}
+          onChange={e => set(path, e.target.value)}
+          rows={rows}
+          style={{ width: '100%', padding: '8px' }}
         />
       </FormGroup>
     </GridItem>
@@ -2212,6 +2288,25 @@ function App() {
         </GridItem>
 
         {renderTextField('Hostname', 'component_config.rhel.hostname')}
+
+        <GridItem span={12}>
+          <FormGroup label="Additional RHEL Hosts">
+            <textarea
+              value={(data.component_config?.rhel?.hosts || []).join('\n')}
+              onChange={e => set('component_config.rhel.hosts', e.target.value.split('\n').map(v => v.trim()).filter(Boolean))}
+              rows={4}
+              spellCheck="false"
+              style={{
+                width: '100%',
+                background: fieldBg,
+                color: fieldColor,
+                border: `1px solid ${borderColor}`,
+                borderRadius: '4px',
+                padding: '8px'
+              }}
+            />
+          </FormGroup>
+        </GridItem>
       </Grid>
 
       {renderMachineCredentialConfig()}
@@ -2236,7 +2331,11 @@ function App() {
     </>
   );
 
-  const renderOpenShiftIntegration = () => (
+  const renderOpenShiftIntegration = () => {
+    const certManagerSelected = (data.component_apps?.openshift || []).includes('cert_manager');
+    const certMode = data.component_config?.cert_manager?.mode || 'cert';
+
+    return (
     <>
       <p style={{ color: mutedTextColor }}>This section is opened by clicking <strong>openshift</strong>.</p>
       <Grid hasGutter>
@@ -2283,9 +2382,127 @@ function App() {
             </div>
           </FormGroup>
         </GridItem>
+
+        <GridItem span={6}>
+          <FormGroup label="Admin HTPasswd Username">
+            <TextInput
+              value={data.openshift.admin_username || ''}
+              onChange={(_, v) => set('openshift.admin_username', v)}
+            />
+          </FormGroup>
+        </GridItem>
+
+        <GridItem span={6}>
+          <FormGroup label="Admin HTPasswd Password">
+            <TextInput
+              type="password"
+              value={data.openshift.admin_password || ''}
+              onChange={(_, v) => set('openshift.admin_password', v)}
+            />
+          </FormGroup>
+        </GridItem>
+
+        <GridItem span={6}>
+          <FormGroup label="Admin HTPasswd Role">
+            <TextInput
+              value={data.openshift.admin_role || 'cluster-admin'}
+              onChange={(_, v) => set('openshift.admin_role', v)}
+            />
+          </FormGroup>
+        </GridItem>
+
+        <GridItem span={6}>
+          <FormGroup label="Console Banner Location">
+            <TextInput
+              value={data.openshift.banner_location || 'BannerTop'}
+              onChange={(_, v) => set('openshift.banner_location', v)}
+            />
+          </FormGroup>
+        </GridItem>
+
+        <GridItem span={12}>
+          <FormGroup label="Console Banner Text">
+            <TextInput
+              value={data.openshift.banner_text || ''}
+              onChange={(_, v) => set('openshift.banner_text', v)}
+            />
+          </FormGroup>
+        </GridItem>
+
+        <GridItem span={6}>
+          <FormGroup label="Console Banner Background Color">
+            <TextInput
+              value={data.openshift.banner_background_color || '#1f7a1f'}
+              onChange={(_, v) => set('openshift.banner_background_color', v)}
+            />
+          </FormGroup>
+        </GridItem>
+
+        <GridItem span={6}>
+          <FormGroup label="Console Banner Text Color">
+            <TextInput
+              value={data.openshift.banner_text_color || '#ffffff'}
+              onChange={(_, v) => set('openshift.banner_text_color', v)}
+            />
+          </FormGroup>
+        </GridItem>
+
+        {certManagerSelected && (
+          <>
+            <GridItem span={12}>
+              <FormGroup label="Cert-Manager Certificate Source">
+                <Radio
+                  label="Custom certificate"
+                  name="cert-manager-mode"
+                  isChecked={certMode === 'cert'}
+                  onChange={() => set('component_config.cert_manager.mode', 'cert')}
+                />
+                <Radio
+                  label="IdM ACME"
+                  name="cert-manager-mode"
+                  isChecked={certMode === 'idm_acme'}
+                  onChange={() => set('component_config.cert_manager.mode', 'idm_acme')}
+                />
+                <Radio
+                  label="AWS PCA"
+                  name="cert-manager-mode"
+                  isChecked={certMode === 'aws_pca'}
+                  onChange={() => set('component_config.cert_manager.mode', 'aws_pca')}
+                />
+              </FormGroup>
+            </GridItem>
+
+            {certMode === 'cert' && (
+              <>
+                {renderTextAreaField('TLS Certificate', 'component_config.cert_manager.tls_crt')}
+                {renderTextAreaField('TLS Private Key', 'component_config.cert_manager.tls_key')}
+              </>
+            )}
+
+            {certMode === 'idm_acme' && (
+              <>
+                {renderTextField('IdM ACME Directory URL', 'component_config.cert_manager.idm_acme_directory_url')}
+                {renderTextField('IdM CA Bundle File', 'component_config.cert_manager.idm_ca_bundle_file')}
+              </>
+            )}
+
+            {certMode === 'aws_pca' && (
+              <>
+                {renderTextField('AWS PCA Namespace', 'component_config.cert_manager.awspca_namespace')}
+                {renderTextField('AWS PCA Secret Name', 'component_config.cert_manager.awspca_secret_name')}
+                {renderTextField('AWS PCA Issuer Name', 'component_config.cert_manager.awspca_issuer_name')}
+                {renderTextField('AWS Region', 'component_config.cert_manager.awspca_region')}
+                {renderTextField('AWS PCA ARN', 'component_config.cert_manager.awspca_pca_arn')}
+                {renderTextField('AWS Access Key ID', 'component_config.cert_manager.awspca_access_key_id', 'password')}
+                {renderTextField('AWS Secret Access Key', 'component_config.cert_manager.awspca_secret_access_key', 'password')}
+              </>
+            )}
+          </>
+        )}
       </Grid>
     </>
-  );
+    );
+  };
 
   const renderJiraConfig = () => (
     <>
@@ -2684,8 +2901,32 @@ ${vaultYaml}
     );
   };
 
+  const openAdoMarkdownLink = href => {
+    const roleMatch = String(href || '').match(/^roles\/([^/]+)\/README\.md$/);
+
+    if (!roleMatch) return false;
+
+    fetch(`/api/readme/ado/role/${encodeURIComponent(roleMatch[1])}`)
+      .then(r => {
+        if (!r.ok) throw new Error('ADO role README request failed');
+        return r.text();
+      })
+      .then(text => {
+        setAdoReadmeMarkdown(text);
+        setDocumentationType('ado');
+        setDocumentationOpen(true);
+      })
+      .catch(() => {
+        setAdoReadmeMarkdown(`# ADO Role Documentation Unavailable\n\nCould not load \`${href}\`.`);
+        setDocumentationType('ado');
+        setDocumentationOpen(true);
+      });
+
+    return true;
+  };
+
   const renderInlineMarkdown = text => {
-    const parts = String(text || '').split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+    const parts = String(text || '').split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g);
 
     return parts.map((part, index) => {
       if (part.startsWith('`') && part.endsWith('`')) {
@@ -2693,6 +2934,24 @@ ${vaultYaml}
       }
       if (part.startsWith('**') && part.endsWith('**')) {
         return <strong key={index}>{part.slice(2, -2)}</strong>;
+      }
+      const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (link) {
+        const label = link[1];
+        const href = link[2];
+        return (
+          <a
+            key={index}
+            href={href}
+            onClick={event => {
+              if (openAdoMarkdownLink(href)) {
+                event.preventDefault();
+              }
+            }}
+          >
+            {label}
+          </a>
+        );
       }
       return <React.Fragment key={index}>{part}</React.Fragment>;
     });

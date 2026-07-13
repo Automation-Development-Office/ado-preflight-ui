@@ -14,6 +14,8 @@ All notable changes to the ADO Preflight UI are documented in this file.
 - Added AAP additional credential entry support with tabbed credential forms.
 - Added AAP Hub publishing control for the `infra.ado` collection, with validated content handling tied to the same setting.
 - Added organization-based AAP object naming defaults for inventory, project, vault credential, job templates, and workflow templates.
+- Added organization-based AAP label generation so generated automation can be
+  filtered by an organization label such as `ADO`.
 - Added machine credential SSH key inputs for RHEL, Satellite, and patching workflows.
 - Added Satellite service account fields for Satellite configuration.
 - Added Satellite dynamic inventory configuration fields for AAP inventory sources.
@@ -23,6 +25,12 @@ All notable changes to the ADO Preflight UI are documented in this file.
 - Added ADO Collection Documentation and ADO Preflight UI Documentation entries under the help menu.
 - Added markdown rendering for in-app documentation.
 - Added JSON import in Core Environment Information so saved preflight payloads can repopulate the UI.
+- Added an Additional RHEL Hosts textarea so UI runs can populate
+  `component_config.rhel.hosts` for the generated RHEL inventory.
+- Added clickable ADO role README links in the in-app collection documentation
+  modal.
+- Added OpenShift admin HTPasswd, console banner, and cert-manager source
+  fields so UI runs can drive the generated OpenShift bootstrap workflow.
 
 ### Changed
 
@@ -37,9 +45,19 @@ All notable changes to the ADO Preflight UI are documented in this file.
 - Additional credentials now render as tabs instead of stacking multiple large cards on the main page.
 - The UI README was rewritten as an operator-focused guide for first-time ADO and UI users.
 - The runtime container now copies the UI README and extracts the ADO collection README from the packaged `infra-ado` collection tarball for in-app documentation.
+- The UI README now documents component-specific AAP inventories, generated
+  patching/RHEL/Satellite workflows, role README viewing, organization label
+  behavior, and additional RHEL hosts.
+- OpenShift cert-manager inputs are shown only when the cert-manager app is
+  selected, with custom certificate, IdM ACME, and AWS PCA source options.
 
 ### Fixed
 
+- Bootstrap runs now explicitly pass AAP apply flags so generated controller
+  configuration is applied during UI runs.
+- The ADO Bootstrap Recap now reads generated job template files from
+  `configs/job_templates`, and includes inventory sources and hosts so the UI
+  output reflects generated AAP content.
 - JSON import and export now hydrate selected Satellite and IDM configuration
   sections when older preflight files are missing `component_config.satellite`
   or `component_config.idm`, and selected Satellite defaults dynamic inventory
@@ -50,6 +68,35 @@ All notable changes to the ADO Preflight UI are documented in this file.
 - Documentation modals no longer display raw JSON error bodies when a README is missing.
 - Documentation endpoints now return readable markdown fallback text and log missing container paths to the server events.
 - Documentation fetches now fail cleanly if a route returns a non-success response.
+- Generated AAP controller configs are reloaded before apply so UI runs create
+  the current split inventories, hosts, labels, job templates, inventory
+  sources, and workflow templates instead of applying stale in-memory defaults.
+- Generated workflow configs are now passed to the `controller_workflows`
+  dispatcher variable so AAP creates workflow templates during UI runs.
+- Generated job templates and workflow templates now receive the plain
+  organization label, such as `ADO`, so AAP domain/filter views can show the
+  organization grouping.
+- Generated AAP project names now follow the same organization-prefixed naming
+  pattern as the other AAP objects, so `test-project` under org `RH` becomes
+  `RH-test-project`.
+- Generated primary AAP Vault and Machine credential names now follow the same
+  organization-prefixed naming pattern, so `test-vault` and `test-machine`
+  under org `RH` become `RH-test-vault` and `RH-test-machine`.
+- OpenShift UI payloads now write admin HTPasswd and console banner values into
+  the OpenShift vars/vault files and cert-manager values into the cert-manager
+  vars/vault files used by the generated playbooks.
+- Generated primary AAP inventory names now follow the same organization
+  prefixing, so `test-inventory` under org `RH` becomes `RH-test-inventory`.
+- OpenShift runs now clear stale inactive RHEL/Satellite selections before
+  submitting JSON, so an earlier Satellite dynamic inventory choice does not
+  make a later OpenShift run require Satellite service account fields.
+- Generated workflow labels now use the AAP configuration role's supported
+  top-level label format, fixing workflow template creation failures.
+- The bootstrap recap now reports the generated AAP project name from
+  `configs/controller/projects.yml` so it matches the object created in AAP.
+- Role README links in the ADO Collection Documentation now work in the running
+  container because the UI image extracts role documentation from the packaged
+  `infra.ado` collection, and the server can extract it on demand if missing.
 
 ## 1.0.0 - 2026-07-10
 

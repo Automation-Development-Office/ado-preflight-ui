@@ -27,7 +27,7 @@ RUN set -eux; \
     mkdir -p /workspace /opt/ado-collections/extracted; \
     ado_archive="$(find /opt/ado-collections -maxdepth 1 -name 'infra-ado-*.tar.gz' | sort | tail -n 1)"; \
     if [ -n "$ado_archive" ]; then \
-      tar -xzf "$ado_archive" -C /opt/ado-collections/extracted README.md || true; \
+      tar -xzf "$ado_archive" -C /opt/ado-collections/extracted README.md roles docs || true; \
     fi; \
     chown -R 1001:0 /workspace /opt/app-root/src /opt/ado-collections; \
     chmod -R g+rwX /workspace /opt/app-root/src /opt/ado-collections
