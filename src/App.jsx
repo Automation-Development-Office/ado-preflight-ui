@@ -24,6 +24,7 @@ import {
   MenuToggle,
   Tabs,
   Tab,
+  Popover,
   Tooltip
 } from '@patternfly/react-core';
 
@@ -51,6 +52,7 @@ const simpleComponents = [
 ];
 
 const componentOptionDefaults = {
+  openshift: ['admin_htpasswd', 'console_banner'],
   grafana: ['datasources', 'folders', 'dashboards'],
   rhbk: ['realm', 'client', 'idp', 'federation', 'group_mapper', 'client_scopes', 'client_mappers'],
   satellite: ['satellite_server_install', 'satellite_client_tools', 'satellite_content_view', 'satellite_capsule_install'],
@@ -70,6 +72,8 @@ const componentOptionDefaults = {
 };
 
 const componentOptionLabels = {
+  admin_htpasswd: 'Admin HTPasswd',
+  console_banner: 'Console Banner',
   datasources: 'Datasources',
   folders: 'Folders',
   dashboards: 'Dashboards',
@@ -242,6 +246,7 @@ const defaults = {
   },
 
   component_options: {
+    openshift: [],
     grafana: [...componentOptionDefaults.grafana],
     rhbk: [...componentOptionDefaults.rhbk],
     satellite: [...componentOptionDefaults.satellite],
@@ -381,6 +386,9 @@ function App() {
   const [preview, setPreview] = useState('Click "Run Bootstrap" to generate output.');
   const [events, setEvents] = useState('');
   const [activeTab, setActiveTab] = useState('logs');
+  const [debugTab, setDebugTab] = useState('events');
+  const [debugContent, setDebugContent] = useState('Select a debug tab to load details.');
+  const [debugLoading, setDebugLoading] = useState(false);
   const [configTab, setConfigTab] = useState('form');
   const [yamlDraft, setYamlDraft] = useState('');
   const [yamlError, setYamlError] = useState('');
@@ -415,6 +423,7 @@ function App() {
   const [importStatus, setImportStatus] = useState('');
   const [runFinished, setRunFinished] = useState(false);
   const [showRawOutput, setShowRawOutput] = useState(false);
+  const [consoleFontSize, setConsoleFontSize] = useState(13);
   const outputRef = useRef(null);
   const importFileRef = useRef(null);
 
@@ -580,7 +589,50 @@ function App() {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
     }
-  }, [preview, events, activeTab]);
+  }, [preview, events, activeTab, debugContent]);
+
+  const debugTabLabel = tab => ({
+    events: 'Events',
+    summary: 'Summary',
+    preflight: 'Preflight JSON',
+    extraVars: 'Extra Vars',
+    tree: 'Repo Tree',
+    configs: 'Generated Configs',
+    runtime: 'Runtime',
+    terminal: 'Terminal Help'
+  }[tab] || tab);
+
+  const debugEndpoint = tab => ({
+    summary: 'summary',
+    preflight: 'preflight',
+    extraVars: 'extra-vars',
+    tree: 'tree',
+    configs: 'configs',
+    runtime: 'runtime',
+    terminal: 'terminal'
+  }[tab]);
+
+  const fetchDebugTab = async tab => {
+    const endpoint = debugEndpoint(tab);
+    if (!endpoint) return;
+
+    setDebugLoading(true);
+    try {
+      const response = await fetch(`/api/debug/${endpoint}`);
+      const text = await response.text();
+      setDebugContent(text || `No ${debugTabLabel(tab)} data yet.`);
+    } catch (err) {
+      setDebugContent(`ERROR reading ${debugTabLabel(tab)}:\n${err.message}`);
+    } finally {
+      setDebugLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'events' && debugTab !== 'events') {
+      fetchDebugTab(debugTab);
+    }
+  }, [activeTab, debugTab, runFinished]);
 
   const set = (path, value) => {
     setData(prev => {
@@ -949,6 +1001,19 @@ function App() {
 
     if (!selectedApps.includes('openshift')) {
       delete payload.openshift;
+    } else if (payload.openshift) {
+      const openshiftOptions = payload.component_options?.openshift || [];
+      if (!openshiftOptions.includes('admin_htpasswd')) {
+        delete payload.openshift.admin_username;
+        delete payload.openshift.admin_password;
+        delete payload.openshift.admin_role;
+      }
+      if (!openshiftOptions.includes('console_banner')) {
+        delete payload.openshift.banner_text;
+        delete payload.openshift.banner_location;
+        delete payload.openshift.banner_background_color;
+        delete payload.openshift.banner_text_color;
+      }
     }
 
     if (!selectedApps.includes('jira')) {
@@ -1106,8 +1171,13 @@ function App() {
   };
 
   const downloadLog = () => {
-    const content = activeTab === 'events' ? events : preview;
-    const suffix = activeTab === 'events' ? 'events' : 'run';
+    const isDebug = activeTab === 'events' && debugTab !== 'events';
+    const content = activeTab === 'events'
+      ? (isDebug ? debugContent : events)
+      : preview;
+    const suffix = activeTab === 'events'
+      ? (isDebug ? debugEndpoint(debugTab) : 'events')
+      : 'run';
 
     downloadFile(`ado-preflight-${data.environment || 'env'}-${suffix}.log`, content);
   };
@@ -1116,6 +1186,9 @@ function App() {
     setData(defaults);
     setPreview('Click "Run Bootstrap" to generate output.');
     setEvents('');
+    setDebugTab('events');
+    setDebugContent('Select a debug tab to load details.');
+    setDebugLoading(false);
     setRunFinished(false);
     setShowRawOutput(false);
     setActiveTab('logs');
@@ -1135,9 +1208,24 @@ function App() {
     setActionsOpen(false);
   };
 
+  const openDebugTab = key => {
+    setDebugTab(key);
+    if (key !== 'events') {
+      fetchDebugTab(key);
+    }
+  };
+
   const toggleRawOutput = () => {
     setShowRawOutput(!showRawOutput);
     setActiveTab('logs');
+  };
+
+  const zoomConsoleText = delta => {
+    setConsoleFontSize(size => Math.min(22, Math.max(10, size + delta)));
+  };
+
+  const resetConsoleTextZoom = () => {
+    setConsoleFontSize(13);
   };
 
   const applyYamlDraft = () => {
@@ -1220,7 +1308,8 @@ function App() {
       const eventsResp = await fetch('/api/events');
       const eventsText = await eventsResp.text();
 
-      setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}`);
+      const recap = result.bootstrapRecap ? `\n${result.bootstrapRecap}` : '';
+      setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}${recap}`);
       setEvents(eventsText || 'No events were returned.');
     } catch (err) {
       setPreview(`ERROR:\n${err.message}`);
@@ -1317,6 +1406,38 @@ function App() {
     });
   };
 
+  const renderDebugOutput = () => {
+    const content = debugLoading ? `Loading ${debugTabLabel(debugTab)}...` : debugContent;
+
+    return (content || `No ${debugTabLabel(debugTab)} data yet.`).split('\n').map((line, idx) => {
+      let color = '#f0f0f0';
+      let fontWeight = 400;
+
+      if (/failed|error|fatal|unreachable/i.test(line)) {
+        color = '#ff6b6b';
+        fontWeight = 700;
+      } else if (/complete|success|exitCode=0|exit code 0/i.test(line)) {
+        color = '#8bc34a';
+        fontWeight = 600;
+      } else if (/^=====|^Repository:|^Useful|^OpenShift|^Podman|^Embedded shell/i.test(line)) {
+        color = '#73bcf7';
+        fontWeight = 700;
+      }
+
+      return (
+        <div key={idx} style={{ color, fontWeight }}>
+          {line || ' '}
+        </div>
+      );
+    });
+  };
+
+  const renderConsoleContent = () => {
+    if (activeTab === 'logs') return renderOutput();
+    if (debugTab === 'events') return renderEvents();
+    return renderDebugOutput();
+  };
+
   const renderComponentLabel = (component, label = component) => (
     <button
       type="button"
@@ -1354,25 +1475,35 @@ function App() {
   const labelWithHelp = (label, help) => {
     if (!help) return label;
 
+    const labelText = typeof label === 'string'
+      ? label
+      : (typeof label?.props?.children === 'string' ? label.props.children : 'Field');
+
     return (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
         <span>{label}</span>
-        <Tooltip content={help}>
+        <Popover
+          headerContent={labelText}
+          bodyContent={<div style={{ maxWidth: '320px' }}>{help}</div>}
+          triggerAction="click"
+          appendTo={() => document.body}
+        >
           <button
             type="button"
-            aria-label={`${label} help`}
+            aria-label={`${labelText} help`}
             style={{
               border: 'none',
               background: 'transparent',
               color: isDark ? '#73bcf7' : '#0066cc',
-              cursor: 'help',
+              cursor: 'pointer',
               fontWeight: 700,
-              padding: 0
+              padding: '0 2px',
+              lineHeight: 1
             }}
           >
             ?
           </button>
-        </Tooltip>
+        </Popover>
       </span>
     );
   };
@@ -1402,10 +1533,109 @@ function App() {
     </GridItem>
   );
 
+  const defaultComponentHelp = {
+    hostname: 'Hostname or URL for this component. Example: https://grafana.apps.ocp.prod.rhlab or grafana.server.lab.',
+    storage: 'Storage class or storage value for OpenShift-backed deployments. Example: ocs-storagecluster-ceph-rbd.'
+  };
+
+  const grafanaHelp = {
+    hostname: 'Grafana route or hostname. Example: https://grafana.apps.ocp.prod.rhlab.',
+    storage: 'OpenShift storage class used by Grafana. Example: ocs-storagecluster-ceph-rbd.',
+    folderName: 'Grafana folder to create. Example: OpenShift.',
+    dashboardsSource: 'Folder path or Git repository containing dashboard JSON files.'
+  };
+
+  const rhbkHelp = {
+    hostname: 'RHBK hostname or route. Example: https://keycloak.apps.ocp.prod.rhlab.',
+    storage: 'OpenShift storage class used by RHBK. Example: ocs-storagecluster-ceph-rbd.',
+    realm: 'Realm name. Example: openshift or ADO.',
+    client: 'Client ID. Example: openshift-console.',
+    clientName: 'Human-readable client name. Example: OpenShift Console.',
+    redirectUris: 'Allowed redirect URIs. Example: https://oauth-openshift.apps.ocp.prod.rhlab/oauth2callback/*.',
+    webOrigins: 'Allowed browser origins. Example: https://console-openshift-console.apps.ocp.prod.rhlab.',
+    idpName: 'Display name for the identity provider. Example: GitLab.',
+    idpAlias: 'Identity provider alias used in URLs. Example: gitlab.',
+    idpProvider: 'Provider type. Example: oidc or saml.',
+    idpClientId: 'Client ID issued by the external IdP.',
+    idpClientSecret: 'Client secret issued by the external IdP. Stored in vault output.',
+    idpDiscoveryUrl: 'OIDC discovery URL. Example: https://gitlab.example.com/.well-known/openid-configuration.',
+    mapperName: 'Mapper display name. Example: groups.',
+    claimName: 'Token claim to read. Example: groups.',
+    groupPath: 'Realm group path to map into. Example: /openshift-admins.',
+    syncMode: 'Mapper sync behavior. Example: INHERIT, FORCE, or LEGACY.',
+    clientScopeName: 'Client scope name. Example: groups.',
+    protocol: 'Protocol for the client scope. Example: openid-connect.',
+    description: 'Optional description for the generated client scope.',
+    federationName: 'Federation provider name. Example: IDM LDAP.',
+    federationProvider: 'Federation provider type. Example: ldap.',
+    ldapUrl: 'LDAP URL. Example: ldap://idm.server.lab.',
+    bindDn: 'Bind DN for LDAP lookups. Example: uid=svc-keycloak,cn=users,cn=accounts,dc=server,dc=lab.',
+    bindPassword: 'LDAP bind password. Stored in vault output.',
+    usersDn: 'LDAP users DN. Example: cn=users,cn=accounts,dc=server,dc=lab.',
+    userAttribute: 'User attribute used for the token claim. Example: memberOf.',
+    tokenClaimType: 'Token claim type. Example: String or JSON.'
+  };
+
+  const idmHelp = {
+    hostname: 'Primary IdM server hostname. Example: idm.server.lab.',
+    domain: 'DNS domain for IdM. Example: server.lab.',
+    realm: 'Kerberos realm, usually the domain in uppercase. Example: SERVER.LAB.',
+    replicaHostname: 'Replica host to install when IdM Replica Install is selected. Example: idm-replica.server.lab.',
+    replicaDns: 'Install integrated DNS services on the replica.',
+    replicaCa: 'Install certificate services on the replica.',
+    dnsForwarders: 'Configure automatic DNS forwarders for IdM DNS.',
+    customCertFile: 'Path to the custom IdM certificate file in the generated repo or mounted workspace.',
+    customCertKeyFile: 'Path to the private key for the custom IdM certificate.',
+    customCertChainFile: 'Path to the certificate chain file for the custom IdM certificate.',
+    adminPassword: 'IdM admin password. Stored in generated vault files.',
+    directoryManagerPassword: 'Directory Manager password. Stored in generated vault files.'
+  };
+
+  const rhelHelp = {
+    complianceProfile: 'Compliance profile used by generated RHEL compliance jobs. Example: PCI-DSS.',
+    stigProfile: 'STIG profile used by generated RHEL hardening jobs. Example: RHEL 9 STIG.',
+    hostname: 'Primary RHEL host to include in the RHEL inventory. Example: rhel01.server.lab.',
+    hosts: 'Additional RHEL hosts, one per line. Example: rhel02.server.lab.'
+  };
+
+  const complianceHelp = {
+    profile: 'Compliance profile for standalone compliance jobs. Example: PCI-DSS, NIST 800-53, CIS, or STIG.'
+  };
+
+  const stigHelp = {
+    profile: 'STIG profile for standalone STIG hardening jobs. Example: RHEL 9 STIG.'
+  };
+
+  const openshiftHelp = {
+    apiHost: 'OpenShift API server URL. Example: https://api.ocp.prod.rhlab:6443.',
+    appsDomain: 'OpenShift apps domain used for routes. Example: apps.ocp.prod.rhlab.',
+    skipTls: 'Skip OpenShift API certificate validation for self-signed or lab certificates.',
+    token: 'OpenShift API token from oc whoami --show-token. Stored in generated vault files.',
+    certSource: 'Certificate source used by cert-manager automation: custom certificate, IdM ACME, or AWS PCA.',
+    tlsCrt: 'PEM-formatted TLS certificate for the custom certificate source.',
+    tlsKey: 'PEM-formatted TLS private key for the custom certificate source.',
+    idmAcmeDirectoryUrl: 'ACME directory URL from IdM. Example: https://idm.server.lab/acme/directory.',
+    idmCaBundleFile: 'Path to the IdM CA bundle file used to trust the ACME endpoint.',
+    awspcaNamespace: 'Kubernetes namespace for AWS PCA issuer resources. Example: cert-manager.',
+    awspcaSecretName: 'Kubernetes secret containing AWS PCA credentials.',
+    awspcaIssuerName: 'ClusterIssuer or Issuer name for AWS PCA. Example: aws-pca-cluster-issuer.',
+    awspcaRegion: 'AWS region for PCA. Example: us-east-1.',
+    awspcaPcaArn: 'AWS Private CA ARN used by cert-manager.',
+    awspcaAccessKeyId: 'AWS access key ID for PCA access. Stored in generated vault files.',
+    awspcaSecretAccessKey: 'AWS secret access key for PCA access. Stored in generated vault files.',
+    adminUsername: 'OpenShift htpasswd admin username. Example: admin.',
+    adminPassword: 'OpenShift htpasswd admin password. Stored in generated vault files.',
+    adminRole: 'Cluster role to bind to the htpasswd user. Example: cluster-admin.',
+    bannerLocation: 'OpenShift console banner location. Example: BannerTop or BannerBottom.',
+    bannerText: 'Text shown in the console banner. Example: Production cluster - approved changes only.',
+    bannerBackgroundColor: 'Console banner background color. Example: #1f7a1f.',
+    bannerTextColor: 'Console banner text color. Example: #ffffff.'
+  };
+
   const renderDefaultComponentConfig = component => (
     <Grid hasGutter>
-      {renderTextField('Hostname', `component_config.${component}.hostname`)}
-      {renderTextField('Storage', `component_config.${component}.storage`)}
+      {renderTextField('Hostname', `component_config.${component}.hostname`, 'text', defaultComponentHelp.hostname)}
+      {renderTextField('Storage', `component_config.${component}.storage`, 'text', defaultComponentHelp.storage)}
     </Grid>
   );
 
@@ -1413,10 +1643,10 @@ function App() {
     <>
       {renderComponentOptions('grafana', 'Grafana Options', 'Select which Grafana resources to configure.')}
       <Grid hasGutter>
-        {renderTextField('Hostname / URL', 'component_config.grafana.hostname')}
-        {renderTextField('Storage Class', 'component_config.grafana.storage')}
-        {renderTextField('Folder Name', 'component_config.grafana.folder_name')}
-        {renderTextField('Folder or Git Repo for Dashboards', 'component_config.grafana.dashboards_source')}
+        {renderTextField('Hostname / URL', 'component_config.grafana.hostname', 'text', grafanaHelp.hostname)}
+        {renderTextField('Storage Class', 'component_config.grafana.storage', 'text', grafanaHelp.storage)}
+        {renderTextField('Folder Name', 'component_config.grafana.folder_name', 'text', grafanaHelp.folderName)}
+        {renderTextField('Folder or Git Repo for Dashboards', 'component_config.grafana.dashboards_source', 'text', grafanaHelp.dashboardsSource)}
       </Grid>
     </>
   );
@@ -1441,58 +1671,58 @@ function App() {
       case 'client':
         return (
           <Grid hasGutter>
-            {renderTextField('Client ID', 'component_config.rhbk.client')}
-            {renderTextField('Client Name', 'component_config.rhbk.client_name')}
-            {renderTextField('Redirect URIs', 'component_config.rhbk.client_redirect_uris')}
-            {renderTextField('Web Origins', 'component_config.rhbk.client_web_origins')}
+            {renderTextField('Client ID', 'component_config.rhbk.client', 'text', rhbkHelp.client)}
+            {renderTextField('Client Name', 'component_config.rhbk.client_name', 'text', rhbkHelp.clientName)}
+            {renderTextField('Redirect URIs', 'component_config.rhbk.client_redirect_uris', 'text', rhbkHelp.redirectUris)}
+            {renderTextField('Web Origins', 'component_config.rhbk.client_web_origins', 'text', rhbkHelp.webOrigins)}
           </Grid>
         );
       case 'idp':
         return (
           <Grid hasGutter>
-            {renderTextField('IDP Name', 'component_config.rhbk.idp_name')}
-            {renderTextField('IDP Alias', 'component_config.rhbk.idp_alias')}
-            {renderTextField('IDP Provider', 'component_config.rhbk.idp_provider')}
-            {renderTextField('Client ID', 'component_config.rhbk.idp_client_id')}
-            {renderTextField('Client Secret', 'component_config.rhbk.idp_client_secret', 'password')}
-            {renderTextField('Discovery URL', 'component_config.rhbk.idp_discovery_url')}
+            {renderTextField('IDP Name', 'component_config.rhbk.idp_name', 'text', rhbkHelp.idpName)}
+            {renderTextField('IDP Alias', 'component_config.rhbk.idp_alias', 'text', rhbkHelp.idpAlias)}
+            {renderTextField('IDP Provider', 'component_config.rhbk.idp_provider', 'text', rhbkHelp.idpProvider)}
+            {renderTextField('Client ID', 'component_config.rhbk.idp_client_id', 'text', rhbkHelp.idpClientId)}
+            {renderTextField('Client Secret', 'component_config.rhbk.idp_client_secret', 'password', rhbkHelp.idpClientSecret)}
+            {renderTextField('Discovery URL', 'component_config.rhbk.idp_discovery_url', 'text', rhbkHelp.idpDiscoveryUrl)}
           </Grid>
         );
       case 'group_mapper':
         return (
           <Grid hasGutter>
-            {renderTextField('Mapper Name', 'component_config.rhbk.group_mapper_name')}
-            {renderTextField('Claim Name', 'component_config.rhbk.group_mapper_claim')}
-            {renderTextField('Group Path', 'component_config.rhbk.group_mapper_group_path')}
-            {renderTextField('Sync Mode', 'component_config.rhbk.group_mapper_sync_mode')}
+            {renderTextField('Mapper Name', 'component_config.rhbk.group_mapper_name', 'text', rhbkHelp.mapperName)}
+            {renderTextField('Claim Name', 'component_config.rhbk.group_mapper_claim', 'text', rhbkHelp.claimName)}
+            {renderTextField('Group Path', 'component_config.rhbk.group_mapper_group_path', 'text', rhbkHelp.groupPath)}
+            {renderTextField('Sync Mode', 'component_config.rhbk.group_mapper_sync_mode', 'text', rhbkHelp.syncMode)}
           </Grid>
         );
       case 'client_scopes':
         return (
           <Grid hasGutter>
-            {renderTextField('Client Scope Name', 'component_config.rhbk.client_scope_name')}
-            {renderTextField('Protocol', 'component_config.rhbk.client_scope_protocol')}
-            {renderTextField('Description', 'component_config.rhbk.client_scope_description')}
+            {renderTextField('Client Scope Name', 'component_config.rhbk.client_scope_name', 'text', rhbkHelp.clientScopeName)}
+            {renderTextField('Protocol', 'component_config.rhbk.client_scope_protocol', 'text', rhbkHelp.protocol)}
+            {renderTextField('Description', 'component_config.rhbk.client_scope_description', 'text', rhbkHelp.description)}
           </Grid>
         );
       case 'federation':
         return (
           <Grid hasGutter>
-            {renderTextField('Federation Name', 'component_config.rhbk.federation_name')}
-            {renderTextField('Provider', 'component_config.rhbk.federation_provider')}
-            {renderTextField('LDAP URL', 'component_config.rhbk.federation_ldap_url')}
-            {renderTextField('Bind DN', 'component_config.rhbk.federation_bind_dn')}
-            {renderTextField('Bind Password', 'component_config.rhbk.federation_bind_password', 'password')}
-            {renderTextField('Users DN', 'component_config.rhbk.federation_users_dn')}
+            {renderTextField('Federation Name', 'component_config.rhbk.federation_name', 'text', rhbkHelp.federationName)}
+            {renderTextField('Provider', 'component_config.rhbk.federation_provider', 'text', rhbkHelp.federationProvider)}
+            {renderTextField('LDAP URL', 'component_config.rhbk.federation_ldap_url', 'text', rhbkHelp.ldapUrl)}
+            {renderTextField('Bind DN', 'component_config.rhbk.federation_bind_dn', 'text', rhbkHelp.bindDn)}
+            {renderTextField('Bind Password', 'component_config.rhbk.federation_bind_password', 'password', rhbkHelp.bindPassword)}
+            {renderTextField('Users DN', 'component_config.rhbk.federation_users_dn', 'text', rhbkHelp.usersDn)}
           </Grid>
         );
       case 'client_mappers':
         return (
           <Grid hasGutter>
-            {renderTextField('Mapper Name', 'component_config.rhbk.client_mapper_name')}
-            {renderTextField('Claim Name', 'component_config.rhbk.client_mapper_claim')}
-            {renderTextField('User Attribute', 'component_config.rhbk.client_mapper_user_attribute')}
-            {renderTextField('Token Claim Type', 'component_config.rhbk.client_mapper_claim_type')}
+            {renderTextField('Mapper Name', 'component_config.rhbk.client_mapper_name', 'text', rhbkHelp.mapperName)}
+            {renderTextField('Claim Name', 'component_config.rhbk.client_mapper_claim', 'text', rhbkHelp.claimName)}
+            {renderTextField('User Attribute', 'component_config.rhbk.client_mapper_user_attribute', 'text', rhbkHelp.userAttribute)}
+            {renderTextField('Token Claim Type', 'component_config.rhbk.client_mapper_claim_type', 'text', rhbkHelp.tokenClaimType)}
           </Grid>
         );
       default:
@@ -1524,9 +1754,9 @@ function App() {
     <>
       {renderComponentOptions('rhbk', 'RHBK Options', 'Select which RHBK resources to configure.')}
       <Grid hasGutter>
-        {renderTextField('Hostname / URL', 'component_config.rhbk.hostname')}
-        {renderTextField('Storage Class', 'component_config.rhbk.storage')}
-        {renderTextField('Realm', 'component_config.rhbk.realm')}
+        {renderTextField('Hostname / URL', 'component_config.rhbk.hostname', 'text', rhbkHelp.hostname)}
+        {renderTextField('Storage Class', 'component_config.rhbk.storage', 'text', rhbkHelp.storage)}
+        {renderTextField('Realm', 'component_config.rhbk.realm', 'text', rhbkHelp.realm)}
       </Grid>
       {renderRhbkDetailTabs()}
     </>
@@ -1938,14 +2168,14 @@ function App() {
         </Button>
         <br /><br />
         <Grid hasGutter>
-          {renderTextField('Hostname', 'component_config.idm.hostname')}
-          {renderTextField('Domain', 'component_config.idm.domain')}
-          {renderTextField('Realm', 'component_config.idm.realm')}
-          {showReplica && renderTextField('IPA Replica Hostname', 'component_config.idm.replica_hostname')}
+          {renderTextField('Hostname', 'component_config.idm.hostname', 'text', idmHelp.hostname)}
+          {renderTextField('Domain', 'component_config.idm.domain', 'text', idmHelp.domain)}
+          {renderTextField('Realm', 'component_config.idm.realm', 'text', idmHelp.realm)}
+          {showReplica && renderTextField('IPA Replica Hostname', 'component_config.idm.replica_hostname', 'text', idmHelp.replicaHostname)}
           {showReplica && (
             <>
               <GridItem span={6}>
-                <FormGroup label="Replica DNS">
+                <FormGroup label={labelWithHelp('Replica DNS', idmHelp.replicaDns)}>
                   <Checkbox
                     id="idm-replica-install-dns"
                     label="Install DNS on replica"
@@ -1955,7 +2185,7 @@ function App() {
                 </FormGroup>
               </GridItem>
               <GridItem span={6}>
-                <FormGroup label="Replica Certificate Services">
+                <FormGroup label={labelWithHelp('Replica Certificate Services', idmHelp.replicaCa)}>
                   <Checkbox
                     id="idm-replica-install-ca"
                     label="Install certificate services on replica"
@@ -1968,7 +2198,7 @@ function App() {
           )}
           {showDns && (
             <GridItem span={6}>
-              <FormGroup label="DNS Forwarders">
+              <FormGroup label={labelWithHelp('DNS Forwarders', idmHelp.dnsForwarders)}>
                 <Checkbox
                   id="idm-auto-forwarders"
                   label="Configure auto forwarders"
@@ -1980,13 +2210,13 @@ function App() {
           )}
           {showCustomCert && (
             <>
-              {renderTextField('Custom Certificate File', 'component_config.idm.custom_cert_file')}
-              {renderTextField('Custom Certificate Key File', 'component_config.idm.custom_cert_key_file')}
-              {renderTextField('Custom Certificate Chain File', 'component_config.idm.custom_cert_chain_file')}
+              {renderTextField('Custom Certificate File', 'component_config.idm.custom_cert_file', 'text', idmHelp.customCertFile)}
+              {renderTextField('Custom Certificate Key File', 'component_config.idm.custom_cert_key_file', 'text', idmHelp.customCertKeyFile)}
+              {renderTextField('Custom Certificate Chain File', 'component_config.idm.custom_cert_chain_file', 'text', idmHelp.customCertChainFile)}
             </>
           )}
-          {renderTextField('Admin Password', 'component_config.idm.admin_password', showIdmSecrets ? 'text' : 'password')}
-          {renderTextField('Directory Manager Password', 'component_config.idm.directory_manager_password', showIdmSecrets ? 'text' : 'password')}
+          {renderTextField('Admin Password', 'component_config.idm.admin_password', showIdmSecrets ? 'text' : 'password', idmHelp.adminPassword)}
+          {renderTextField('Directory Manager Password', 'component_config.idm.directory_manager_password', showIdmSecrets ? 'text' : 'password', idmHelp.directoryManagerPassword)}
         </Grid>
       </>
     );
@@ -2180,7 +2410,11 @@ function App() {
         'Select which OpenShift applications and platform services to include.'
       )}
 
-      {renderOpenShiftIntegration()}
+      {renderComponentOptions(
+        'openshift',
+        'OpenShift Options',
+        'Select optional OpenShift configuration to include.'
+      )}
     </>
   );
 
@@ -2260,7 +2494,7 @@ function App() {
 
       <Grid hasGutter>
         <GridItem span={6}>
-          <FormGroup label="Compliance Profile">
+          <FormGroup label={labelWithHelp('Compliance Profile', rhelHelp.complianceProfile)}>
             <select
               value={data.component_config?.rhel?.compliance_profile || 'PCI-DSS'}
               onChange={e => set('component_config.rhel.compliance_profile', e.target.value)}
@@ -2275,7 +2509,7 @@ function App() {
         </GridItem>
 
         <GridItem span={6}>
-          <FormGroup label="STIG Profile">
+          <FormGroup label={labelWithHelp('STIG Profile', rhelHelp.stigProfile)}>
             <select
               value={data.component_config?.rhel?.stig_profile || 'RHEL 9 STIG'}
               onChange={e => set('component_config.rhel.stig_profile', e.target.value)}
@@ -2287,10 +2521,10 @@ function App() {
           </FormGroup>
         </GridItem>
 
-        {renderTextField('Hostname', 'component_config.rhel.hostname')}
+        {renderTextField('Hostname', 'component_config.rhel.hostname', 'text', rhelHelp.hostname)}
 
         <GridItem span={12}>
-          <FormGroup label="Additional RHEL Hosts">
+          <FormGroup label={labelWithHelp('Additional RHEL Hosts', rhelHelp.hosts)}>
             <textarea
               value={(data.component_config?.rhel?.hosts || []).join('\n')}
               onChange={e => set('component_config.rhel.hosts', e.target.value.split('\n').map(v => v.trim()).filter(Boolean))}
@@ -2317,7 +2551,7 @@ function App() {
     <>
       {renderComponentOptions('compliance', 'Compliance Options', 'Select compliance baselines to include.')}
       <Grid hasGutter>
-        {renderTextField('Profile', 'component_config.compliance.profile')}
+        {renderTextField('Profile', 'component_config.compliance.profile', 'text', complianceHelp.profile)}
       </Grid>
     </>
   );
@@ -2326,7 +2560,7 @@ function App() {
     <>
       {renderComponentOptions('stig', 'STIG Options', 'Select STIG baselines to include.')}
       <Grid hasGutter>
-        {renderTextField('Profile', 'component_config.stig.profile')}
+        {renderTextField('Profile', 'component_config.stig.profile', 'text', stigHelp.profile)}
       </Grid>
     </>
   );
@@ -2340,7 +2574,7 @@ function App() {
       <p style={{ color: mutedTextColor }}>This section is opened by clicking <strong>openshift</strong>.</p>
       <Grid hasGutter>
         <GridItem span={6}>
-          <FormGroup label="OpenShift API Host">
+          <FormGroup label={labelWithHelp('OpenShift API Host', openshiftHelp.apiHost)}>
             <TextInput
               value={data.openshift.api_host}
               onChange={(_, v) => set('openshift.api_host', v)}
@@ -2349,7 +2583,7 @@ function App() {
         </GridItem>
 
         <GridItem span={6}>
-          <FormGroup label="OpenShift Apps Domain">
+          <FormGroup label={labelWithHelp('OpenShift Apps Domain', openshiftHelp.appsDomain)}>
             <TextInput
               value={data.openshift.apps_domain}
               onChange={(_, v) => set('openshift.apps_domain', v)}
@@ -2358,7 +2592,7 @@ function App() {
         </GridItem>
 
         <GridItem span={12}>
-          <FormGroup label="OpenShift TLS Certificate Verification">
+          <FormGroup label={labelWithHelp('OpenShift TLS Certificate Verification', openshiftHelp.skipTls)}>
             <Checkbox
               id="openshift-skip-tls-verify"
               label="Skip TLS certificate verification for self-signed certificates"
@@ -2369,7 +2603,7 @@ function App() {
         </GridItem>
 
         <GridItem span={12}>
-          <FormGroup label="OpenShift API Token">
+          <FormGroup label={labelWithHelp('OpenShift API Token', openshiftHelp.token)}>
             <div style={{ display: 'flex', gap: '8px' }}>
               <TextInput
                 type={showOpenShiftToken ? 'text' : 'password'}
@@ -2383,74 +2617,11 @@ function App() {
           </FormGroup>
         </GridItem>
 
-        <GridItem span={6}>
-          <FormGroup label="Admin HTPasswd Username">
-            <TextInput
-              value={data.openshift.admin_username || ''}
-              onChange={(_, v) => set('openshift.admin_username', v)}
-            />
-          </FormGroup>
-        </GridItem>
-
-        <GridItem span={6}>
-          <FormGroup label="Admin HTPasswd Password">
-            <TextInput
-              type="password"
-              value={data.openshift.admin_password || ''}
-              onChange={(_, v) => set('openshift.admin_password', v)}
-            />
-          </FormGroup>
-        </GridItem>
-
-        <GridItem span={6}>
-          <FormGroup label="Admin HTPasswd Role">
-            <TextInput
-              value={data.openshift.admin_role || 'cluster-admin'}
-              onChange={(_, v) => set('openshift.admin_role', v)}
-            />
-          </FormGroup>
-        </GridItem>
-
-        <GridItem span={6}>
-          <FormGroup label="Console Banner Location">
-            <TextInput
-              value={data.openshift.banner_location || 'BannerTop'}
-              onChange={(_, v) => set('openshift.banner_location', v)}
-            />
-          </FormGroup>
-        </GridItem>
-
-        <GridItem span={12}>
-          <FormGroup label="Console Banner Text">
-            <TextInput
-              value={data.openshift.banner_text || ''}
-              onChange={(_, v) => set('openshift.banner_text', v)}
-            />
-          </FormGroup>
-        </GridItem>
-
-        <GridItem span={6}>
-          <FormGroup label="Console Banner Background Color">
-            <TextInput
-              value={data.openshift.banner_background_color || '#1f7a1f'}
-              onChange={(_, v) => set('openshift.banner_background_color', v)}
-            />
-          </FormGroup>
-        </GridItem>
-
-        <GridItem span={6}>
-          <FormGroup label="Console Banner Text Color">
-            <TextInput
-              value={data.openshift.banner_text_color || '#ffffff'}
-              onChange={(_, v) => set('openshift.banner_text_color', v)}
-            />
-          </FormGroup>
-        </GridItem>
 
         {certManagerSelected && (
           <>
             <GridItem span={12}>
-              <FormGroup label="Cert-Manager Certificate Source">
+              <FormGroup label={labelWithHelp('Cert-Manager Certificate Source', openshiftHelp.certSource)}>
                 <Radio
                   label="Custom certificate"
                   name="cert-manager-mode"
@@ -2474,27 +2645,27 @@ function App() {
 
             {certMode === 'cert' && (
               <>
-                {renderTextAreaField('TLS Certificate', 'component_config.cert_manager.tls_crt')}
-                {renderTextAreaField('TLS Private Key', 'component_config.cert_manager.tls_key')}
+                {renderTextAreaField('TLS Certificate', 'component_config.cert_manager.tls_crt', openshiftHelp.tlsCrt)}
+                {renderTextAreaField('TLS Private Key', 'component_config.cert_manager.tls_key', openshiftHelp.tlsKey)}
               </>
             )}
 
             {certMode === 'idm_acme' && (
               <>
-                {renderTextField('IdM ACME Directory URL', 'component_config.cert_manager.idm_acme_directory_url')}
-                {renderTextField('IdM CA Bundle File', 'component_config.cert_manager.idm_ca_bundle_file')}
+                {renderTextField('IdM ACME Directory URL', 'component_config.cert_manager.idm_acme_directory_url', 'text', openshiftHelp.idmAcmeDirectoryUrl)}
+                {renderTextField('IdM CA Bundle File', 'component_config.cert_manager.idm_ca_bundle_file', 'text', openshiftHelp.idmCaBundleFile)}
               </>
             )}
 
             {certMode === 'aws_pca' && (
               <>
-                {renderTextField('AWS PCA Namespace', 'component_config.cert_manager.awspca_namespace')}
-                {renderTextField('AWS PCA Secret Name', 'component_config.cert_manager.awspca_secret_name')}
-                {renderTextField('AWS PCA Issuer Name', 'component_config.cert_manager.awspca_issuer_name')}
-                {renderTextField('AWS Region', 'component_config.cert_manager.awspca_region')}
-                {renderTextField('AWS PCA ARN', 'component_config.cert_manager.awspca_pca_arn')}
-                {renderTextField('AWS Access Key ID', 'component_config.cert_manager.awspca_access_key_id', 'password')}
-                {renderTextField('AWS Secret Access Key', 'component_config.cert_manager.awspca_secret_access_key', 'password')}
+                {renderTextField('AWS PCA Namespace', 'component_config.cert_manager.awspca_namespace', 'text', openshiftHelp.awspcaNamespace)}
+                {renderTextField('AWS PCA Secret Name', 'component_config.cert_manager.awspca_secret_name', 'text', openshiftHelp.awspcaSecretName)}
+                {renderTextField('AWS PCA Issuer Name', 'component_config.cert_manager.awspca_issuer_name', 'text', openshiftHelp.awspcaIssuerName)}
+                {renderTextField('AWS Region', 'component_config.cert_manager.awspca_region', 'text', openshiftHelp.awspcaRegion)}
+                {renderTextField('AWS PCA ARN', 'component_config.cert_manager.awspca_pca_arn', 'text', openshiftHelp.awspcaPcaArn)}
+                {renderTextField('AWS Access Key ID', 'component_config.cert_manager.awspca_access_key_id', 'password', openshiftHelp.awspcaAccessKeyId)}
+                {renderTextField('AWS Secret Access Key', 'component_config.cert_manager.awspca_secret_access_key', 'password', openshiftHelp.awspcaSecretAccessKey)}
               </>
             )}
           </>
@@ -2503,6 +2674,78 @@ function App() {
     </>
     );
   };
+
+  const renderOpenShiftAdminHtpasswdConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('Admin HTPasswd Username', openshiftHelp.adminUsername)}>
+          <TextInput
+            value={data.openshift.admin_username || ''}
+            onChange={(_, v) => set('openshift.admin_username', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('Admin HTPasswd Password', openshiftHelp.adminPassword)}>
+          <TextInput
+            type="password"
+            value={data.openshift.admin_password || ''}
+            onChange={(_, v) => set('openshift.admin_password', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('Admin HTPasswd Role', openshiftHelp.adminRole)}>
+          <TextInput
+            value={data.openshift.admin_role || 'cluster-admin'}
+            onChange={(_, v) => set('openshift.admin_role', v)}
+          />
+        </FormGroup>
+      </GridItem>
+    </Grid>
+  );
+
+  const renderOpenShiftConsoleBannerConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('Console Banner Location', openshiftHelp.bannerLocation)}>
+          <TextInput
+            value={data.openshift.banner_location || 'BannerTop'}
+            onChange={(_, v) => set('openshift.banner_location', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={12}>
+        <FormGroup label={labelWithHelp('Console Banner Text', openshiftHelp.bannerText)}>
+          <TextInput
+            value={data.openshift.banner_text || ''}
+            onChange={(_, v) => set('openshift.banner_text', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('Console Banner Background Color', openshiftHelp.bannerBackgroundColor)}>
+          <TextInput
+            value={data.openshift.banner_background_color || '#1f7a1f'}
+            onChange={(_, v) => set('openshift.banner_background_color', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('Console Banner Text Color', openshiftHelp.bannerTextColor)}>
+          <TextInput
+            value={data.openshift.banner_text_color || '#ffffff'}
+            onChange={(_, v) => set('openshift.banner_text_color', v)}
+          />
+        </FormGroup>
+      </GridItem>
+    </Grid>
+  );
 
   const renderJiraConfig = () => (
     <>
@@ -2589,6 +2832,10 @@ function App() {
         return renderAllConfig();
       case 'openshift':
         return renderOpenShiftGroupConfig();
+      case 'admin_htpasswd':
+        return renderOpenShiftAdminHtpasswdConfig();
+      case 'console_banner':
+        return renderOpenShiftConsoleBannerConfig();
       case 'rhel':
         return renderRhelConfig();
       case 'patching':
@@ -2810,6 +3057,11 @@ ${vaultYaml}
 
     if (selected.includes('openshift')) {
       const tabs = ['openshift'];
+      (data.component_options?.openshift || []).forEach(option => {
+        if (!tabs.includes(option)) {
+          tabs.push(option);
+        }
+      });
       (data.component_apps?.openshift || []).forEach(app => {
         if (simpleComponents.includes(app) && !tabs.includes(app)) {
           tabs.push(app);
@@ -2848,6 +3100,8 @@ ${vaultYaml}
   const configTabLabel = tab => {
     if (tab === 'all') return 'All';
     if (tab === 'openshift') return 'OpenShift';
+    if (tab === 'admin_htpasswd') return 'Admin HTPasswd';
+    if (tab === 'console_banner') return 'Console Banner';
     if (tab === 'rhel') return 'RHEL';
     if (tab === 'patching') return 'Patching';
     if (tab === 'provision') return 'Provision';
@@ -3791,13 +4045,31 @@ ${vaultYaml}
                     </DropdownList>
                   </Dropdown>
 
+                  <Tooltip content="Decrease console text size">
+                    <Button variant="plain" aria-label="Decrease console text size" onClick={() => zoomConsoleText(-1)} style={{ fontSize: '16px', fontWeight: 700 }}>
+                      A-
+                    </Button>
+                  </Tooltip>
+
+                  <Tooltip content="Reset console text size">
+                    <Button variant="plain" aria-label="Reset console text size" onClick={resetConsoleTextZoom} style={{ fontSize: '16px', fontWeight: 700 }}>
+                      {consoleFontSize}px
+                    </Button>
+                  </Tooltip>
+
+                  <Tooltip content="Increase console text size">
+                    <Button variant="plain" aria-label="Increase console text size" onClick={() => zoomConsoleText(1)} style={{ fontSize: '16px', fontWeight: 700 }}>
+                      A+
+                    </Button>
+                  </Tooltip>
+
                   <Tooltip content={showRawOutput ? 'Show highlighted output' : 'Show raw output'}>
                     <Button variant="plain" aria-label="Raw or highlighted output" onClick={toggleRawOutput} style={{ fontSize: '18px' }}>
                       ↗
                     </Button>
                   </Tooltip>
 
-                  <Tooltip content={activeTab === 'events' ? 'Download events log' : 'Download Ansible run log'}>
+                  <Tooltip content={activeTab === 'events' ? `Download ${debugTabLabel(debugTab).toLowerCase()} log` : 'Download Ansible run log'}>
                     <Button variant="plain" aria-label="Download log" onClick={downloadLog} style={{ fontSize: '18px' }}>
                       ⇩
                     </Button>
@@ -3808,8 +4080,22 @@ ${vaultYaml}
               <div style={{ marginTop: '12px' }}>
                 <Tabs activeKey={activeTab} onSelect={(_, key) => setActiveTab(key)}>
                   <Tab eventKey="logs" title="Logs" />
-                  <Tab eventKey="events" title="Events" />
+                  <Tab eventKey="events" title="Events / Debug" />
                 </Tabs>
+                {activeTab === 'events' && (
+                  <div style={{ marginTop: '8px' }}>
+                    <Tabs activeKey={debugTab} onSelect={(_, key) => openDebugTab(key)}>
+                      <Tab eventKey="events" title="Events" />
+                      <Tab eventKey="summary" title="Summary" />
+                      <Tab eventKey="preflight" title="Preflight JSON" />
+                      <Tab eventKey="extraVars" title="Extra Vars" />
+                      <Tab eventKey="tree" title="Repo Tree" />
+                      <Tab eventKey="configs" title="Generated Configs" />
+                      <Tab eventKey="runtime" title="Runtime" />
+                      <Tab eventKey="terminal" title="Terminal Help" />
+                    </Tabs>
+                  </div>
+                )}
               </div>
 
               <div
@@ -3825,11 +4111,11 @@ ${vaultYaml}
                   borderRadius: '0 0 6px 6px',
                   border: '1px solid #3c3c3c',
                   borderTop: 'none',
-                  fontSize: '13px',
+                  fontSize: `${consoleFontSize}px`,
                   lineHeight: '1.45'
                 }}
               >
-                {activeTab === 'logs' ? renderOutput() : renderEvents()}
+                {renderConsoleContent()}
               </div>
             </CardBody>
           </Card>

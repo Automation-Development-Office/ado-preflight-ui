@@ -31,6 +31,14 @@ All notable changes to the ADO Preflight UI are documented in this file.
   modal.
 - Added OpenShift admin HTPasswd, console banner, and cert-manager source
   fields so UI runs can drive the generated OpenShift bootstrap workflow.
+- Added OpenShift Options for Admin HTPasswd and Console Banner so those
+  optional settings render as tabs only when selected.
+- Added click-to-open field help popups with examples across OpenShift, RHEL,
+  Satellite, IDM, RHBK, Grafana, Compliance, STIG, and related component forms.
+- Added nested Events / Debug console tabs for summary data, preflight JSON,
+  extra vars, generated repo tree, generated configs, runtime details, and
+  terminal access guidance.
+- Added console text zoom controls for Logs and Events / Debug output.
 
 ### Changed
 
@@ -50,14 +58,24 @@ All notable changes to the ADO Preflight UI are documented in this file.
   behavior, and additional RHEL hosts.
 - OpenShift cert-manager inputs are shown only when the cert-manager app is
   selected, with custom certificate, IdM ACME, and AWS PCA source options.
+- OpenShift admin HTPasswd and console banner values are omitted from UI
+  payloads unless their OpenShift Options checkboxes are selected.
+- Component form field help now opens on click instead of hover so examples
+  stay visible while operators read or copy values.
+- Component selection and option checkboxes no longer show help markers; help is
+  limited to actual form fields and settings.
+- The final UI console output now shows RESULT before the ADO Bootstrap Recap so
+  the recap is easier to read after the returned run payload.
 
 ### Fixed
 
 - Bootstrap runs now explicitly pass AAP apply flags so generated controller
   configuration is applied during UI runs.
 - The ADO Bootstrap Recap now reads generated job template files from
-  `configs/job_templates`, and includes inventory sources and hosts so the UI
-  output reflects generated AAP content.
+  `configs/job_templates`, parses generated controller credentials,
+  inventories, inventory sources, and hosts from their controller config roots,
+  and falls back to normalized UI payload values when generated files are
+  missing or empty.
 - JSON import and export now hydrate selected Satellite and IDM configuration
   sections when older preflight files are missing `component_config.satellite`
   or `component_config.idm`, and selected Satellite defaults dynamic inventory

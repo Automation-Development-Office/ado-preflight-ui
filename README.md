@@ -297,18 +297,23 @@ Each tab exposes the values needed for that RHBK area, such as client IDs, redir
 
 ### OpenShift
 
-OpenShift configuration includes:
+OpenShift configuration includes base connection settings:
 
 - OpenShift API host
 - OpenShift apps domain
 - OpenShift API token
 - Skip TLS certificate verification
-- Admin HTPasswd username, password, and role
-- Console banner text, location, background color, and text color
-- Cert-manager source settings when the `cert_manager` app is selected
+
+Optional OpenShift configuration is controlled from **OpenShift Options**. When
+`Admin HTPasswd` is checked, the UI shows an Admin HTPasswd tab for username,
+password, and role. When `Console Banner` is checked, the UI shows a Console
+Banner tab for text, location, background color, and text color. Unchecked
+options are omitted from the generated preflight payload so the CLI/bootstrap
+path does not create those settings by default.
 
 The OpenShift skip TLS option defaults to enabled for self-signed environments.
-Cert-manager can be configured for a custom certificate, IdM ACME, or AWS PCA.
+Cert-manager can be configured for a custom certificate, IdM ACME, or AWS PCA
+when the `cert_manager` app is selected.
 
 ### Grafana
 
@@ -699,6 +704,37 @@ The modal shows:
 - Runtime behavior
 
 This helps confirm which UI image and collection set you are actually running.
+
+## ❔ Field Help
+
+Most component form fields include a `?` marker. Click the marker to open an
+example-focused help popup for that field. Component selection checkboxes and
+component option checkboxes stay clean, while form entries such as hostnames,
+profiles, tokens, credentials, TLS settings, and inventory settings provide
+field-level examples.
+
+## 🧰 Console Troubleshooting
+
+The ADO Bootstrap Console includes **Logs** and **Events / Debug** tabs. The
+Events / Debug area contains nested tabs for:
+
+- Events
+- Summary
+- Preflight JSON
+- Extra Vars
+- Repo Tree
+- Generated Configs
+- Runtime
+- Terminal Help
+
+The debug tabs are read-only and redact secret-looking values such as tokens,
+passwords, vault values, and private keys. The Terminal Help tab does not open a
+browser shell; instead it shows `podman` and `oc` commands that can be run from
+an operator shell to inspect the running container or pod.
+
+Use the console text controls to decrease, reset, or increase the text size for
+both Logs and Events / Debug output. Completed bootstrap runs show the returned
+`RESULT` JSON first, followed by the human-readable ADO Bootstrap Recap.
 
 ## 📚 In-App Documentation
 

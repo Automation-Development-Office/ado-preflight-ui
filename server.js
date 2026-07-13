@@ -27,6 +27,15 @@ app.use(express.static(uiDir));
 
 let latestLog = '';
 let latestEvents = '';
+let latestDebug = {
+  repoDir: '',
+  preflightPath: '',
+  extraVarsPath: '',
+  normalizedPayload: null,
+  selectedComponents: '',
+  selectedComponentApps: [],
+  result: null
+};
 
 function capText(value, maxLength) {
   if (value.length > maxLength) {
@@ -46,6 +55,216 @@ function append(msg) {
   latestLog += msg;
   latestLog = capText(latestLog, 500000);
   process.stdout.write(msg);
+}
+
+function redactSecrets(value) {
+  if (Array.isArray(value)) {
+    return value.map(item => redactSecrets(item));
+  }
+
+  if (value && typeof value === 'object') {
+    const out = {};
+
+    for (const [key, child] of Object.entries(value)) {
+      const lower = key.toLowerCase();
+      if (
+        lower.includes('password') ||
+        lower.includes('token') ||
+        lower.includes('secret') ||
+        lower.includes('ssh_key') ||
+        lower.includes('private_key') ||
+        lower.includes('vault')
+      ) {
+        out[key] = child ? '[redacted]' : child;
+      } else {
+        out[key] = redactSecrets(child);
+      }
+    }
+
+    return out;
+  }
+
+  return value;
+}
+
+function readTextFile(filePath, fallback = '') {
+  try {
+    if (filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      return fs.readFileSync(filePath, 'utf8');
+    }
+  } catch (err) {
+    return `Unable to read ${filePath}: ${err.message}\n`;
+  }
+
+  return fallback;
+}
+
+function walkFiles(root, options = {}) {
+  const maxEntries = options.maxEntries || 500;
+  const maxDepth = options.maxDepth || 5;
+  const ignored = new Set(options.ignored || ['.git', 'node_modules', 'collections']);
+  const rows = [];
+
+  function walk(current, depth) {
+    if (rows.length >= maxEntries || depth > maxDepth || !fs.existsSync(current)) return;
+
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true })
+        .filter(entry => !ignored.has(entry.name))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch (err) {
+      rows.push(`${'  '.repeat(depth)}[unreadable] ${current}: ${err.message}`);
+      return;
+    }
+
+    for (const entry of entries) {
+      if (rows.length >= maxEntries) break;
+      const fullPath = path.join(current, entry.name);
+      const relativePath = path.relative(root, fullPath) || entry.name;
+      rows.push(`${entry.isDirectory() ? 'd' : '-'} ${relativePath}`);
+
+      if (entry.isDirectory()) {
+        walk(fullPath, depth + 1);
+      }
+    }
+  }
+
+  walk(root, 0);
+
+  if (rows.length >= maxEntries) {
+    rows.push(`... truncated at ${maxEntries} entries`);
+  }
+
+  return rows;
+}
+
+function listGeneratedConfigFiles(repoDir) {
+  const roots = [
+    path.join(repoDir, 'configs'),
+    path.join(repoDir, 'playbooks'),
+    path.join(repoDir, 'group_vars')
+  ];
+  const files = [];
+
+  for (const root of roots) {
+    for (const row of walkFiles(root, { maxEntries: 300, maxDepth: 8, ignored: ['.git'] })) {
+      if (row.startsWith('- ')) {
+        const relativeToRoot = row.slice(2);
+        files.push(path.join(root, relativeToRoot));
+      }
+    }
+  }
+
+  return files.filter(filePath => /\.(yml|yaml|json|cfg|ini)$/.test(filePath));
+}
+
+function buildDebugPayload(kind) {
+  const repoDir = latestDebug.repoDir || path.join(workRoot, 'bootstrap-sample');
+
+  if (kind === 'summary') {
+    return JSON.stringify({
+      repoDir,
+      preflightPath: latestDebug.preflightPath,
+      extraVarsPath: latestDebug.extraVarsPath,
+      selectedComponents: latestDebug.selectedComponents,
+      selectedComponentApps: latestDebug.selectedComponentApps,
+      result: latestDebug.result,
+      logBytes: latestLog.length,
+      eventBytes: latestEvents.length
+    }, null, 2);
+  }
+
+  if (kind === 'preflight') {
+    const text = readTextFile(latestDebug.preflightPath);
+    if (text) return JSON.stringify(redactSecrets(JSON.parse(text)), null, 2);
+    return JSON.stringify(redactSecrets(latestDebug.normalizedPayload || {}), null, 2);
+  }
+
+  if (kind === 'extra-vars') {
+    const text = readTextFile(latestDebug.extraVarsPath, 'ado-extra-vars.json has not been written yet.\n');
+    try {
+      return JSON.stringify(redactSecrets(JSON.parse(text)), null, 2);
+    } catch (err) {
+      return text;
+    }
+  }
+
+  if (kind === 'tree') {
+    if (!fs.existsSync(repoDir)) {
+      return `Generated repository does not exist yet: ${repoDir}\n`;
+    }
+
+    return [`Repository: ${repoDir}`, '', ...walkFiles(repoDir, { maxEntries: 700, maxDepth: 8 })].join('\n');
+  }
+
+  if (kind === 'configs') {
+    if (!fs.existsSync(repoDir)) {
+      return `Generated repository does not exist yet: ${repoDir}\n`;
+    }
+
+    const files = listGeneratedConfigFiles(repoDir).slice(0, 80);
+    if (files.length === 0) {
+      return `No generated config files found under ${repoDir}/configs, playbooks, or group_vars yet.\n`;
+    }
+
+    return files.map(filePath => {
+      const rel = path.relative(repoDir, filePath);
+      const body = readTextFile(filePath).slice(0, 12000);
+      return `===== ${rel} =====\n${body}`;
+    }).join('\n\n');
+  }
+
+  if (kind === 'runtime') {
+    return JSON.stringify({
+      uiVersion: process.env.ADO_PREFLIGHT_UI_VERSION || packageJson.version || 'unknown',
+      image: process.env.ADO_PREFLIGHT_UI_IMAGE || process.env.IMAGE_NAME || 'ado-preflight-ui',
+      imageTag: process.env.ADO_PREFLIGHT_UI_IMAGE_TAG || process.env.IMAGE_TAG || packageJson.version || 'latest',
+      podName: process.env.HOSTNAME || 'unknown',
+      nodeVersion: process.version,
+      cwd: process.cwd(),
+      appRoot: __dirname,
+      workRoot,
+      collectionDir,
+      ansibleCollectionsPath: '/workspace/collections:/usr/share/ansible/collections',
+      environment: {
+        ADO_COLLECTION_ROOT: process.env.ADO_COLLECTION_ROOT || '',
+        ADO_COLLECTION_ARCHIVE: process.env.ADO_COLLECTION_ARCHIVE || '',
+        ADO_PREFLIGHT_UI_README: process.env.ADO_PREFLIGHT_UI_README || '',
+        ADO_COLLECTION_README: process.env.ADO_COLLECTION_README || ''
+      }
+    }, null, 2);
+  }
+
+  if (kind === 'terminal') {
+    const podName = process.env.HOSTNAME || '<pod-or-container-name>';
+    return [
+      'Embedded shell access is intentionally not exposed in the browser.',
+      '',
+      'Use one of these from your workstation or cluster shell:',
+      '',
+      'Podman/local container:',
+      `  podman exec -it ${podName} /bin/bash`,
+      '  podman logs -f <container-name>',
+      '',
+      'OpenShift/Kubernetes pod:',
+      `  oc rsh pod/${podName}`,
+      `  oc exec -it pod/${podName} -- /bin/bash`,
+      `  oc logs -f pod/${podName}`,
+      '',
+      'Useful paths inside the container:',
+      `  ${repoDir}`,
+      '  /workspace/collections',
+      '  /opt/ado-collections',
+      '',
+      'Useful files after a run:',
+      `  ${latestDebug.preflightPath || path.join(repoDir, 'ado-preflight-<env>.json')}`,
+      `  ${latestDebug.extraVarsPath || path.join(repoDir, 'ado-extra-vars.json')}`,
+      `  ${path.join(repoDir, '.vault_pass')}`
+    ].join('\n');
+  }
+
+  return `Unknown debug tab: ${kind}\n`;
 }
 
 function normalizeVerbosity(value) {
@@ -690,6 +909,13 @@ function listYamlFiles(dirPath) {
     .map(fileName => path.join(dirPath, fileName));
 }
 
+function addUniqueName(names, value) {
+  const name = cleanYamlName(value);
+  if (name && !names.includes(name)) {
+    names.push(name);
+  }
+}
+
 function readConfigNames(filePaths) {
   const paths = Array.isArray(filePaths) ? filePaths : [filePaths];
   const existingPaths = paths.filter(filePath => filePath && fs.existsSync(filePath));
@@ -699,18 +925,48 @@ function readConfigNames(filePaths) {
   const text = existingPaths
     .map(filePath => fs.readFileSync(filePath, 'utf8'))
     .join('\n');
-  const namePattern = /^(?:-\s+|\s{2}-\s+)name:\s*(.+?)\s*$/gm;
+  const namePattern = /^\s*-\s+name:\s*(.+?)\s*$/gm;
   let match = namePattern.exec(text);
 
   while (match) {
-    const name = cleanYamlName(match[1]);
-    if (name && !names.includes(name)) {
-      names.push(name);
-    }
+    addUniqueName(names, match[1]);
     match = namePattern.exec(text);
   }
 
   return names;
+}
+
+function readControllerConfigNames(filePaths, rootKeys) {
+  const paths = Array.isArray(filePaths) ? filePaths : [filePaths];
+  const keys = Array.isArray(rootKeys) ? rootKeys : [rootKeys];
+  const existingPaths = paths.filter(filePath => filePath && fs.existsSync(filePath));
+  if (existingPaths.length === 0) return [];
+
+  const names = [];
+
+  existingPaths.forEach(filePath => {
+    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+    let activeRoot = false;
+
+    lines.forEach(line => {
+      const rootMatch = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+      if (rootMatch) {
+        activeRoot = keys.includes(rootMatch[1]);
+        return;
+      }
+
+      if (!activeRoot) return;
+
+      const nameMatch = line.match(/^\s*-\s+name:\s*(.+?)\s*$/);
+      if (nameMatch) {
+        addUniqueName(names, nameMatch[1]);
+      }
+    });
+  });
+
+  if (names.length > 0) return names;
+
+  return readConfigNames(existingPaths);
 }
 
 function appendListRecap(lines, label, values) {
@@ -722,6 +978,75 @@ function appendListRecap(lines, label, values) {
   }
 
   values.forEach(value => lines.push(`  - ${value}`));
+}
+
+function mergeRecapValues(...groups) {
+  const values = [];
+
+  groups.flat().forEach(value => {
+    const cleaned = cleanYamlName(String(value || ''));
+    if (cleaned && !values.includes(cleaned)) {
+      values.push(cleaned);
+    }
+  });
+
+  return values;
+}
+
+function orgScopedName(name, org, suffix) {
+  const cleaned = cleanYamlName(name || '');
+  if (cleaned) return cleaned;
+  return org ? `${org}-${suffix}` : '';
+}
+
+function expectedRecapObjects(data, selectedComponentApps) {
+  const org = cleanYamlName(data?.aap?.organization || 'ADO');
+  const aap = data?.aap || {};
+  const config = data?.component_config || {};
+  const selected = new Set(selectedComponentApps || []);
+  const credentials = [];
+  const inventories = [];
+  const inventorySources = [];
+  const hosts = ['localhost'];
+
+  const add = (list, value) => {
+    const cleaned = cleanYamlName(value || '');
+    if (cleaned && !list.includes(cleaned)) list.push(cleaned);
+  };
+
+  add(credentials, aap.vault_credential_name || orgScopedName('', org, 'vault'));
+
+  if (aap.machine_credential?.name && ['rhel', 'satellite', 'patching'].some(component => selected.has(component))) {
+    add(credentials, aap.machine_credential.name);
+  }
+
+  add(inventories, aap.inventory || orgScopedName('', org, 'inventory'));
+
+  if (selected.has('rhel') || config.satellite?.dynamic_inventory_enabled) {
+    add(inventories, `${org}-RHEL-Inventory`);
+  }
+
+  if (selected.has('idm')) {
+    add(inventories, `${org}-IDM-Inventory`);
+  }
+
+  if (selected.has('satellite')) {
+    add(inventories, `${org}-Satellite-Server-Inventory`);
+  }
+
+  if (config.satellite?.dynamic_inventory_enabled) {
+    add(credentials, config.satellite.credential_name || `${org} Satellite Service Account`);
+    add(inventorySources, config.satellite.inventory_source_name || `${org} Satellite Dynamic Inventory`);
+  }
+
+  const rhelHosts = [config.rhel?.hostname, ...(Array.isArray(config.rhel?.hosts) ? config.rhel.hosts : [])];
+  rhelHosts.forEach(host => add(hosts, host));
+  add(hosts, config.satellite?.hostname);
+  add(hosts, config.idm?.hostname);
+  add(hosts, config.idm?.replica_hostname);
+  add(hosts, config.openshift?.api_host || config.openshift?.hostname);
+
+  return { credentials, inventories, inventorySources, hosts };
 }
 
 function readFirstConfigName(files, fallback = 'not configured') {
@@ -754,10 +1079,35 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, collectionIns
     path.join(workflowsDir, 'bootstrap_workflows.yml'),
     ...listYamlFiles(workflowsDir)
   ]));
-  appendListRecap(lines, 'Credentials', readConfigNames(path.join(controllerDir, 'credentials.yml')));
-  appendListRecap(lines, 'Inventories', readConfigNames(path.join(controllerDir, 'inventories.yml')));
-  appendListRecap(lines, 'Inventory Sources', readConfigNames(path.join(controllerDir, 'inventory_sources.yml')));
-  appendListRecap(lines, 'Hosts', readConfigNames(path.join(controllerDir, 'hosts.yml')));
+  const expectedObjects = expectedRecapObjects(data, selectedComponentApps);
+  appendListRecap(lines, 'Credentials', mergeRecapValues(
+    readControllerConfigNames(
+      path.join(controllerDir, 'credentials.yml'),
+      ['controller_bootstrap_controller_credentials', 'controller_credentials']
+    ),
+    expectedObjects.credentials
+  ));
+  appendListRecap(lines, 'Inventories', mergeRecapValues(
+    readControllerConfigNames(
+      path.join(controllerDir, 'inventories.yml'),
+      ['controller_bootstrap_controller_inventories', 'controller_inventories']
+    ),
+    expectedObjects.inventories
+  ));
+  appendListRecap(lines, 'Inventory Sources', mergeRecapValues(
+    readControllerConfigNames(
+      path.join(controllerDir, 'inventory_sources.yml'),
+      ['controller_bootstrap_controller_inventory_sources', 'controller_inventory_sources']
+    ),
+    expectedObjects.inventorySources
+  ));
+  appendListRecap(lines, 'Hosts', mergeRecapValues(
+    readControllerConfigNames(
+      path.join(controllerDir, 'hosts.yml'),
+      ['bootstrap_controller_controller_hosts', 'controller_hosts']
+    ),
+    expectedObjects.hosts
+  ));
   lines.push(`Installed infra.ado collection: ${collectionInstalled ? 'yes' : 'no'}`);
   lines.push('');
 
@@ -770,6 +1120,16 @@ app.get('/api/logs' , (req, res) => {
 
 app.get('/api/events', (req, res) => {
   res.type('text/plain').send(latestEvents);
+});
+
+app.get('/api/debug/:kind', (req, res) => {
+  try {
+    const kind = String(req.params.kind || 'summary');
+    res.type('text/plain').send(buildDebugPayload(kind));
+  } catch (err) {
+    event(`Failed reading debug ${req.params.kind}: ${err.message}`);
+    res.status(500).type('text/plain').send(`Failed reading debug data: ${err.message}\n`);
+  }
 });
 
 app.get('/api/logs/raw', (req, res) => {
@@ -884,6 +1244,15 @@ app.get('/api/collection-versions', (req, res) => {
 app.post('/api/bootstrap', async (req, res) => {
   latestLog = '';
   latestEvents = '';
+  latestDebug = {
+    repoDir: '',
+    preflightPath: '',
+    extraVarsPath: '',
+    normalizedPayload: null,
+    selectedComponents: '',
+    selectedComponentApps: [],
+    result: null
+  };
 
   event('Bootstrap started');
 
@@ -906,6 +1275,9 @@ app.post('/api/bootstrap', async (req, res) => {
   const selectedComponentApps = selectedComponentAppsFrom(data);
   data.selected_component_apps = selectedComponentApps;
   pruneSelectedPayload(data, selectedComponentApps);
+  latestDebug.normalizedPayload = redactSecrets(data);
+  latestDebug.selectedComponents = selectedComponents;
+  latestDebug.selectedComponentApps = selectedComponentApps;
 
   const autoGitPush = data?.git?.auto_push !== false;
   const ansibleVerbosity = normalizeVerbosity(data?.ansible?.verbosity ?? data?.verbosity ?? 0);
@@ -935,6 +1307,9 @@ app.post('/api/bootstrap', async (req, res) => {
   const preflightPath = path.join(repoDir, preflightFile);
   const extraVarsPath = path.join(repoDir, 'ado-extra-vars.json');
   const vaultPassPath = path.join(repoDir, '.vault_pass');
+  latestDebug.repoDir = repoDir;
+  latestDebug.preflightPath = preflightPath;
+  latestDebug.extraVarsPath = extraVarsPath;
 
   event(`Cleaning repo directory ${repoDir}`);
   fs.rmSync(repoDir, { recursive: true, force: true });
@@ -991,12 +1366,13 @@ ansible-galaxy collection list
 
   if (collectionInstallCode !== 0) {
     event(`Bootstrap failed during collection install exitCode=${collectionInstallCode}`);
-    return res.json({
+    latestDebug.result = {
       status: 'failed',
       exitCode: collectionInstallCode,
       repoDir,
       error: 'Collection install failed. Check logs.'
-    });
+    };
+    return res.json(latestDebug.result);
   }
 
   await runStream(
@@ -1036,12 +1412,13 @@ ansible-galaxy collection list
 
   if (cloneCode !== 0 || !fs.existsSync(repoDir)) {
     event(`Bootstrap failed during git clone exitCode=${cloneCode}`);
-    return res.json({
+    latestDebug.result = {
       status: 'failed',
       exitCode: cloneCode || 128,
       repoDir,
       error: 'Git clone failed. Check logs.'
-    });
+    };
+    return res.json(latestDebug.result);
   }
 
   event('Git repository cloned');
@@ -1151,10 +1528,9 @@ ansible-playbook \\
     selectedComponentApps,
     collectionInstallCode === 0
   );
-  append(bootstrapRecap);
   event(`Bootstrap finished exitCode=${code}`);
 
-  res.json({
+  latestDebug.result = {
     status: code === 0 ? 'complete' : 'failed',
     exitCode: code,
     repoDir,
@@ -1168,7 +1544,9 @@ ansible-playbook \\
     encryptVaultFiles,
     bootstrapRecap,
     gitTokenProvided: Boolean(gitToken)
-  });
+  };
+
+  res.json(latestDebug.result);
 });
 
 app.use((req, res) => {
