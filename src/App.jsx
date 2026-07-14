@@ -52,7 +52,15 @@ const simpleComponents = [
 ];
 
 const componentOptionDefaults = {
-  openshift: ['admin_htpasswd', 'console_banner'],
+  openshift: [
+    'admin_htpasswd',
+    'console_banner',
+    'ldap_auth',
+    'oauth_rhbk',
+    'discover_routes_print',
+    'discover_routes_alt',
+    'update_pull_secret'
+  ],
   grafana: ['datasources', 'folders', 'dashboards'],
   rhbk: ['realm', 'client', 'idp', 'federation', 'group_mapper', 'client_scopes', 'client_mappers'],
   satellite: ['satellite_server_install', 'satellite_client_tools', 'satellite_content_view', 'satellite_capsule_install'],
@@ -74,6 +82,11 @@ const componentOptionDefaults = {
 const componentOptionLabels = {
   admin_htpasswd: 'Admin HTPasswd',
   console_banner: 'Console Banner',
+  ldap_auth: 'Configure LDAP in OpenShift',
+  oauth_rhbk: 'Configure OAuth/RHBK in OpenShift',
+  discover_routes_print: 'Discover Routes and Print',
+  discover_routes_alt: 'Discover Routes and Add Alternative Route',
+  update_pull_secret: 'Update Pull Secret',
   datasources: 'Datasources',
   folders: 'Folders',
   dashboards: 'Dashboards',
@@ -963,7 +976,8 @@ function App() {
   const buildPreflightPayload = () => {
     const payload = hydrateSelectedComponentConfigs(pruneInactiveComponentApps(data));
     const selectedApps = selectedComponentAppsFrom(payload);
-    const allowedConfig = new Set(selectedApps);
+    const selectedGroups = Array.isArray(payload.components) ? payload.components : [];
+    const allowedConfig = new Set([...selectedApps, ...selectedGroups]);
     const selectedConfig = {};
     const selectedOptions = {};
 
@@ -977,12 +991,12 @@ function App() {
     });
 
     Object.entries(payload.component_options || {}).forEach(([component, options]) => {
-      if (selectedApps.includes(component)) {
+      if (allowedConfig.has(component)) {
         selectedOptions[component] = options;
       }
     });
 
-    payload.selected_component_apps = selectedApps;
+    payload.selected_component_apps = [...new Set([...selectedGroups, ...selectedApps])];
     payload.component_config = selectedConfig;
     payload.component_options = selectedOptions;
     if (payload.aap) {
@@ -999,7 +1013,7 @@ function App() {
       });
     }
 
-    if (!selectedApps.includes('openshift')) {
+    if (!allowedConfig.has('openshift')) {
       delete payload.openshift;
     } else if (payload.openshift) {
       const openshiftOptions = payload.component_options?.openshift || [];
@@ -1610,7 +1624,20 @@ function App() {
     apiHost: 'OpenShift API server URL. Example: https://api.ocp.prod.rhlab:6443.',
     appsDomain: 'OpenShift apps domain used for routes. Example: apps.ocp.prod.rhlab.',
     skipTls: 'Skip OpenShift API certificate validation for self-signed or lab certificates.',
-    token: 'OpenShift API token from oc whoami --show-token. Stored in generated vault files.',
+    token: (
+      <div>
+        <p>Use a cluster-admin service account token for OpenShift automation.</p>
+        <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+{`oc create serviceaccount ansible-sa -n kube-system
+oc adm policy add-cluster-role-to-user cluster-admin system:serviceaccount:kube-system:ansible-sa
+export TOKEN=$(oc create token ansible-sa -n kube-system --duration=876000h)
+echo $TOKEN
+
+# Paste the printed token into this field.`}
+        </pre>
+        <p style={{ marginBottom: 0 }}>The token is stored in generated vault files.</p>
+      </div>
+    ),
     certSource: 'Certificate source used by cert-manager automation: custom certificate, IdM ACME, or AWS PCA.',
     tlsCrt: 'PEM-formatted TLS certificate for the custom certificate source.',
     tlsKey: 'PEM-formatted TLS private key for the custom certificate source.',
@@ -2415,6 +2442,10 @@ function App() {
         'OpenShift Options',
         'Select optional OpenShift configuration to include.'
       )}
+
+      <br />
+
+      {renderOpenShiftIntegration()}
     </>
   );
 
@@ -3058,6 +3089,10 @@ ${vaultYaml}
     if (selected.includes('openshift')) {
       const tabs = ['openshift'];
       (data.component_options?.openshift || []).forEach(option => {
+        const optionTabs = ['admin_htpasswd', 'console_banner'];
+        if (!optionTabs.includes(option)) {
+          return;
+        }
         if (!tabs.includes(option)) {
           tabs.push(option);
         }

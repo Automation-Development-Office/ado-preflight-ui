@@ -42,6 +42,10 @@ All notable changes to the ADO Preflight UI are documented in this file.
 
 ### Changed
 
+- OpenShift LDAP, OAuth/RHBK, route discovery, and pull secret automation now
+  have dedicated option checkboxes instead of being generated for every
+  OpenShift run.
+- OpenShift API Token help now includes service account creation, cluster-admin binding, and long-lived token commands for `ansible-sa`.
 - IDM configuration no longer shows or exports a storage field.
 - Satellite TLS handling now uses the same "Skip TLS certificate verification for self-signed certificates" wording as AAP and remains skipped by default.
 - The AAP Machine Credential SSH private key textarea is editable immediately so keys can be pasted without first toggling secret visibility.
@@ -69,6 +73,18 @@ All notable changes to the ADO Preflight UI are documented in this file.
 
 ### Fixed
 
+- Exported preflight JSON now keeps top-level component selections in
+  `selected_component_apps` for legacy compatibility, so OpenShift option-only
+  changes do not get collapsed to just the selected child app.
+- RHBK IDP and 389ds federation playbooks and AAP job templates are now only
+  generated when their matching RHBK options are selected.
+- OpenShift option payloads such as Console Banner and Admin HTPasswd now stay
+  in exported/run JSON when OpenShift is selected with child apps like RHBK, so
+  generated playbooks and AAP job templates are created for those options.
+- Bootstrap runs now preserve OpenShift option-derived components on the server
+  side, so Console Banner and OAuth/RHBK selections generate OpenShift
+  playbooks and AAP job templates during `Run Bootstrap`.
+- OpenShift API host, apps domain, TLS verification, and API token fields now always render on the main OpenShift configuration tab when OpenShift is selected.
 - Bootstrap runs now explicitly pass AAP apply flags so generated controller
   configuration is applied during UI runs.
 - The ADO Bootstrap Recap now reads generated job template files from

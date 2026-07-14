@@ -21,6 +21,21 @@ const openshiftApps = [
 const rhelApps = ['rhel', 'satellite', 'idm', 'aap', 'dirsrv', 'eck', 'gitlab', 'grafana', 'kafka', 'rhbk', 'compliance', 'stig'];
 const patchingApps = ['patching', 'satellite', 'idm'];
 const provisionApps = ['aws_instance', 'openshift_virt'];
+const openshiftOptionApps = {
+  admin_htpasswd: 'admin_htpasswd',
+  console_banner: 'console',
+  ldap_auth: 'openshift_ldap_auth',
+  oauth_rhbk: 'openshift_oauth_rhbk',
+  discover_routes_print: 'openshift_discover_routes_print',
+  discover_routes_alt: 'openshift_discover_routes_alt',
+  update_pull_secret: 'openshift_update_pull_secret'
+};
+const rhbkOptionApps = {
+  realm: 'rhbk_realm',
+  client: 'rhbk_client',
+  idp: 'rhbk_idp',
+  federation: 'rhbk_federation'
+};
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(uiDir));
@@ -355,10 +370,27 @@ function selectedComponentAppsFrom(data) {
 
   for (const component of components) {
     if (groups.includes(component)) {
+      out.push(component);
       const selected = data.component_apps?.[component] || [];
-      out.push(...(selected.length > 0 ? selected : [component]));
+      out.push(...selected);
     } else {
       out.push(component);
+    }
+  }
+
+  if (components.includes('openshift')) {
+    for (const option of data.component_options?.openshift || []) {
+      if (openshiftOptionApps[option]) {
+        out.push(openshiftOptionApps[option]);
+      }
+    }
+  }
+
+  if (components.includes('rhbk') || (data.component_apps?.openshift || []).includes('rhbk')) {
+    for (const option of data.component_options?.rhbk || []) {
+      if (rhbkOptionApps[option]) {
+        out.push(rhbkOptionApps[option]);
+      }
     }
   }
 
@@ -441,7 +473,10 @@ function defaultComponentConfig(component) {
 
 function hydrateSelectedComponentConfigs(data) {
   const selectedComponentApps = selectedComponentAppsFrom(data);
-  const allowedConfig = new Set(selectedComponentApps);
+  const allowedConfig = new Set([
+    ...selectedComponentApps,
+    ...(Array.isArray(data.components) ? data.components : [])
+  ]);
 
   if (!data.component_config) data.component_config = {};
 
@@ -610,7 +645,10 @@ function normalizePreflightPayload(input) {
 }
 
 function pruneSelectedPayload(data, selectedComponentApps) {
-  const allowedConfig = new Set(selectedComponentApps);
+  const allowedConfig = new Set([
+    ...selectedComponentApps,
+    ...(Array.isArray(data.components) ? data.components : [])
+  ]);
   const componentConfig = {};
   const componentOptions = {};
 
@@ -624,7 +662,7 @@ function pruneSelectedPayload(data, selectedComponentApps) {
   }
 
   for (const [component, options] of Object.entries(data.component_options || {})) {
-    if (selectedComponentApps.includes(component)) {
+    if (allowedConfig.has(component)) {
       componentOptions[component] = options;
     }
   }
@@ -632,7 +670,7 @@ function pruneSelectedPayload(data, selectedComponentApps) {
   data.component_config = componentConfig;
   data.component_options = componentOptions;
 
-  if (!selectedComponentApps.includes('openshift')) {
+  if (!allowedConfig.has('openshift')) {
     delete data.openshift;
   }
 

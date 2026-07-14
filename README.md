@@ -713,6 +713,26 @@ component option checkboxes stay clean, while form entries such as hostnames,
 profiles, tokens, credentials, TLS settings, and inventory settings provide
 field-level examples.
 
+## 🔐 OpenShift Automation Service Account Token
+
+OpenShift workflows need an API token when they create or configure cluster
+resources. Create a dedicated `ansible-sa` service account, bind it to
+`cluster-admin`, and generate a long-lived token.
+
+```bash
+oc create serviceaccount ansible-sa -n kube-system
+oc adm policy add-cluster-role-to-user cluster-admin system:serviceaccount:kube-system:ansible-sa
+export TOKEN=$(oc create token ansible-sa -n kube-system --duration=876000h)
+echo $TOKEN
+```
+
+Paste the printed token into **OpenShift API Token**. The UI writes it into the
+generated vault data so OpenShift playbooks can authenticate to the cluster.
+
+The `--duration=876000h` example requests a long-lived token. Your cluster
+policy may cap or reject long token durations; if that happens, use the longest
+duration your OpenShift cluster allows.
+
 ## 🧰 Console Troubleshooting
 
 The ADO Bootstrap Console includes **Logs** and **Events / Debug** tabs. The
