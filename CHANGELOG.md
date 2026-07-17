@@ -1,5 +1,12 @@
 # ADO Preflight UI Changelog
 
+## Unreleased
+
+- Added an AAP Hub force-update option for the `infra.ado` collection and pass it through the preflight payload.
+- The runtime now installs the highest-version bundled `infra-ado-*.tar.gz` with `--no-deps`, preventing stale `1.0.0` installs from hiding newly added roles.
+- The runtime now installs the bundled `ansible.hub` collection when present so AAP Hub publishing can run `ansible.hub.ah_build`.
+
+
 All notable changes to the ADO Preflight UI are documented in this file.
 
 ## 1.0.0 - 2026-07-11
@@ -19,6 +26,10 @@ All notable changes to the ADO Preflight UI are documented in this file.
 - Added machine credential SSH key inputs for RHEL, Satellite, and patching workflows.
 - Added Satellite service account fields for Satellite configuration.
 - Added Satellite dynamic inventory configuration fields for AAP inventory sources.
+- Added inline Satellite dynamic inventory guidance showing that the source is
+  created under the organization RHEL inventory.
+- Added Satellite install fields for deployment version, install location, RHN
+  organization ID, RHN activation key, sizing profile, and storage mount rows.
 - Added RHEL patching survey inputs for reboot behavior, package list, package state, exclusions, disabled repositories, cache refresh, kernel cleanup, and skip-broken handling.
 - Added RHBK configuration tabs for selected resources such as client, IDP, group mapper, client scopes, and federation.
 - Added UI version, image, tag, pod, and Node runtime details to the collections dialog.
@@ -33,12 +44,23 @@ All notable changes to the ADO Preflight UI are documented in this file.
   fields so UI runs can drive the generated OpenShift bootstrap workflow.
 - Added OpenShift Options for Admin HTPasswd and Console Banner so those
   optional settings render as tabs only when selected.
+- Added an OpenShift Agent Installer Config option with an Agent Installer tab
+  that validates cluster, network, VIP, pull-secret, SSH key, topology, and node
+  input before generating `install-config.yaml` and `agent-config.yaml`.
+- Added Agent Installer YAML preview and ZIP download actions so operators can
+  download both generated OpenShift agent-based installer files from the UI.
+- Added browser-local Agent Installer profiles with save, load, clone, and
+  delete actions for reusable OpenShift cluster definitions.
+- Added an independent OpenShift Virtualization VM provisioning form under the
+  Provision tab, including API credentials, VM image, namespace, instance type,
+  storage, cloud-init user, SSH public key, and start behavior.
 - Added click-to-open field help popups with examples across OpenShift, RHEL,
   Satellite, IDM, RHBK, Grafana, Compliance, STIG, and related component forms.
 - Added nested Events / Debug console tabs for summary data, preflight JSON,
   extra vars, generated repo tree, generated configs, runtime details, and
   terminal access guidance.
 - Added console text zoom controls for Logs and Events / Debug output.
+- Added OpenShift Virtualization launch-survey coverage for VM namespace, image, CPU, memory, disk, static networking, passwords, root SSH, and start/wait behavior.
 
 ### Changed
 
@@ -70,6 +92,7 @@ All notable changes to the ADO Preflight UI are documented in this file.
   limited to actual form fields and settings.
 - The final UI console output now shows RESULT before the ADO Bootstrap Recap so
   the recap is easier to read after the returned run payload.
+- OpenShift Virtualization preflight input now only collects OpenShift API host, API token, TLS verification, and SSH public key; VM sizing and guest settings are selected from the AAP launch survey.
 
 ### Fixed
 

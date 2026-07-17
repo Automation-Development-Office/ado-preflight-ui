@@ -55,6 +55,7 @@ const componentOptionDefaults = {
   openshift: [
     'admin_htpasswd',
     'console_banner',
+    'agent_installer',
     'ldap_auth',
     'oauth_rhbk',
     'discover_routes_print',
@@ -82,6 +83,7 @@ const componentOptionDefaults = {
 const componentOptionLabels = {
   admin_htpasswd: 'Admin HTPasswd',
   console_banner: 'Console Banner',
+  agent_installer: 'Agent Installer Config',
   ldap_auth: 'Configure LDAP in OpenShift',
   oauth_rhbk: 'Configure OAuth/RHBK in OpenShift',
   discover_routes_print: 'Discover Routes and Print',
@@ -126,6 +128,51 @@ const verbosityOptions = [
   { value: 4, label: 'Connection Debug (-vvvv)' },
   { value: 5, label: 'WinRM Debug (-vvvvv)' }
 ];
+
+const defaultAgentInstallerNode = index => ({
+  hostname: index < 3 ? `ocp-m${index + 1}` : `ocp-w${index - 2}`,
+  role: index < 3 ? 'master' : 'worker',
+  macAddress: '',
+  interfaceName: 'eno1',
+  networkMode: 'dhcp',
+  ipAddress: '',
+  prefixLength: 24,
+  gateway: '',
+  dnsServers: '',
+  diskDevice: '',
+  labels: '',
+  taints: ''
+});
+
+const agentInstallerDefaults = {
+  enabled: false,
+  profile_name: 'default',
+  topology: 'ha',
+  cluster_name: 'ocp-dev',
+  base_domain: 'dev.rhlab',
+  openshift_version: '4.16',
+  platform: 'baremetal',
+  publish: 'External',
+  network_type: 'OVNKubernetes',
+  machine_network_cidr: '192.168.2.0/24',
+  cluster_network_cidr: '10.128.0.0/14',
+  cluster_network_host_prefix: 24,
+  service_network_cidr: '172.30.0.0/16',
+  api_vip: '192.168.2.20',
+  ingress_vip: '192.168.2.21',
+  rendezvous_ip: '192.168.2.10',
+  boot_artifacts_base_url: '',
+  ntp_sources: '',
+  pull_secret: '',
+  ssh_public_key: '',
+  proxy_http: '',
+  proxy_https: '',
+  proxy_no_proxy: '',
+  additional_trust_bundle: '',
+  disconnected_registry: '',
+  require_root_device: false,
+  nodes: [0, 1, 2].map(defaultAgentInstallerNode)
+};
 
 const defaults = {
   scm_tool: 'gitlab',
@@ -181,6 +228,22 @@ const defaults = {
       hostname: '',
       organization: '',
       activation_key: '',
+      deployment_version: '6.19',
+      location: '',
+      rhn_org_id: '',
+      admin_rhn_activation_key: '',
+      size_profile: 'default',
+      size: [
+        { name: 'default', min_hosts: 0, max_hosts: 5000, min_ram: 20, min_cpu: 4 },
+        { name: 'medium', min_hosts: 5000, max_hosts: 10000, min_ram: 32, min_cpu: 8 },
+        { name: 'large', min_hosts: 10000, max_hosts: 20000, min_ram: 64, min_cpu: 12 },
+        { name: 'extra-large', min_hosts: 20000, max_hosts: 60000, min_ram: 128, min_cpu: 16 },
+        { name: 'extra-extra-large', min_hosts: 60000, max_hosts: 100000, min_ram: 256, min_cpu: 32 }
+      ],
+      req_dirs: [
+        { mount_point: '/var/lib/pulp', lv_name: 'lv_rhspulp', lv_size: '300g' },
+        { mount_point: '/var/lib/pgsql', lv_name: 'lv_pgsql', lv_size: '20g' }
+      ],
       service_account_username: '',
       service_account_password: '',
       admin_password: '',
@@ -255,7 +318,12 @@ const defaults = {
     elastic: { hostname: '', storage: '' },
     jira: { hostname: '', storage: '' },
     aws_instance: { hostname: '', storage: '' },
-    openshift_virt: { hostname: '', storage: '' }
+    openshift_virt: {
+      api_host: '',
+      api_token: '',
+      skip_tls_verify: true,
+      ssh_public_key: ''
+    }
   },
 
   component_options: {
@@ -303,6 +371,7 @@ const defaults = {
     skip_tls_verify: false,
     hub_publish_ado_collection: true,
     hub_mark_ado_validated: true,
+    hub_force_ado_collection_update: true,
     additional_credentials: [],
     machine_credential: {
       name: 'ADO-machine',
@@ -329,7 +398,8 @@ const defaults = {
     banner_location: 'BannerTop',
     banner_background_color: '#1f7a1f',
     banner_text_color: '#ffffff',
-    token: ''
+    token: '',
+    agent_installer: agentInstallerDefaults
   },
 
   jira: {
@@ -437,6 +507,10 @@ function App() {
   const [runFinished, setRunFinished] = useState(false);
   const [showRawOutput, setShowRawOutput] = useState(false);
   const [consoleFontSize, setConsoleFontSize] = useState(13);
+  const [agentInstallerResult, setAgentInstallerResult] = useState(null);
+  const [agentInstallerBusy, setAgentInstallerBusy] = useState(false);
+  const [agentInstallerPreviewTab, setAgentInstallerPreviewTab] = useState('install');
+  const [agentInstallerProfiles, setAgentInstallerProfiles] = useState([]);
   const outputRef = useRef(null);
   const importFileRef = useRef(null);
 
@@ -508,6 +582,12 @@ function App() {
       })
       .then(text => setAdoReadmeMarkdown(text))
       .catch(() => setAdoReadmeMarkdown('# ADO Collection documentation unavailable'));
+
+    try {
+      setAgentInstallerProfiles(JSON.parse(localStorage.getItem('adoAgentInstallerProfiles') || '[]'));
+    } catch {
+      setAgentInstallerProfiles([]);
+    }
   }, []);
 
   useEffect(() => {
@@ -673,6 +753,7 @@ function App() {
       if (!copy.aap) copy.aap = {};
       copy.aap.hub_publish_ado_collection = value;
       copy.aap.hub_mark_ado_validated = value;
+      if (value && copy.aap.hub_force_ado_collection_update === undefined) copy.aap.hub_force_ado_collection_update = true;
       return copy;
     });
   };
@@ -826,6 +907,17 @@ function App() {
       if (config.inventory_update_cache_timeout === undefined) config.inventory_update_cache_timeout = 0;
       if (config.inventory_verbosity === undefined) config.inventory_verbosity = 0;
       if (config.inventory_host_filter === undefined) config.inventory_host_filter = '';
+      if (!config.deployment_version) config.deployment_version = '6.19';
+      if (!config.location) config.location = '';
+      if (!config.rhn_org_id) config.rhn_org_id = '';
+      if (!config.admin_rhn_activation_key) config.admin_rhn_activation_key = '';
+      if (!config.size_profile) config.size_profile = 'default';
+      if (!Array.isArray(config.size) || config.size.length === 0) {
+        config.size = JSON.parse(JSON.stringify(defaults.component_config.satellite.size));
+      }
+      if (!Array.isArray(config.req_dirs) || config.req_dirs.length === 0) {
+        config.req_dirs = JSON.parse(JSON.stringify(defaults.component_config.satellite.req_dirs));
+      }
     }
 
     if (component === 'idm') {
@@ -921,6 +1013,7 @@ function App() {
       id: credential.id || `imported-credential-${index + 1}`
     }));
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
+    if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = true;
 
     if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
     if (!merged.git) merged.git = { ...defaults.git };
@@ -966,6 +1059,7 @@ function App() {
       setYamlDraft('');
       setYamlError('');
       setShowVaultYaml(false);
+      setAgentInstallerResult(null);
     } catch (err) {
       setImportStatus(`Import failed: ${err.message}`);
     } finally {
@@ -1007,6 +1101,7 @@ function App() {
       if (!payload.aap.machine_credential) payload.aap.machine_credential = {};
       payload.aap.machine_credential.name = normalizeOrgScopedName(payload.aap.machine_credential.name, org, 'machine');
       payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
+      if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = true;
       payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
         const { id, ...credentialPayload } = credential;
         return credentialPayload;
@@ -1027,6 +1122,9 @@ function App() {
         delete payload.openshift.banner_location;
         delete payload.openshift.banner_background_color;
         delete payload.openshift.banner_text_color;
+      }
+      if (!openshiftOptions.includes('agent_installer')) {
+        delete payload.openshift.agent_installer;
       }
     }
 
@@ -1172,6 +1270,154 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  const agentInstallerConfig = () => data.openshift?.agent_installer || agentInstallerDefaults;
+
+  const setAgentInstaller = (path, value) => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.openshift) copy.openshift = {};
+      if (!copy.openshift.agent_installer) {
+        copy.openshift.agent_installer = JSON.parse(JSON.stringify(agentInstallerDefaults));
+      }
+
+      const keys = path.split('.');
+      let obj = copy.openshift.agent_installer;
+
+      keys.slice(0, -1).forEach(k => {
+        if (!obj[k]) obj[k] = {};
+        obj = obj[k];
+      });
+
+      obj[keys[keys.length - 1]] = value;
+      return copy;
+    });
+  };
+
+  const setAgentNode = (index, field, value) => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.openshift) copy.openshift = {};
+      if (!copy.openshift.agent_installer) {
+        copy.openshift.agent_installer = JSON.parse(JSON.stringify(agentInstallerDefaults));
+      }
+      if (!Array.isArray(copy.openshift.agent_installer.nodes)) {
+        copy.openshift.agent_installer.nodes = [];
+      }
+      if (!copy.openshift.agent_installer.nodes[index]) {
+        copy.openshift.agent_installer.nodes[index] = defaultAgentInstallerNode(index);
+      }
+      copy.openshift.agent_installer.nodes[index][field] = value;
+      return copy;
+    });
+  };
+
+  const addAgentNode = () => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.openshift) copy.openshift = {};
+      if (!copy.openshift.agent_installer) {
+        copy.openshift.agent_installer = JSON.parse(JSON.stringify(agentInstallerDefaults));
+      }
+      if (!Array.isArray(copy.openshift.agent_installer.nodes)) {
+        copy.openshift.agent_installer.nodes = [];
+      }
+      copy.openshift.agent_installer.nodes.push(defaultAgentInstallerNode(copy.openshift.agent_installer.nodes.length));
+      return copy;
+    });
+  };
+
+  const removeAgentNode = index => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (Array.isArray(copy.openshift?.agent_installer?.nodes)) {
+        copy.openshift.agent_installer.nodes.splice(index, 1);
+      }
+      return copy;
+    });
+  };
+
+  const persistAgentProfiles = profiles => {
+    setAgentInstallerProfiles(profiles);
+    localStorage.setItem('adoAgentInstallerProfiles', JSON.stringify(profiles));
+  };
+
+  const saveAgentProfile = () => {
+    const config = agentInstallerConfig();
+    const name = String(config.profile_name || config.cluster_name || 'default').trim() || 'default';
+    const profile = { name, config: { ...config, profile_name: name } };
+    const profiles = [
+      ...agentInstallerProfiles.filter(existing => existing.name !== name),
+      profile
+    ].sort((a, b) => a.name.localeCompare(b.name));
+    persistAgentProfiles(profiles);
+  };
+
+  const loadAgentProfile = name => {
+    const profile = agentInstallerProfiles.find(item => item.name === name);
+    if (!profile) return;
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.openshift) copy.openshift = {};
+      copy.openshift.agent_installer = JSON.parse(JSON.stringify(profile.config));
+      return copy;
+    });
+    setAgentInstallerResult(null);
+  };
+
+  const cloneAgentProfile = () => {
+    const config = agentInstallerConfig();
+    const name = `${config.profile_name || config.cluster_name || 'profile'}-copy`;
+    setAgentInstaller('profile_name', name);
+  };
+
+  const deleteAgentProfile = () => {
+    const name = agentInstallerConfig().profile_name;
+    if (!name) return;
+    persistAgentProfiles(agentInstallerProfiles.filter(profile => profile.name !== name));
+  };
+
+  const callAgentInstallerApi = async (endpoint, expectBlob = false) => {
+    setAgentInstallerBusy(true);
+    try {
+      const response = await fetch(`/api/openshift-agent/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(agentInstallerConfig())
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(body || `Request failed with status ${response.status}`);
+      }
+
+      if (expectBlob) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${agentInstallerConfig().cluster_name || 'openshift-agent'}-agent-configs.zip`;
+        a.click();
+        URL.revokeObjectURL(url);
+        return null;
+      }
+
+      const result = await response.json();
+      setAgentInstallerResult(result);
+      return result;
+    } catch (err) {
+      setAgentInstallerResult({ valid: false, errors: [err.message], warnings: [] });
+      return null;
+    } finally {
+      setAgentInstallerBusy(false);
+    }
+  };
+
+  const validateAgentInstaller = () => callAgentInstallerApi('validate');
+
+  const generateAgentInstaller = () => callAgentInstallerApi('generate');
+
+  const downloadAgentInstallerZip = () => callAgentInstallerApi('download', true);
+
   const downloadJson = () => {
     const payload = buildPreflightPayload();
     const name = payload.components.includes('all') ? 'all' : payload.components.join('-');
@@ -1214,6 +1460,7 @@ function App() {
     setYamlError('');
     setShowVaultYaml(false);
     setImportStatus('');
+    setAgentInstallerResult(null);
   };
 
   const previewJson = () => {
@@ -1620,6 +1867,13 @@ function App() {
     profile: 'STIG profile for standalone STIG hardening jobs. Example: RHEL 9 STIG.'
   };
 
+  const openshiftVirtHelp = {
+    apiHost: 'OpenShift API server URL for the virtualization cluster. Example: https://api.ocp.prod.rhlab:6443.',
+    apiToken: 'OpenShift token used to create the VM. Stored in generated vault files.',
+    skipTls: 'Skip OpenShift API certificate validation for self-signed or lab certificates.',
+    sshPublicKey: 'Public SSH key attached to the VM job template and added to the launch-time cloud-init user.'
+  };
+
   const openshiftHelp = {
     apiHost: 'OpenShift API server URL. Example: https://api.ocp.prod.rhlab:6443.',
     appsDomain: 'OpenShift apps domain used for routes. Example: apps.ocp.prod.rhlab.',
@@ -1656,7 +1910,15 @@ echo $TOKEN
     bannerLocation: 'OpenShift console banner location. Example: BannerTop or BannerBottom.',
     bannerText: 'Text shown in the console banner. Example: Production cluster - approved changes only.',
     bannerBackgroundColor: 'Console banner background color. Example: #1f7a1f.',
-    bannerTextColor: 'Console banner text color. Example: #ffffff.'
+    bannerTextColor: 'Console banner text color. Example: #ffffff.',
+    agentClusterName: 'OpenShift cluster name used in install-config metadata. Example: ocp-dev.',
+    agentBaseDomain: 'Base DNS domain for the cluster. Example: dev.rhlab.',
+    agentPullSecret: 'Red Hat pull secret JSON copied from cloud.redhat.com.',
+    agentSshKey: 'Public SSH key installed for core user access. Example: ssh-ed25519 AAAA...',
+    agentVip: 'Virtual IP address inside the machine network CIDR.',
+    agentNetworkCidr: 'CIDR block used by bare metal nodes. Example: 192.168.2.0/24.',
+    agentRendezvousIp: 'IP address of the first control-plane host used by the agent installer.',
+    agentNodeStatic: 'Static networking writes NMState config into agent-config.yaml. DHCP uses the MAC/interface only.'
   };
 
   const renderDefaultComponentConfig = component => (
@@ -2086,12 +2348,18 @@ echo $TOKEN
     hostname: 'Satellite server hostname or URL. Example: sat.server.lab or https://sat.server.lab. Hostnames are normalized to https:// for generated Satellite config.',
     organization: 'Satellite organization used for activation keys, content, and inventory. Example: Lab.',
     activationKey: 'Activation key used when registering RHEL hosts to Satellite. Example: rhel-9.',
+    deploymentVersion: 'Satellite deployment version used for install and repository labels. Example: 6.19.',
+    location: 'Logical location where the Satellite server is installed. Example: AWS, datacenter1, or lab.',
+    rhnOrgId: 'Red Hat account organization ID from Hybrid Cloud Console. Example: 12345678.',
+    rhnActivationKey: 'RHN activation key from Hybrid Cloud Console for registering the Satellite host. Stored in generated vault files.',
+    sizeProfile: 'Sizing profile used for Satellite tuning and pre-check CPU/RAM values.',
+    reqDirs: 'Logical volumes to create for Satellite data. Each row needs mount_point, lv_name, and lv_size.',
     serviceAccountUsername: 'Satellite service account username for API and inventory operations. Example: svc_aap_satellite.',
     serviceAccountPassword: 'Password for the Satellite service account. Stored in generated vault files.',
     adminPassword: 'Optional Satellite admin password for bootstrap tasks that still require admin access. Stored in generated vault files.',
-    dynamicInventory: 'Creates an AAP inventory source that reads hosts from Satellite 6.',
+    dynamicInventory: 'Creates an AAP inventory source that reads hosts from Satellite 6 and attaches it to the organization RHEL inventory, such as ADO-RHEL-Inventory.',
     credentialName: 'AAP credential name for the Satellite service account. Example: ADO Satellite Service Account.',
-    inventorySourceName: 'AAP inventory source name. Example: ADO Satellite Dynamic Inventory.',
+    inventorySourceName: 'AAP inventory source name shown under the organization RHEL inventory sources. Example: ADO Satellite Dynamic Inventory under ADO-RHEL-Inventory.',
     inventoryHostFilter: 'Optional Satellite search filter. Example: hostgroup = RHEL9 or organization = Lab.',
     updateCacheTimeout: 'Seconds to reuse cached inventory data before refreshing. Example: 0 disables cache reuse.',
     inventoryVerbosity: 'Inventory source sync verbosity from 0 to 5.',
@@ -2099,6 +2367,36 @@ echo $TOKEN
     overwriteVars: 'Allow the inventory sync to update variables on existing AAP hosts.',
     updateOnLaunch: 'Run a Satellite inventory sync automatically when a job using this inventory launches.',
     skipTls: 'Disable Satellite certificate validation for self-signed or lab certificates.'
+  };
+
+  const setSatelliteReqDir = (index, key, value) => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      const rows = copy.component_config.satellite.req_dirs || [];
+      rows[index] = { ...(rows[index] || {}), [key]: value };
+      copy.component_config.satellite.req_dirs = rows;
+      return copy;
+    });
+  };
+
+  const addSatelliteReqDir = () => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      copy.component_config.satellite.req_dirs = [
+        ...(copy.component_config.satellite.req_dirs || []),
+        { mount_point: '', lv_name: '', lv_size: '' }
+      ];
+      return copy;
+    });
+  };
+
+  const removeSatelliteReqDir = index => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      copy.component_config.satellite.req_dirs = (copy.component_config.satellite.req_dirs || [])
+        .filter((_, rowIndex) => rowIndex !== index);
+      return copy;
+    });
   };
 
   const renderSatelliteConfig = () => (
@@ -2110,11 +2408,78 @@ echo $TOKEN
       <br /><br />
       <Grid hasGutter>
         {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('Satellite Deployment Version', satelliteHelp.deploymentVersion)}>
+            <select
+              value={data.component_config.satellite.deployment_version || '6.19'}
+              onChange={e => set('component_config.satellite.deployment_version', e.target.value)}
+              style={{ width: '100%', height: '36px' }}
+            >
+              <option value="6.17">6.17</option>
+              <option value="6.18">6.18</option>
+              <option value="6.19">6.19</option>
+            </select>
+          </FormGroup>
+        </GridItem>
         {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
         {renderTextField('Activation Key', 'component_config.satellite.activation_key', 'text', satelliteHelp.activationKey)}
+        {renderTextField('Satellite Install Location', 'component_config.satellite.location', 'text', satelliteHelp.location)}
+        {renderTextField('RHN Organization ID', 'component_config.satellite.rhn_org_id', 'text', satelliteHelp.rhnOrgId)}
+        {renderTextField('RHN Activation Key', 'component_config.satellite.admin_rhn_activation_key', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.rhnActivationKey)}
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('Satellite Size Profile', satelliteHelp.sizeProfile)}>
+            <select
+              value={data.component_config.satellite.size_profile || 'default'}
+              onChange={e => set('component_config.satellite.size_profile', e.target.value)}
+              style={{ width: '100%', height: '36px' }}
+            >
+              {(data.component_config.satellite.size || []).map(profile => (
+                <option key={profile.name} value={profile.name}>
+                  {profile.name} ({profile.min_hosts}-{profile.max_hosts} hosts, {profile.min_ram}GB RAM, {profile.min_cpu} CPU)
+                </option>
+              ))}
+            </select>
+          </FormGroup>
+        </GridItem>
         {renderTextField('Service Account Username', 'component_config.satellite.service_account_username', 'text', satelliteHelp.serviceAccountUsername)}
         {renderTextField('Service Account Password', 'component_config.satellite.service_account_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.serviceAccountPassword)}
         {renderTextField('Admin Password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.adminPassword)}
+        <GridItem span={12}>
+          <FormGroup label={labelWithHelp('Satellite Storage Mounts', satelliteHelp.reqDirs)}>
+            {(data.component_config.satellite.req_dirs || []).map((row, index) => (
+              <Grid hasGutter key={`satellite-req-dir-${index}`} style={{ marginBottom: '8px' }}>
+                <GridItem span={4}>
+                  <TextInput
+                    value={row.mount_point || ''}
+                    onChange={(_, v) => setSatelliteReqDir(index, 'mount_point', v)}
+                    aria-label={`Satellite mount point ${index + 1}`}
+                    placeholder="/var/lib/pulp"
+                  />
+                </GridItem>
+                <GridItem span={3}>
+                  <TextInput
+                    value={row.lv_name || ''}
+                    onChange={(_, v) => setSatelliteReqDir(index, 'lv_name', v)}
+                    aria-label={`Satellite logical volume ${index + 1}`}
+                    placeholder="lv_rhspulp"
+                  />
+                </GridItem>
+                <GridItem span={3}>
+                  <TextInput
+                    value={row.lv_size || ''}
+                    onChange={(_, v) => setSatelliteReqDir(index, 'lv_size', v)}
+                    aria-label={`Satellite logical volume size ${index + 1}`}
+                    placeholder="300g"
+                  />
+                </GridItem>
+                <GridItem span={2}>
+                  <Button variant="link" onClick={() => removeSatelliteReqDir(index)}>Remove</Button>
+                </GridItem>
+              </Grid>
+            ))}
+            <Button variant="secondary" onClick={addSatelliteReqDir}>Add Mount</Button>
+          </FormGroup>
+        </GridItem>
         <GridItem span={12}>
           <FormGroup label={labelWithHelp('Satellite Dynamic Inventory', satelliteHelp.dynamicInventory)}>
             <Checkbox
@@ -2123,6 +2488,9 @@ echo $TOKEN
               isChecked={data.component_config.satellite.dynamic_inventory_enabled}
               onChange={(_, v) => set('component_config.satellite.dynamic_inventory_enabled', v)}
             />
+            <div style={{ color: '#6a6e73', fontSize: '13px', marginTop: '6px' }}>
+              Created as an inventory source under {data.aap.organization || 'ADO'}-RHEL-Inventory, not as a separate top-level inventory.
+            </div>
           </FormGroup>
         </GridItem>
         {data.component_config.satellite.dynamic_inventory_enabled && (
@@ -2461,15 +2829,56 @@ echo $TOKEN
     </>
   );
 
-  const renderProvisionConfig = () => (
-    <>
-      {renderGroupComponentOptions(
-        'provision',
-        'Provisioning Options',
-        'Select which provisioning targets to include.'
-      )}
-    </>
-  );
+  const renderProvisionConfig = () => {
+    const openshiftVirtConfig = {
+      ...defaults.component_config.openshift_virt,
+      ...(data.component_config?.openshift_virt || {})
+    };
+
+    return (
+      <>
+        {renderGroupComponentOptions(
+          'provision',
+          'Provisioning Options',
+          'Select which provisioning targets to include.'
+        )}
+
+        {(data.component_apps?.provision || []).includes('openshift_virt') && (
+        <div
+          style={{
+            marginTop: '18px',
+            padding: '14px',
+            border: `1px solid ${borderColor}`,
+            borderRadius: '6px',
+            background: isDark ? '#1f1f1f' : '#fafafa'
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: '4px' }}>
+            OpenShift Virtualization VM
+          </div>
+          <div style={{ color: mutedTextColor, marginBottom: '14px' }}>
+            Creates a standalone VM from an OpenShift Virtualization boot image. This does not install Satellite automatically.
+          </div>
+          <Grid hasGutter>
+            {renderTextField('OpenShift API Host', 'component_config.openshift_virt.api_host', 'text', openshiftVirtHelp.apiHost)}
+            <GridItem span={6}>
+              <FormGroup label={labelWithHelp('TLS Certificate Verification', openshiftVirtHelp.skipTls)}>
+                <Checkbox
+                  id="openshift-virt-skip-tls-verify"
+                  label="Skip TLS certificate verification for self-signed certificates"
+                  isChecked={openshiftVirtConfig.skip_tls_verify}
+                  onChange={(_, v) => set('component_config.openshift_virt.skip_tls_verify', v)}
+                />
+              </FormGroup>
+            </GridItem>
+            {renderTextAreaField('OpenShift API Token', 'component_config.openshift_virt.api_token', openshiftVirtHelp.apiToken, 3)}
+            {renderTextAreaField('SSH Public Key', 'component_config.openshift_virt.ssh_public_key', openshiftVirtHelp.sshPublicKey, 3)}
+          </Grid>
+        </div>
+        )}
+      </>
+    );
+  };
 
   const renderAllConfig = () => (
     <div
@@ -2778,6 +3187,251 @@ echo $TOKEN
     </Grid>
   );
 
+  const renderAgentInstallerConfig = () => {
+    const config = agentInstallerConfig();
+    const nodes = Array.isArray(config.nodes) ? config.nodes : [];
+    const result = agentInstallerResult;
+    const previewText = agentInstallerPreviewTab === 'agent'
+      ? result?.agentConfig
+      : result?.installConfig;
+
+    const inputStyle = {
+      width: '100%',
+      minWidth: 0,
+      padding: '8px',
+      background: fieldBg,
+      color: fieldColor,
+      border: `1px solid ${borderColor}`,
+      borderRadius: '4px'
+    };
+
+    const agentField = (label, key, help, type = 'text', span = 6) => (
+      <GridItem span={span}>
+        <FormGroup label={labelWithHelp(label, help)}>
+          <TextInput
+            type={type}
+            value={config[key] || ''}
+            onChange={(_, v) => setAgentInstaller(key, v)}
+          />
+        </FormGroup>
+      </GridItem>
+    );
+
+    const agentTextArea = (label, key, help, rows = 5) => (
+      <GridItem span={12}>
+        <FormGroup label={labelWithHelp(label, help)}>
+          <textarea
+            value={config[key] || ''}
+            onChange={e => setAgentInstaller(key, e.target.value)}
+            rows={rows}
+            spellCheck="false"
+            style={inputStyle}
+          />
+        </FormGroup>
+      </GridItem>
+    );
+
+    return (
+      <>
+        <Grid hasGutter>
+          <GridItem span={12}>
+            <div style={{ fontWeight: 700, marginBottom: '8px' }}>Saved Profiles</div>
+          </GridItem>
+          {agentField('Profile Name', 'profile_name', 'Reusable browser-local profile name. Example: prod-sno-lab.')}
+          <GridItem span={6}>
+            <FormGroup label="Load Profile">
+              <select
+                value=""
+                onChange={e => loadAgentProfile(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="">Select saved profile</option>
+                {agentInstallerProfiles.map(profile => (
+                  <option key={profile.name} value={profile.name}>{profile.name}</option>
+                ))}
+              </select>
+            </FormGroup>
+          </GridItem>
+          <GridItem span={12}>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '12px' }}>
+              <Button variant="secondary" onClick={saveAgentProfile}>Save Profile</Button>
+              <Button variant="secondary" onClick={cloneAgentProfile}>Clone Current Profile</Button>
+              <Button variant="link" onClick={deleteAgentProfile}>Delete Saved Profile</Button>
+            </div>
+          </GridItem>
+
+          <GridItem span={12}>
+            <div style={{ fontWeight: 700, marginBottom: '8px' }}>Cluster Information</div>
+          </GridItem>
+          {agentField('Cluster Name', 'cluster_name', openshiftHelp.agentClusterName)}
+          {agentField('Base Domain', 'base_domain', openshiftHelp.agentBaseDomain)}
+          {agentField('OpenShift Version', 'openshift_version', 'OpenShift release version for the saved profile. Example: 4.16.')}
+          <GridItem span={6}>
+            <FormGroup label="Topology">
+              <select
+                value={config.topology || 'ha'}
+                onChange={e => setAgentInstaller('topology', e.target.value)}
+                style={inputStyle}
+              >
+                <option value="ha">Highly Available</option>
+                <option value="sno">Single Node OpenShift</option>
+              </select>
+            </FormGroup>
+          </GridItem>
+          {agentTextArea('Pull Secret', 'pull_secret', openshiftHelp.agentPullSecret, 4)}
+          {agentTextArea('SSH Public Key', 'ssh_public_key', openshiftHelp.agentSshKey, 3)}
+
+          <GridItem span={12}>
+            <div style={{ fontWeight: 700, margin: '12px 0 8px' }}>Networking</div>
+          </GridItem>
+          {agentField('Machine Network CIDR', 'machine_network_cidr', openshiftHelp.agentNetworkCidr)}
+          {agentField('Cluster Network CIDR', 'cluster_network_cidr', 'Pod network CIDR. Example: 10.128.0.0/14.')}
+          {agentField('Cluster Network Host Prefix', 'cluster_network_host_prefix', 'Host prefix for each node pod subnet. Example: 24.', 'number')}
+          {agentField('Service Network CIDR', 'service_network_cidr', 'Service network CIDR. Example: 172.30.0.0/16.')}
+          {agentField('API VIP', 'api_vip', openshiftHelp.agentVip)}
+          {agentField('Ingress VIP', 'ingress_vip', openshiftHelp.agentVip)}
+          {agentField('Rendezvous IP', 'rendezvous_ip', openshiftHelp.agentRendezvousIp)}
+          {agentField('Boot Artifacts Base URL', 'boot_artifacts_base_url', 'Optional HTTP URL where boot artifacts are served. Example: http://192.168.2.2/.')}
+          {agentField('NTP Sources', 'ntp_sources', 'Optional NTP sources, comma or newline separated. Example: idm.server.lab, 192.168.0.60.')}
+          {agentField('HTTP Proxy', 'proxy_http', 'Optional install-config proxy HTTP URL.')}
+          {agentField('HTTPS Proxy', 'proxy_https', 'Optional install-config proxy HTTPS URL.')}
+          {agentField('No Proxy', 'proxy_no_proxy', 'Optional comma-separated proxy bypass list.')}
+          {agentTextArea('Additional Trust Bundle', 'additional_trust_bundle', 'Optional PEM CA bundle added to install-config.yaml.', 4)}
+          {agentTextArea('Disconnected Registry Image Content Sources', 'disconnected_registry', 'Optional YAML list for imageContentSources when installing disconnected.', 4)}
+          <GridItem span={12}>
+            <Checkbox
+              label="Require root device hints for every node"
+              isChecked={config.require_root_device === true}
+              onChange={(_, v) => setAgentInstaller('require_root_device', v)}
+            />
+          </GridItem>
+        </Grid>
+
+        <div style={{ fontWeight: 700, margin: '20px 0 8px' }}>Nodes</div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1180px' }}>
+            <thead>
+              <tr>
+                {['Hostname', 'Role', 'MAC Address', 'Interface', 'Network', 'Static IP', 'Prefix', 'Gateway', 'DNS Servers', 'Disk', 'Labels', 'Taints', ''].map(header => (
+                  <th key={header} style={{ textAlign: 'left', padding: '6px', borderBottom: `1px solid ${borderColor}` }}>
+                    {header}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {nodes.map((node, index) => (
+                <tr key={`${node.hostname || 'node'}-${index}`}>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput value={node.hostname || ''} onChange={(_, v) => setAgentNode(index, 'hostname', v)} />
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <select value={node.role || 'worker'} onChange={e => setAgentNode(index, 'role', e.target.value)} style={inputStyle}>
+                      <option value="master">Control Plane</option>
+                      <option value="worker">Worker</option>
+                    </select>
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput value={node.macAddress || ''} onChange={(_, v) => setAgentNode(index, 'macAddress', v)} />
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput value={node.interfaceName || ''} onChange={(_, v) => setAgentNode(index, 'interfaceName', v)} />
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <select value={node.networkMode || 'dhcp'} onChange={e => setAgentNode(index, 'networkMode', e.target.value)} style={inputStyle}>
+                      <option value="dhcp">DHCP</option>
+                      <option value="static">Static</option>
+                    </select>
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput value={node.ipAddress || ''} onChange={(_, v) => setAgentNode(index, 'ipAddress', v)} isDisabled={node.networkMode !== 'static'} />
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput type="number" value={node.prefixLength ?? 24} onChange={(_, v) => setAgentNode(index, 'prefixLength', v)} isDisabled={node.networkMode !== 'static'} />
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput value={node.gateway || ''} onChange={(_, v) => setAgentNode(index, 'gateway', v)} isDisabled={node.networkMode !== 'static'} />
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput value={node.dnsServers || ''} onChange={(_, v) => setAgentNode(index, 'dnsServers', v)} isDisabled={node.networkMode !== 'static'} />
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput value={node.diskDevice || ''} onChange={(_, v) => setAgentNode(index, 'diskDevice', v)} />
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput value={node.labels || ''} onChange={(_, v) => setAgentNode(index, 'labels', v)} />
+                  </td>
+                  <td style={{ padding: '6px' }}>
+                    <TextInput value={node.taints || ''} onChange={(_, v) => setAgentNode(index, 'taints', v)} />
+                  </td>
+                  <td style={{ padding: '6px', whiteSpace: 'nowrap' }}>
+                    <Button variant="link" onClick={() => removeAgentNode(index)}>Remove</Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '12px' }}>
+          <Button variant="secondary" onClick={addAgentNode}>Add Node</Button>
+          <Button variant="primary" isDisabled={agentInstallerBusy} onClick={validateAgentInstaller}>Validate Configuration</Button>
+          <Button variant="secondary" isDisabled={agentInstallerBusy} onClick={generateAgentInstaller}>Generate YAML Preview</Button>
+          <Button variant="secondary" isDisabled={agentInstallerBusy} onClick={downloadAgentInstallerZip}>Download ZIP</Button>
+          {result?.installConfig && (
+            <>
+              <Button variant="link" onClick={() => downloadFile('install-config.yaml', result.installConfig)}>Download install-config.yaml</Button>
+              <Button variant="link" onClick={() => downloadFile('agent-config.yaml', result.agentConfig)}>Download agent-config.yaml</Button>
+            </>
+          )}
+        </div>
+
+        {result && (
+          <div style={{ marginTop: '14px' }}>
+            {result.valid ? (
+              <div style={{ color: '#3e8635', fontWeight: 700 }}>Validation passed.</div>
+            ) : (
+              <div style={{ color: '#c9190b', fontWeight: 700 }}>Validation failed.</div>
+            )}
+            {(result.errors || []).map(error => (
+              <div key={error} style={{ color: '#c9190b' }}>- {error}</div>
+            ))}
+            {(result.warnings || []).map(warning => (
+              <div key={warning} style={{ color: '#f0ab00' }}>- {warning}</div>
+            ))}
+          </div>
+        )}
+
+        {previewText && (
+          <div style={{ marginTop: '14px' }}>
+            <Tabs activeKey={agentInstallerPreviewTab} onSelect={(_, key) => setAgentInstallerPreviewTab(key)}>
+              <Tab eventKey="install" title="install-config.yaml" />
+              <Tab eventKey="agent" title="agent-config.yaml" />
+            </Tabs>
+            <textarea
+              value={previewText}
+              readOnly
+              spellCheck="false"
+              style={{
+                width: '100%',
+                minHeight: '420px',
+                marginTop: '10px',
+                background: '#151515',
+                color: '#f0f0f0',
+                fontFamily: 'monospace',
+                fontSize: `${consoleFontSize}px`,
+                lineHeight: '1.45',
+                border: '1px solid #3c3c3c',
+                borderRadius: '4px',
+                padding: '14px'
+              }}
+            />
+          </div>
+        )}
+      </>
+    );
+  };
+
   const renderJiraConfig = () => (
     <>
       <Radio
@@ -2867,6 +3521,8 @@ echo $TOKEN
         return renderOpenShiftAdminHtpasswdConfig();
       case 'console_banner':
         return renderOpenShiftConsoleBannerConfig();
+      case 'agent_installer':
+        return renderAgentInstallerConfig();
       case 'rhel':
         return renderRhelConfig();
       case 'patching':
@@ -3089,7 +3745,7 @@ ${vaultYaml}
     if (selected.includes('openshift')) {
       const tabs = ['openshift'];
       (data.component_options?.openshift || []).forEach(option => {
-        const optionTabs = ['admin_htpasswd', 'console_banner'];
+        const optionTabs = ['admin_htpasswd', 'console_banner', 'agent_installer'];
         if (!optionTabs.includes(option)) {
           return;
         }
@@ -3137,6 +3793,7 @@ ${vaultYaml}
     if (tab === 'openshift') return 'OpenShift';
     if (tab === 'admin_htpasswd') return 'Admin HTPasswd';
     if (tab === 'console_banner') return 'Console Banner';
+    if (tab === 'agent_installer') return 'Agent Installer';
     if (tab === 'rhel') return 'RHEL';
     if (tab === 'patching') return 'Patching';
     if (tab === 'provision') return 'Provision';
@@ -4022,6 +4679,12 @@ ${vaultYaml}
                           label="Add infra.ado collection to validated content in AAP Hub"
                           isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
                           onChange={(_, v) => setAapHubValidated(v)}
+                        />
+                        <Checkbox
+                          label="Force update infra.ado collection in AAP Hub"
+                          isChecked={data.aap.hub_force_ado_collection_update}
+                          isDisabled={!data.aap.hub_publish_ado_collection}
+                          onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
                         />
                       </FormGroup>
                     </GridItem>

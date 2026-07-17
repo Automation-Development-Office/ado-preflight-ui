@@ -261,13 +261,21 @@ Satellite configuration includes:
 - Satellite hostname or URL
 - Satellite organization
 - Activation key
+- Satellite deployment version, with `6.17`, `6.18`, and `6.19` options
+- Satellite install location, such as `AWS` or a datacenter name
+- RHN organization ID from Red Hat Hybrid Cloud Console
+- RHN activation key for registering the Satellite host
+- Satellite sizing profile, such as `default`, `medium`, `large`,
+  `extra-large`, or `extra-extra-large`
+- Satellite storage mount rows with `mount_point`, `lv_name`, and `lv_size`
 - Service account username
 - Service account password
 - Admin password
 - TLS validation choice
 - Dynamic inventory settings
 
-Satellite no longer asks for storage.
+Satellite no longer asks for an OpenShift storage class. Satellite install
+storage uses LVM mount rows that map to `satellite_install_satellite_req_dirs`.
 
 If dynamic inventory is enabled, the generated AAP controller config includes a Satellite 6 inventory source.
 The Satellite server host is placed in
@@ -315,6 +323,44 @@ The OpenShift skip TLS option defaults to enabled for self-signed environments.
 Cert-manager can be configured for a custom certificate, IdM ACME, or AWS PCA
 when the `cert_manager` app is selected.
 
+#### Agent Installer Config
+
+When `Agent Installer Config` is checked under **OpenShift Options**, the UI
+shows an **Agent Installer** tab. This tab generates OpenShift agent-based
+installer files without requiring operators to hand-edit YAML.
+
+The tab collects:
+
+- A browser-local profile name for saving, loading, cloning, and editing
+  reusable cluster profiles
+- Cluster name, base domain, OpenShift version, topology, pull secret, and SSH
+  public key
+- Machine, cluster, and service network CIDRs
+- API VIP, ingress VIP, rendezvous IP, optional boot artifacts URL, and NTP
+  sources
+- Optional proxy, trust bundle, and disconnected registry image content source
+  settings
+- Any number of nodes with hostname, role, MAC address, interface, DHCP/static
+  network mode, static IP details, DNS servers, root disk hints, labels, and
+  taints
+
+Actions on the tab:
+
+- **Save Profile** stores the current Agent Installer form in browser local
+  storage.
+- **Clone Current Profile** copies the current profile so it can be edited
+  without overwriting the original.
+- **Validate Configuration** checks required fields, CIDRs, VIP placement,
+  pull-secret JSON, SSH key format, duplicate hostnames, duplicate MACs,
+  duplicate static IPs, and SNO/HA topology rules.
+- **Generate YAML Preview** renders `install-config.yaml` and
+  `agent-config.yaml` in the browser.
+- **Download ZIP** downloads both generated YAML files together.
+
+This generator is intentionally separate from the normal bootstrap run. It is
+used to prepare OpenShift installer input files. Future work can add ISO
+generation, PXE export, hardware inventory import, and GitOps export.
+
 ### Grafana
 
 Grafana configuration includes:
@@ -329,7 +375,6 @@ Grafana configuration includes:
 IDM configuration includes:
 
 - Hostname
-- Storage
 - Domain
 - Realm
 - Admin password
