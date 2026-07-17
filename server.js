@@ -544,6 +544,7 @@ function normalizePreflightPayload(input) {
   data.aap.vault_credential_name = normalizeOrgScopedName(data.aap.vault_credential_name, data.aap.organization, 'vault');
   if (data.aap.hub_publish_ado_collection === undefined) data.aap.hub_publish_ado_collection = true;
   if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = true;
+  if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = true;
   data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
   if (!Array.isArray(data.aap.additional_credentials)) data.aap.additional_credentials = [];
   data.aap.additional_credentials = data.aap.additional_credentials.map(({ id, ...credential }) => credential);
@@ -626,6 +627,7 @@ function normalizePreflightPayload(input) {
   if (data.openshift.banner_location === undefined) data.openshift.banner_location = 'BannerTop';
   if (data.openshift.banner_background_color === undefined) data.openshift.banner_background_color = '#1f7a1f';
   if (data.openshift.banner_text_color === undefined) data.openshift.banner_text_color = '#ffffff';
+  data.openshift.agent_installer = normalizeAgentInstaller(data.openshift.agent_installer || {});
 
   if (!data.component_config.cert_manager) data.component_config.cert_manager = {};
   if (data.component_config.cert_manager.mode === undefined) data.component_config.cert_manager.mode = 'cert';
@@ -642,6 +644,467 @@ function normalizePreflightPayload(input) {
   if (data.component_config.cert_manager.awspca_secret_access_key === undefined) data.component_config.cert_manager.awspca_secret_access_key = '';
 
   return data;
+}
+
+function splitList(value) {
+  if (Array.isArray(value)) return value.map(String).map(v => v.trim()).filter(Boolean);
+  return String(value || '')
+    .split(/[\n,]/)
+    .map(v => v.trim())
+    .filter(Boolean);
+}
+
+function ipToInt(ip) {
+  const parts = String(ip || '').trim().split('.');
+  if (parts.length !== 4) return null;
+  let out = 0;
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) return null;
+    const num = Number(part);
+    if (num < 0 || num > 255) return null;
+    out = ((out << 8) + num) >>> 0;
+  }
+  return out >>> 0;
+}
+
+function parseCidr(cidr) {
+  const match = String(cidr || '').trim().match(/^([^/]+)\/(\d{1,2})$/);
+  if (!match) return null;
+  const base = ipToInt(match[1]);
+  const prefix = Number(match[2]);
+  if (base === null || prefix < 0 || prefix > 32) return null;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return { base, prefix, mask, network: base & mask };
+}
+
+function ipInCidr(ip, cidr) {
+  const parsed = parseCidr(cidr);
+  const value = ipToInt(ip);
+  if (!parsed || value === null) return false;
+  return ((value & parsed.mask) >>> 0) === (parsed.network >>> 0);
+}
+
+function isValidMac(mac) {
+  return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(String(mac || '').trim());
+}
+
+function isValidSshKey(key) {
+  return /^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521))\s+\S+/.test(String(key || '').trim());
+}
+
+function yamlQuote(value) {
+  const text = String(value ?? '');
+  if (text === '') return "''";
+  if (/^[A-Za-z0-9_.@/-]+$/.test(text) && !['true', 'false', 'null'].includes(text.toLowerCase())) {
+    return text;
+  }
+  return `'${text.replace(/'/g, "''")}'`;
+}
+
+function toYaml(value, indent = 0) {
+  const pad = ' '.repeat(indent);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return `${pad}[]`;
+    return value.map(item => {
+      if (item && typeof item === 'object' && !Array.isArray(item)) {
+        const entries = Object.entries(item);
+        if (entries.length === 0) return `${pad}- {}`;
+        const [firstKey, firstValue] = entries[0];
+        const first = typeof firstValue === 'object' && firstValue !== null
+          ? `${pad}- ${firstKey}:\n${toYaml(firstValue, indent + 4)}`
+          : `${pad}- ${firstKey}: ${yamlScalar(firstValue)}`;
+        const rest = entries.slice(1).map(([key, child]) => (
+          child && typeof child === 'object'
+            ? `${pad}  ${key}:\n${toYaml(child, indent + 4)}`
+            : `${pad}  ${key}: ${yamlScalar(child)}`
+        ));
+        return [first, ...rest].join('\n');
+      }
+      return `${pad}- ${yamlScalar(item)}`;
+    }).join('\n');
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.entries(value).map(([key, child]) => (
+      child && typeof child === 'object'
+        ? `${pad}${key}:\n${toYaml(child, indent + 2)}`
+        : `${pad}${key}: ${yamlScalar(child)}`
+    )).join('\n');
+  }
+
+  return `${pad}${yamlScalar(value)}`;
+}
+
+function yamlScalar(value) {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'number') return String(value);
+  const text = String(value);
+  if (text.includes('\n')) {
+    return `|\n${text.split('\n').map(line => `  ${line}`).join('\n')}`;
+  }
+  return yamlQuote(text);
+}
+
+function parseMaybeYamlList(value) {
+  const text = String(value || '').trim();
+  if (!text) return [];
+  return text
+    .split('\n')
+    .map(line => line.replace(/^\s*-\s*/, '').trim())
+    .filter(Boolean)
+    .map(line => {
+      const [source, mirrors] = line.split(/\s*:\s*/, 2);
+      return mirrors ? { source, mirrors: splitList(mirrors) } : { source };
+    });
+}
+
+function normalizeAgentInstaller(input) {
+  const data = JSON.parse(JSON.stringify(input || {}));
+  data.topology = data.topology || 'ha';
+  data.cluster_name = data.cluster_name || 'ocp-dev';
+  data.base_domain = data.base_domain || 'dev.rhlab';
+  data.openshift_version = data.openshift_version || '4.16';
+  data.platform = data.platform || 'baremetal';
+  data.publish = data.publish || 'External';
+  data.network_type = data.network_type || 'OVNKubernetes';
+  data.machine_network_cidr = data.machine_network_cidr || '192.168.2.0/24';
+  data.cluster_network_cidr = data.cluster_network_cidr || '10.128.0.0/14';
+  data.cluster_network_host_prefix = normalizeNonNegativeInt(data.cluster_network_host_prefix, 24);
+  data.service_network_cidr = data.service_network_cidr || '172.30.0.0/16';
+  data.nodes = Array.isArray(data.nodes) ? data.nodes : [];
+  return data;
+}
+
+function validateAgentInstaller(input) {
+  const data = normalizeAgentInstaller(input);
+  const errors = [];
+  const warnings = [];
+  const required = [
+    ['cluster_name', 'Cluster name is required.'],
+    ['base_domain', 'Base domain is required.'],
+    ['machine_network_cidr', 'Machine network CIDR is required.'],
+    ['cluster_network_cidr', 'Cluster network CIDR is required.'],
+    ['service_network_cidr', 'Service network CIDR is required.'],
+    ['api_vip', 'API VIP is required.'],
+    ['ingress_vip', 'Ingress VIP is required.'],
+    ['rendezvous_ip', 'Rendezvous IP is required.'],
+    ['pull_secret', 'Pull secret is required.'],
+    ['ssh_public_key', 'SSH public key is required.']
+  ];
+
+  for (const [key, message] of required) {
+    if (!String(data[key] || '').trim()) errors.push(message);
+  }
+
+  for (const [key, label] of [
+    ['machine_network_cidr', 'Machine network CIDR'],
+    ['cluster_network_cidr', 'Cluster network CIDR'],
+    ['service_network_cidr', 'Service network CIDR']
+  ]) {
+    if (!parseCidr(data[key])) errors.push(`${label} is not a valid CIDR.`);
+  }
+
+  if (data.api_vip && !ipInCidr(data.api_vip, data.machine_network_cidr)) {
+    errors.push('API VIP must be inside the machine network CIDR.');
+  }
+  if (data.ingress_vip && !ipInCidr(data.ingress_vip, data.machine_network_cidr)) {
+    errors.push('Ingress VIP must be inside the machine network CIDR.');
+  }
+  if (data.rendezvous_ip && !ipInCidr(data.rendezvous_ip, data.machine_network_cidr)) {
+    errors.push('Rendezvous IP must be inside the machine network CIDR.');
+  }
+
+  try {
+    JSON.parse(data.pull_secret || '{}');
+  } catch {
+    errors.push('Pull secret must be valid JSON.');
+  }
+
+  if (data.ssh_public_key && !isValidSshKey(data.ssh_public_key)) {
+    errors.push('SSH public key must start with ssh-rsa, ssh-ed25519, or ecdsa-sha2-nistp*.');
+  }
+
+  const masters = data.nodes.filter(node => node.role === 'master');
+  const workers = data.nodes.filter(node => node.role === 'worker');
+  if (data.topology === 'sno') {
+    if (masters.length !== 1) errors.push('SNO requires exactly one control plane node.');
+    if (workers.length > 0) errors.push('SNO cannot include worker nodes.');
+  } else if (masters.length < 3) {
+    errors.push('HA clusters require at least three control plane nodes.');
+  }
+
+  const hostnames = new Set();
+  const macs = new Set();
+  const ips = new Set([data.api_vip, data.ingress_vip, data.rendezvous_ip].filter(Boolean));
+
+  data.nodes.forEach((node, index) => {
+    const label = node.hostname || `node ${index + 1}`;
+    if (!node.hostname) errors.push(`Node ${index + 1} hostname is required.`);
+    if (node.hostname && hostnames.has(node.hostname)) errors.push(`Duplicate hostname: ${node.hostname}.`);
+    if (node.hostname) hostnames.add(node.hostname);
+
+    if (!['master', 'worker'].includes(node.role)) errors.push(`${label} role must be master or worker.`);
+    if (!node.macAddress) errors.push(`${label} MAC address is required.`);
+    if (node.macAddress && !isValidMac(node.macAddress)) errors.push(`${label} MAC address is invalid.`);
+    const normalizedMac = String(node.macAddress || '').toLowerCase();
+    if (normalizedMac && macs.has(normalizedMac)) errors.push(`Duplicate MAC address: ${node.macAddress}.`);
+    if (normalizedMac) macs.add(normalizedMac);
+
+    if (!node.interfaceName) errors.push(`${label} interface name is required.`);
+    if (data.require_root_device && !node.diskDevice) errors.push(`${label} root disk device is required.`);
+    if (!node.diskDevice) warnings.push(`${label} has no root device hint; installer will choose a disk.`);
+
+    if (node.networkMode === 'static') {
+      if (!node.ipAddress) errors.push(`${label} static IP is required.`);
+      if (node.ipAddress && !ipInCidr(node.ipAddress, data.machine_network_cidr)) {
+        errors.push(`${label} static IP must be inside the machine network CIDR.`);
+      }
+      if (node.ipAddress && ips.has(node.ipAddress)) errors.push(`Duplicate IP address: ${node.ipAddress}.`);
+      if (node.ipAddress) ips.add(node.ipAddress);
+      if (!node.gateway || ipToInt(node.gateway) === null) errors.push(`${label} gateway must be a valid IP address.`);
+      for (const dns of splitList(node.dnsServers)) {
+        if (ipToInt(dns) === null) errors.push(`${label} DNS server is invalid: ${dns}.`);
+      }
+    }
+  });
+
+  return { valid: errors.length === 0, errors, warnings, config: data };
+}
+
+function buildInstallConfig(config) {
+  const masters = config.nodes.filter(node => node.role === 'master').length;
+  const workers = config.nodes.filter(node => node.role === 'worker').length;
+  const doc = {
+    apiVersion: 'v1',
+    baseDomain: config.base_domain,
+    metadata: { name: config.cluster_name },
+    compute: [
+      {
+        name: 'worker',
+        replicas: config.topology === 'sno' ? 0 : workers,
+        architecture: 'amd64',
+        hyperthreading: 'Enabled',
+        platform: {}
+      }
+    ],
+    controlPlane: {
+      name: 'master',
+      replicas: masters,
+      architecture: 'amd64',
+      hyperthreading: 'Enabled',
+      platform: {}
+    },
+    networking: {
+      networkType: config.network_type,
+      clusterNetwork: [
+        {
+          cidr: config.cluster_network_cidr,
+          hostPrefix: Number(config.cluster_network_host_prefix || 24)
+        }
+      ],
+      machineNetwork: [{ cidr: config.machine_network_cidr }],
+      serviceNetwork: [config.service_network_cidr]
+    },
+    platform: {
+      baremetal: {
+        apiVIP: config.api_vip,
+        ingressVIPs: [config.ingress_vip]
+      }
+    },
+    publish: config.publish || 'External',
+    pullSecret: config.pull_secret,
+    sshKey: config.ssh_public_key
+  };
+
+  if (config.proxy_http || config.proxy_https || config.proxy_no_proxy) {
+    doc.proxy = {};
+    if (config.proxy_http) doc.proxy.httpProxy = config.proxy_http;
+    if (config.proxy_https) doc.proxy.httpsProxy = config.proxy_https;
+    if (config.proxy_no_proxy) doc.proxy.noProxy = config.proxy_no_proxy;
+  }
+  if (config.additional_trust_bundle) {
+    doc.additionalTrustBundlePolicy = 'Proxyonly';
+    doc.additionalTrustBundle = config.additional_trust_bundle;
+  }
+  const imageSources = parseMaybeYamlList(config.disconnected_registry);
+  if (imageSources.length > 0) doc.imageContentSources = imageSources;
+
+  return `---\n${toYaml(doc)}\n`;
+}
+
+function buildAgentConfig(config) {
+  const doc = {
+    apiVersion: 'v1alpha1',
+    kind: 'AgentConfig',
+    metadata: { name: config.cluster_name },
+    rendezvousIP: config.rendezvous_ip
+  };
+
+  if (config.boot_artifacts_base_url) doc.bootArtifactsBaseURL = config.boot_artifacts_base_url;
+  const ntp = splitList(config.ntp_sources);
+  if (ntp.length > 0) doc.additionalNTPSources = ntp;
+
+  doc.hosts = config.nodes.map(node => {
+    const host = {
+      hostname: node.hostname,
+      role: node.role,
+      interfaces: [
+        {
+          name: node.interfaceName,
+          macAddress: node.macAddress
+        }
+      ]
+    };
+
+    if (node.diskDevice) {
+      host.rootDeviceHints = { deviceName: node.diskDevice };
+    }
+
+    if (node.networkMode === 'static') {
+      host.networkConfig = {
+        interfaces: [
+          {
+            name: node.interfaceName,
+            type: 'ethernet',
+            state: 'up',
+            'mac-address': node.macAddress,
+            ipv4: {
+              enabled: true,
+              dhcp: false,
+              address: [
+                {
+                  ip: node.ipAddress,
+                  'prefix-length': Number(node.prefixLength || 24)
+                }
+              ]
+            }
+          }
+        ],
+        'dns-resolver': {
+          config: {
+            server: splitList(node.dnsServers)
+          }
+        },
+        routes: {
+          config: [
+            {
+              destination: '0.0.0.0/0',
+              'next-hop-address': node.gateway,
+              'next-hop-interface': node.interfaceName,
+              'table-id': 254
+            }
+          ]
+        }
+      };
+    }
+
+    const labels = splitList(node.labels);
+    if (labels.length > 0) host.labels = Object.fromEntries(labels.map(item => {
+      const [key, value = 'true'] = item.split('=');
+      return [key.trim(), value.trim()];
+    }));
+
+    const taints = splitList(node.taints);
+    if (taints.length > 0) host.taints = taints;
+
+    return host;
+  });
+
+  return `---\n${toYaml(doc)}\n`;
+}
+
+function generateAgentInstallerFiles(input) {
+  const validation = validateAgentInstaller(input);
+  if (!validation.valid) return validation;
+  const config = validation.config;
+  return {
+    valid: true,
+    errors: [],
+    warnings: validation.warnings,
+    installConfig: buildInstallConfig(config),
+    agentConfig: buildAgentConfig(config)
+  };
+}
+
+const crcTable = (() => {
+  const table = [];
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function createZip(files) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  for (const [name, content] of Object.entries(files)) {
+    const nameBuffer = Buffer.from(name);
+    const dataBuffer = Buffer.from(content);
+    const crc = crc32(dataBuffer);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(0, 10);
+    local.writeUInt16LE(0, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(dataBuffer.length, 18);
+    local.writeUInt32LE(dataBuffer.length, 22);
+    local.writeUInt16LE(nameBuffer.length, 26);
+    local.writeUInt16LE(0, 28);
+    localParts.push(local, nameBuffer, dataBuffer);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(0, 12);
+    central.writeUInt16LE(0, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(dataBuffer.length, 20);
+    central.writeUInt32LE(dataBuffer.length, 24);
+    central.writeUInt16LE(nameBuffer.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, nameBuffer);
+    offset += local.length + nameBuffer.length + dataBuffer.length;
+  }
+
+  const centralOffset = offset;
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(Object.keys(files).length, 8);
+  end.writeUInt16LE(Object.keys(files).length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(centralOffset, 16);
+  end.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, ...centralParts, end]);
 }
 
 function pruneSelectedPayload(data, selectedComponentApps) {
@@ -765,6 +1228,7 @@ function ensureStarterFiles(repoDir, envName) {
     generate_env_vars_encrypt_vault_files: true
     bootstrap_generate_env_vars_encrypt_vault_files: true
     bootstrap_generate_env_vars_vault_password_file: "{{ vault_password_file | default('.vault_pass') }}"
+    bootstrap_generate_env_vars_hub_ado_collection_path: "/workspace/collections/ansible_collections/infra/ado"
 
     generate_playbooks: true
     generate_aap_configs: true
@@ -1279,6 +1743,37 @@ app.get('/api/collection-versions', (req, res) => {
   }
 });
 
+app.post('/api/openshift-agent/validate', (req, res) => {
+  const validation = validateAgentInstaller(req.body);
+  res.json({
+    valid: validation.valid,
+    errors: validation.errors,
+    warnings: validation.warnings
+  });
+});
+
+app.post('/api/openshift-agent/generate', (req, res) => {
+  const result = generateAgentInstallerFiles(req.body);
+  res.status(result.valid ? 200 : 400).json(result);
+});
+
+app.post('/api/openshift-agent/download', (req, res) => {
+  const result = generateAgentInstallerFiles(req.body);
+  if (!result.valid) {
+    res.status(400).json(result);
+    return;
+  }
+
+  const zip = createZip({
+    'install-config.yaml': result.installConfig,
+    'agent-config.yaml': result.agentConfig
+  });
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', 'attachment; filename="openshift-agent-configs.zip"');
+  res.send(zip);
+});
+
 app.post('/api/bootstrap', async (req, res) => {
   latestLog = '';
   latestEvents = '';
@@ -1365,10 +1860,18 @@ ls -l ${collectionDir} || true
 
 echo ""
 echo "=== Installing ADO Collection ==="
-if ls ${collectionDir}/infra-ado-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install ${collectionDir}/infra-ado-*.tar.gz -p /workspace/collections --force
+ado_archive="$(find ${collectionDir} -maxdepth 1 -name 'infra-ado-*.tar.gz' | sort -V | tail -n 1)"
+if [ -n "$ado_archive" ]; then
+  echo "Installing $ado_archive"
+  ansible-galaxy collection install "$ado_archive" -p /workspace/collections --force --no-deps
 else
-  ansible-galaxy collection install ${collectionDir}/ado-*.tar.gz -p /workspace/collections --force
+  legacy_archive="$(find ${collectionDir} -maxdepth 1 -name 'ado-*.tar.gz' | sort -V | tail -n 1)"
+  if [ -z "$legacy_archive" ]; then
+    echo "ERROR! No infra-ado or legacy ado collection tarball found in ${collectionDir}."
+    exit 1
+  fi
+  echo "Installing $legacy_archive"
+  ansible-galaxy collection install "$legacy_archive" -p /workspace/collections --force --no-deps
 fi
 
 echo ""
