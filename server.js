@@ -1895,6 +1895,14 @@ echo "=== Installing infra.aap_configuration Collection ==="
 ansible-galaxy collection install ${collectionDir}/infra-aap_configuration-*.tar.gz -p /workspace/collections --force --no-deps
 
 echo ""
+echo "=== Installing ansible.hub Collection ==="
+if ls ${collectionDir}/ansible-hub-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install ${collectionDir}/ansible-hub-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  echo "ansible-hub tarball not found; AAP Hub collection publishing may be unavailable"
+fi
+
+echo ""
 echo "=== Installing community.general Collection ==="
 ansible-galaxy collection install ${collectionDir}/community-general-*.tar.gz -p /workspace/collections --force --no-deps
 

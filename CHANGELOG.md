@@ -4,6 +4,7 @@
 
 - Added an AAP Hub force-update option for the `infra.ado` collection and pass it through the preflight payload.
 - The runtime now installs the highest-version bundled `infra-ado-*.tar.gz` with `--no-deps`, preventing stale `1.0.0` installs from hiding newly added roles.
+- The runtime now installs the bundled `ansible.hub` collection when present so AAP Hub publishing can run `ansible.hub.ah_build`.
 
 
 All notable changes to the ADO Preflight UI are documented in this file.
