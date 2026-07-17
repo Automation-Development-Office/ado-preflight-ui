@@ -43,11 +43,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -56,7 +51,7 @@ jobs:
         with:
           context: .
           file: Containerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: |
             ${{ env.GHCR_IMAGE }}:${{ github.event.release.tag_name }}
             ${{ env.GHCR_IMAGE }}:latest
@@ -73,27 +68,15 @@ jobs:
           tags: ${{ env.GHCR_IMAGE }}:${{ github.event.release.tag_name }}
           outputs: type=docker,dest=${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-amd64.tar
 
-      - name: Export arm64 image archive
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Containerfile
-          platforms: linux/arm64
-          tags: ${{ env.GHCR_IMAGE }}:${{ github.event.release.tag_name }}
-          outputs: type=docker,dest=${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-arm64.tar
-
       - name: Compress image archives
         run: |
           gzip -f "${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-amd64.tar"
-          gzip -f "${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-arm64.tar"
 
       - name: Upload container artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}
-          path: |
-            ${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-amd64.tar.gz
-            ${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-arm64.tar.gz
+          path: ${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-amd64.tar.gz
           retention-days: 90
           if-no-files-found: error
 
@@ -103,5 +86,4 @@ jobs:
         run: |
           gh release upload "${{ github.event.release.tag_name }}" \
             "${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-amd64.tar.gz" \
-            "${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-arm64.tar.gz" \
             --clobber
