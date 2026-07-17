@@ -9,19 +9,8 @@ FROM registry.access.redhat.com/ubi9/nodejs-20
 
 USER 0
 
-RUN set -eux; \
-    dnf install -y git python3 curl ca-certificates; \
-    dnf install -y python3-pip || true; \
-    if ! python3 -m pip --version >/dev/null 2>&1; then \
-      python3 -m ensurepip --upgrade || true; \
-    fi; \
-    if ! python3 -m pip --version >/dev/null 2>&1; then \
-      curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py; \
-      python3 /tmp/get-pip.py; \
-      rm -f /tmp/get-pip.py; \
-    fi; \
-    PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel; \
-    PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir ansible-core; \
+RUN dnf install -y git python3 python3-pip && \
+    pip3 install ansible-core && \
     dnf clean all
 
 WORKDIR /opt/app-root/src
