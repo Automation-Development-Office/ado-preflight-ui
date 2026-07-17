@@ -61,6 +61,8 @@ jobs:
             ${{ env.GHCR_IMAGE }}:${{ github.event.release.tag_name }}
             ${{ env.GHCR_IMAGE }}:latest
           push: true
+          pull: true
+          no-cache: true
 
       - name: Export amd64 image archive
         uses: docker/build-push-action@v6
