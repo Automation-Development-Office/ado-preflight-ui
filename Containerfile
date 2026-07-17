@@ -10,7 +10,7 @@ FROM registry.access.redhat.com/ubi9/nodejs-20
 USER 0
 
 RUN set -eux; \
-    dnf install -y git python3 curl; \
+    dnf install -y git python3 curl ca-certificates; \
     dnf install -y python3-pip || true; \
     if ! python3 -m pip --version >/dev/null 2>&1; then \
       python3 -m ensurepip --upgrade || true; \
@@ -20,8 +20,8 @@ RUN set -eux; \
       python3 /tmp/get-pip.py; \
       rm -f /tmp/get-pip.py; \
     fi; \
-    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel; \
-    python3 -m pip install --no-cache-dir ansible-core; \
+    PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel; \
+    PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir ansible-core; \
     dnf clean all
 
 WORKDIR /opt/app-root/src
