@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Satellite manifest ZIP upload to the Satellite configuration form and increased the bootstrap API payload limit so uploaded manifests can be written into the generated repo `files/` directory.
 - Added a dedicated Credentials card above Git Configuration with Vault, Machine, and Additional tabs, and moved vault credential fields out of the AAP Configuration card.
 - Clarified AAP Hub collection update wording and moved Hub update state into the ADO Bootstrap Recap AAP Hub section, removing the redundant installed collection line.
 - Added pre-run validation for AAP Hub publishing so collection-only runs stop immediately when AAP OAuth token or admin password auth is missing.
