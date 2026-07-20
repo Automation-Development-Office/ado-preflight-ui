@@ -37,7 +37,7 @@ const rhbkOptionApps = {
   federation: 'rhbk_federation'
 };
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '100mb' }));
 app.use(express.static(uiDir));
 
 let latestLog = '';

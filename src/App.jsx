@@ -244,6 +244,10 @@ const defaults = {
         { mount_point: '/var/lib/pulp', lv_name: 'lv_rhspulp', lv_size: '300g' },
         { mount_point: '/var/lib/pgsql', lv_name: 'lv_pgsql', lv_size: '20g' }
       ],
+      manifest_file: '',
+      manifest_content_base64: '',
+      manifest_encoding: 'base64',
+      manifest_organization: '',
       service_account_username: '',
       service_account_password: '',
       admin_password: '',
@@ -913,6 +917,10 @@ function App() {
       if (!config.location) config.location = '';
       if (!config.rhn_org_id) config.rhn_org_id = '';
       if (!config.admin_rhn_activation_key) config.admin_rhn_activation_key = '';
+      if (config.manifest_file === undefined) config.manifest_file = '';
+      if (config.manifest_content_base64 === undefined) config.manifest_content_base64 = '';
+      if (config.manifest_encoding === undefined) config.manifest_encoding = 'base64';
+      if (config.manifest_organization === undefined) config.manifest_organization = '';
       if (!config.size_profile) config.size_profile = 'default';
       if (!Array.isArray(config.size) || config.size.length === 0) {
         config.size = JSON.parse(JSON.stringify(defaults.component_config.satellite.size));
@@ -2418,6 +2426,7 @@ echo $TOKEN
     location: 'Logical location where the Satellite server is installed. Example: AWS, datacenter1, or lab.',
     rhnOrgId: 'Red Hat account organization ID from Hybrid Cloud Console. Example: 12345678.',
     rhnActivationKey: 'RHN activation key from Hybrid Cloud Console for registering the Satellite host. Stored in generated vault files.',
+    manifestFile: 'Upload the Red Hat Satellite manifest ZIP from Hybrid Cloud Console. Bootstrap writes it to the generated repo files/ directory and passes that path to the Satellite install role.',
     sizeProfile: 'Sizing profile used for Satellite tuning and pre-check CPU/RAM values.',
     reqDirs: 'Logical volumes to create for Satellite data. Each row needs mount_point, lv_name, and lv_size.',
     serviceAccountUsername: 'Satellite service account username for API and inventory operations. Example: svc_aap_satellite.',
@@ -2465,6 +2474,48 @@ echo $TOKEN
     });
   };
 
+  const setSatelliteManifest = file => {
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const content = result.includes(',') ? result.split(',').pop() : result;
+
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config) copy.component_config = {};
+        if (!copy.component_config.satellite) {
+          copy.component_config.satellite = defaultComponentConfig('satellite');
+        }
+        copy.component_config.satellite.manifest_file = file.name;
+        copy.component_config.satellite.manifest_content_base64 = content;
+        copy.component_config.satellite.manifest_encoding = 'base64';
+        copy.component_config.satellite.manifest_organization =
+          copy.component_config.satellite.manifest_organization ||
+          copy.component_config.satellite.organization ||
+          '';
+        return copy;
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const clearSatelliteManifest = () => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.component_config) copy.component_config = {};
+      if (!copy.component_config.satellite) {
+        copy.component_config.satellite = defaultComponentConfig('satellite');
+      }
+      copy.component_config.satellite.manifest_file = '';
+      copy.component_config.satellite.manifest_content_base64 = '';
+      copy.component_config.satellite.manifest_encoding = 'base64';
+      copy.component_config.satellite.manifest_organization = '';
+      return copy;
+    });
+  };
+
   const renderSatelliteConfig = () => (
     <>
       {renderComponentOptions('satellite', 'Satellite Options', 'Select which Satellite resources to configure.')}
@@ -2492,6 +2543,28 @@ echo $TOKEN
         {renderTextField('Satellite Install Location', 'component_config.satellite.location', 'text', satelliteHelp.location)}
         {renderTextField('RHN Organization ID', 'component_config.satellite.rhn_org_id', 'text', satelliteHelp.rhnOrgId)}
         {renderTextField('RHN Activation Key', 'component_config.satellite.admin_rhn_activation_key', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.rhnActivationKey)}
+        <GridItem span={12}>
+          <FormGroup label={labelWithHelp('Satellite Manifest File', satelliteHelp.manifestFile)}>
+            <input
+              id="satellite-manifest-file"
+              type="file"
+              accept=".zip,application/zip"
+              onChange={event => {
+                setSatelliteManifest(event.target.files?.[0]);
+                event.target.value = '';
+              }}
+              style={{ display: 'block', marginBottom: '8px' }}
+            />
+            <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
+              {data.component_config.satellite.manifest_file
+                ? `Selected: ${data.component_config.satellite.manifest_file}. Generated repo path: files/${data.component_config.satellite.manifest_file}.`
+                : 'Upload a Red Hat Satellite manifest ZIP. It will be written to the generated repo files/ directory.'}
+            </div>
+            {data.component_config.satellite.manifest_file && (
+              <Button variant="link" onClick={clearSatelliteManifest}>Clear Manifest</Button>
+            )}
+          </FormGroup>
+        </GridItem>
         <GridItem span={6}>
           <FormGroup label={labelWithHelp('Satellite Size Profile', satelliteHelp.sizeProfile)}>
             <select
