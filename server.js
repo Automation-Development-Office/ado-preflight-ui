@@ -506,13 +506,27 @@ function hydrateSelectedComponentConfigs(data) {
 function normalizePreflightPayload(input) {
   const data = JSON.parse(JSON.stringify(input || {}));
 
-  if (!Array.isArray(data.components) || data.components.length === 0) {
+  if (!data.aap) data.aap = {};
+  if (data.aap.hub_update_collection_only === undefined) data.aap.hub_update_collection_only = false;
+  const hubUpdateCollectionOnly = data.aap.hub_update_collection_only === true;
+
+  if (hubUpdateCollectionOnly) {
+    data.components = [];
+    delete data.component;
+    data.platform = [];
+    data.component_apps = { openshift: [], rhel: [], patching: [], provision: [] };
+    data.component_config = {};
+    data.component_options = {};
+    data.aap.hub_publish_ado_collection = true;
+    data.aap.hub_mark_ado_validated = true;
+    data.aap.hub_force_ado_collection_update = true;
+  } else if (!Array.isArray(data.components) || data.components.length === 0) {
     if (Array.isArray(data.platform) && data.platform.length > 0) {
       data.components = data.platform.includes('all') ? ['all'] : data.platform;
     } else if (data.component) {
       data.components = [data.component];
     } else {
-      data.components = ['all'];
+      data.components = [];
     }
   }
 
@@ -522,9 +536,12 @@ function normalizePreflightPayload(input) {
   if (data.components.includes('all')) {
     delete data.component;
     data.platform = ['all'];
-  } else {
+  } else if (data.components.length > 0) {
     data.component = data.components[0];
     data.platform = data.components;
+  } else {
+    delete data.component;
+    data.platform = [];
   }
   pruneInactiveComponentApps(data);
 
@@ -535,7 +552,6 @@ function normalizePreflightPayload(input) {
   if (!data.vault) data.vault = {};
   if (data.vault.encrypt === undefined) data.vault.encrypt = true;
 
-  if (!data.aap) data.aap = {};
   if (data.aap.enabled === undefined) data.aap.enabled = true;
   if (data.aap.skip_tls_verify === undefined) data.aap.skip_tls_verify = false;
   if (!data.aap.organization) data.aap.organization = 'ADO';
@@ -544,7 +560,7 @@ function normalizePreflightPayload(input) {
   data.aap.vault_credential_name = normalizeOrgScopedName(data.aap.vault_credential_name, data.aap.organization, 'vault');
   if (data.aap.hub_publish_ado_collection === undefined) data.aap.hub_publish_ado_collection = true;
   if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = true;
-  if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = true;
+  if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = false;
   data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
   if (!Array.isArray(data.aap.additional_credentials)) data.aap.additional_credentials = [];
   data.aap.additional_credentials = data.aap.additional_credentials.map(({ id, ...credential }) => credential);
@@ -1228,11 +1244,13 @@ function ensureStarterFiles(repoDir, envName) {
     generate_env_vars_encrypt_vault_files: true
     bootstrap_generate_env_vars_encrypt_vault_files: true
     bootstrap_generate_env_vars_vault_password_file: "{{ vault_password_file | default('.vault_pass') }}"
-    bootstrap_generate_env_vars_hub_ado_collection_path: "/workspace/collections/ansible_collections/infra/ado"
+    bootstrap_hub_update_collection_only: "{{ bootstrap_hub_update_collection_only | default(false) | bool }}"
+    bootstrap_generate_env_vars_hub_ado_collection_path: "/workspace/ado-source"
 
-    generate_playbooks: true
-    generate_aap_configs: true
+    generate_playbooks: "{{ not (bootstrap_hub_update_collection_only | default(false) | bool) }}"
+    generate_aap_configs: "{{ not (bootstrap_hub_update_collection_only | default(false) | bool) }}"
     apply_aap_configs: true
+    bootstrap_apply_aap_configs: "{{ not (bootstrap_hub_update_collection_only | default(false) | bool) }}"
 
     bootstrap_generate_playbook_repo_git_mode: push
     bootstrap_generate_playbook_repo_git_url: "{{ generate_playbook_repo_git_url }}"
@@ -1556,7 +1574,7 @@ function readFirstConfigName(files, fallback = 'not configured') {
   return names[0] || fallback;
 }
 
-function buildBootstrapRecap(data, repoDir, selectedComponentApps, collectionInstalled) {
+function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
   const controllerDir = path.join(repoDir, 'configs', 'controller');
   const jobTemplatesDir = path.join(repoDir, 'configs', 'job_templates');
   const workflowsDir = path.join(repoDir, 'configs', 'workflows');
@@ -1569,7 +1587,11 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, collectionIns
     '=== ADO Bootstrap Recap ===',
     `AAP Server: ${data?.aap?.hostname || 'not configured'}`,
     `Organization: ${data?.aap?.organization || 'not configured'}`,
-    `Project Name: ${projectName}`
+    `Project Name: ${projectName}`,
+    `AAP Hub collection update: ${data?.aap?.hub_publish_ado_collection ? 'yes' : 'no'}`,
+    `AAP Hub force update: ${data?.aap?.hub_force_ado_collection_update ? 'yes' : 'no'}`,
+    `AAP Hub update only: ${data?.aap?.hub_update_collection_only ? 'yes' : 'no'}`,
+    `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`
   ];
 
   appendListRecap(lines, 'Components', selectedComponentApps);
@@ -1610,7 +1632,6 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, collectionIns
     ),
     expectedObjects.hosts
   ));
-  lines.push(`Installed infra.ado collection: ${collectionInstalled ? 'yes' : 'no'}`);
   lines.push('');
 
   return lines.join('\n');
@@ -1800,10 +1821,30 @@ app.post('/api/bootstrap', async (req, res) => {
 
   const gitToken = data?.git?.token || '';
 
-  const selectedComponents =
-    Array.isArray(data.components) && data.components.length > 0
-      ? data.components.join(',')
-      : (data.component || 'all');
+  const hubUpdateCollectionOnly = data?.aap?.hub_update_collection_only === true;
+  const hubPublishRequested = data?.aap?.hub_publish_ado_collection === true || hubUpdateCollectionOnly;
+  const hasAapOAuthToken = Boolean(String(data?.aap?.oauth_token || '').trim());
+  const hasAapPasswordAuth = Boolean(
+    String(data?.aap?.admin_username || '').trim()
+    && String(data?.aap?.admin_password || '').trim()
+  );
+
+  if (hubPublishRequested && !hasAapOAuthToken && !hasAapPasswordAuth) {
+    event('Bootstrap failed: AAP Hub publishing needs AAP OAuth token or admin username/password');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'AAP Hub publishing requires an AAP OAuth Token or Admin Username and Admin Password.'
+    });
+  }
+
+  const selectedComponents = hubUpdateCollectionOnly
+    ? 'hub_collection_update'
+    : (
+      Array.isArray(data.components) && data.components.length > 0
+        ? data.components.join(',')
+        : (data.component || '')
+    );
 
   const selectedComponentApps = selectedComponentAppsFrom(data);
   data.selected_component_apps = selectedComponentApps;
@@ -1864,6 +1905,63 @@ ado_archive="$(find ${collectionDir} -maxdepth 1 -name 'infra-ado-*.tar.gz' | so
 if [ -n "$ado_archive" ]; then
   echo "Installing $ado_archive"
   ansible-galaxy collection install "$ado_archive" -p /workspace/collections --force --no-deps
+
+  echo ""
+  echo "=== Staging ADO collection source for Hub publishing ==="
+  rm -rf /workspace/ado-source
+  mkdir -p /workspace/ado-source
+  tar -xzf "$ado_archive" -C /workspace/ado-source
+  python3 - <<'PYCODE'
+import json
+from pathlib import Path
+
+source = Path('/workspace/ado-source')
+manifest = json.loads((source / 'MANIFEST.json').read_text())
+info = manifest.get('collection_info', {})
+
+def q(value):
+    return '"' + str(value).replace('"', '\\"') + '"'
+
+lines = [
+    '---',
+    f"namespace: {q(info.get('namespace', 'infra'))}",
+    f"name: {q(info.get('name', 'ado'))}",
+    f"version: {info.get('version', '1.0.0')}",
+    f"readme: {info.get('readme', 'README.md')}",
+    'authors:',
+]
+for author in info.get('authors') or ['Automation Development Office']:
+    lines.append(f"  - {q(author)}")
+lines.extend([
+    'description: >-',
+    f"  {info.get('description', 'Automation Development Office collection.')}",
+])
+if info.get('license_file'):
+    lines.append(f"license_file: {info['license_file']}")
+elif info.get('license'):
+    lines.append('license:')
+    for license_name in info['license']:
+        lines.append(f"  - {q(license_name)}")
+if info.get('tags'):
+    lines.append('tags:')
+    for tag in info['tags']:
+        lines.append(f"  - {tag}")
+lines.append('dependencies:')
+deps = info.get('dependencies') or {}
+if deps:
+    for name, version in deps.items():
+        lines.append(f"  {q(name)}: {q(version)}")
+else:
+    lines.append('  {}')
+for key in ('repository', 'documentation', 'homepage', 'issues'):
+    if info.get(key):
+        lines.append(f"{key}: {info[key]}")
+(source / 'galaxy.yml').write_text('\\n'.join(lines) + '\\n')
+for generated_file in ('MANIFEST.json', 'FILES.json'):
+    path = source / generated_file
+    if path.exists():
+        path.unlink()
+PYCODE
 else
   legacy_archive="$(find ${collectionDir} -maxdepth 1 -name 'ado-*.tar.gz' | sort -V | tail -n 1)"
   if [ -z "$legacy_archive" ]; then
@@ -1980,7 +2078,7 @@ ansible-galaxy collection list
   event('Writing ado-extra-vars.json for debug only; not passed to Ansible');
   fs.writeFileSync(extraVarsPath, JSON.stringify({
     component: selectedComponents,
-    components: data.components || ['all'],
+    components: data.components || [],
     component_apps: data.component_apps || {},
     selected_component_apps: selectedComponentApps,
     generate_env_vars_component: selectedComponents,
@@ -1998,7 +2096,8 @@ ansible-galaxy collection list
     ansible_tls_verify: skipTlsVerify ? 'false' : 'true',
     ansible_verbosity: ansibleVerbosity,
     ansible_verbosity_flag: ansibleVerbosityFlag,
-    encrypt_vault_files: encryptVaultFiles
+    encrypt_vault_files: encryptVaultFiles,
+    bootstrap_hub_update_collection_only: hubUpdateCollectionOnly
   }, null, 2));
 
   event('Writing vault password file');
@@ -2052,9 +2151,11 @@ ansible-playbook \\
   -e verify_ssl=false \\
   -e skip_tls_verify=${skipTlsVerify ? 'true' : 'false'} \\
   -e ansible_tls_verify=${skipTlsVerify ? 'false' : 'true'} \\
-  -e generate_playbooks=true \\
-  -e generate_aap_configs=true \\
+  -e bootstrap_hub_update_collection_only=${hubUpdateCollectionOnly ? 'true' : 'false'} \\
+  -e generate_playbooks=${hubUpdateCollectionOnly ? 'false' : 'true'} \\
+  -e generate_aap_configs=${hubUpdateCollectionOnly ? 'false' : 'true'} \\
   -e apply_aap_configs=true \\
+  -e bootstrap_apply_aap_configs=true \\
   -e bootstrap_controller_apply_aap_configs=true \\
   -e generate_playbook_repo_pause_for_push=false \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
@@ -2074,8 +2175,7 @@ ansible-playbook \\
   const bootstrapRecap = buildBootstrapRecap(
     data,
     repoDir,
-    selectedComponentApps,
-    collectionInstallCode === 0
+    selectedComponentApps
   );
   event(`Bootstrap finished exitCode=${code}`);
 

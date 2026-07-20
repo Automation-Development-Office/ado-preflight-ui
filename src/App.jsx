@@ -188,7 +188,7 @@ const defaults = {
     token: ''
   },
 
-  components: ['rhel'],
+  components: [],
 
   component_apps: {
     openshift: [],
@@ -371,7 +371,8 @@ const defaults = {
     skip_tls_verify: false,
     hub_publish_ado_collection: true,
     hub_mark_ado_validated: true,
-    hub_force_ado_collection_update: true,
+    hub_force_ado_collection_update: false,
+    hub_update_collection_only: false,
     additional_credentials: [],
     machine_credential: {
       name: 'ADO-machine',
@@ -501,6 +502,7 @@ function App() {
   const [showIdmSecrets, setShowIdmSecrets] = useState(false);
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
+  const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
   const [importStatus, setImportStatus] = useState('');
@@ -753,7 +755,7 @@ function App() {
       if (!copy.aap) copy.aap = {};
       copy.aap.hub_publish_ado_collection = value;
       copy.aap.hub_mark_ado_validated = value;
-      if (value && copy.aap.hub_force_ado_collection_update === undefined) copy.aap.hub_force_ado_collection_update = true;
+      if (!value) copy.aap.hub_update_collection_only = false;
       return copy;
     });
   };
@@ -985,12 +987,16 @@ function App() {
 
     let merged = deepMerge(defaults, normalizedInput);
 
-    if (!Array.isArray(merged.components) || merged.components.length === 0) {
-      merged.components = ['rhel'];
+    if (!Array.isArray(merged.components)) {
+      merged.components = [];
     }
 
     merged.components = [...new Set(merged.components.filter(Boolean))];
-    merged.component = merged.components.includes('all') ? 'all' : merged.components[0];
+    if (merged.components.length === 0) {
+      delete merged.component;
+    } else {
+      merged.component = merged.components.includes('all') ? 'all' : merged.components[0];
+    }
 
     if (!merged.component_apps) merged.component_apps = {};
     groupComponents.forEach(group => {
@@ -1013,7 +1019,8 @@ function App() {
       id: credential.id || `imported-credential-${index + 1}`
     }));
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
-    if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = true;
+    if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
+    if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
 
     if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
     if (!merged.git) merged.git = { ...defaults.git };
@@ -1101,7 +1108,19 @@ function App() {
       if (!payload.aap.machine_credential) payload.aap.machine_credential = {};
       payload.aap.machine_credential.name = normalizeOrgScopedName(payload.aap.machine_credential.name, org, 'machine');
       payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
-      if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = true;
+      if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = false;
+      if (payload.aap.hub_update_collection_only === undefined) payload.aap.hub_update_collection_only = false;
+      if (payload.aap.hub_update_collection_only === true) {
+        payload.aap.hub_publish_ado_collection = true;
+        payload.aap.hub_mark_ado_validated = true;
+        payload.aap.hub_force_ado_collection_update = true;
+        payload.components = [];
+        delete payload.component;
+        payload.platform = [];
+        payload.selected_component_apps = [];
+        payload.component_config = {};
+        payload.component_options = {};
+      }
       payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
         const { id, ...credentialPayload } = credential;
         return credentialPayload;
@@ -2164,6 +2183,53 @@ echo $TOKEN
     );
   };
 
+  const renderVaultCredentialConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={6}>
+        <FormGroup label="Vault Credential Name" isRequired>
+          <TextInput
+            value={data.aap.vault_credential_name}
+            onChange={(_, v) => set('aap.vault_credential_name', v)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup label="Vault Password" isRequired>
+          <TextInput
+            type="password"
+            value={data.aap.vault_password}
+            onChange={(_, v) => set('aap.vault_password', v)}
+          />
+        </FormGroup>
+      </GridItem>
+    </Grid>
+  );
+
+  const renderCredentialConfigCard = () => (
+    <Card style={cardStyle}>
+      <CardBody>
+        <Title headingLevel="h2">Credentials</Title>
+        <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '4px' }}>
+          Configure AAP credentials created during bootstrap.
+        </div>
+
+        <br />
+
+        <Tabs activeKey={activeCredentialConfigTab} onSelect={(_, key) => setActiveCredentialConfigTab(key)}>
+          <Tab eventKey="vault" title="Vault" />
+          <Tab eventKey="machine" title="Machine" />
+          <Tab eventKey="additional" title="Additional" />
+        </Tabs>
+
+        <div style={{ marginTop: '16px' }}>
+          {activeCredentialConfigTab === 'vault' && renderVaultCredentialConfig()}
+          {activeCredentialConfigTab === 'machine' && renderMachineCredentialConfig()}
+          {activeCredentialConfigTab === 'additional' && renderAdditionalAapCredentials()}
+        </div>
+      </CardBody>
+    </Card>
+  );
+
   const addAapCredential = () => {
     const id = newCredentialId();
     setData(prev => {
@@ -2544,7 +2610,6 @@ echo $TOKEN
         </GridItem>
       </Grid>
 
-      {renderMachineCredentialConfig()}
     </>
   );
 
@@ -2825,7 +2890,6 @@ echo $TOKEN
         'Select which patching-related components to include.'
       )}
 
-      {renderMachineCredentialConfig()}
     </>
   );
 
@@ -2983,7 +3047,6 @@ echo $TOKEN
         </GridItem>
       </Grid>
 
-      {renderMachineCredentialConfig()}
     </>
   );
 
@@ -4570,6 +4633,10 @@ ${vaultYaml}
 
           {renderActiveConfigPanel()}
 
+          {renderCredentialConfigCard()}
+
+          <br />
+
           <Card style={cardStyle}>
             <CardBody>
               <Title headingLevel="h2">Git Configuration</Title>
@@ -4651,7 +4718,6 @@ ${vaultYaml}
                     <GridItem span={6}><FormGroup label="Inventory Name"><TextInput value={data.aap.inventory} onChange={(_, v) => set('aap.inventory', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="Project Name"><TextInput value={data.aap.project} onChange={(_, v) => set('aap.project', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="Execution Environment"><TextInput value={data.aap.execution_environment} onChange={(_, v) => set('aap.execution_environment', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Vault Credential Name"><TextInput value={data.aap.vault_credential_name} onChange={(_, v) => set('aap.vault_credential_name', v)} /></FormGroup></GridItem>
                     <GridItem span={6}>
                       <FormGroup label="OAuth Token">
                         <div style={{ display: 'flex', gap: '8px' }}>
@@ -4663,7 +4729,6 @@ ${vaultYaml}
 
                     <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
                     <GridItem span={6}><FormGroup label="Admin Password"><TextInput type="password" value={data.aap.admin_password} onChange={(_, v) => set('aap.admin_password', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Vault Password"><TextInput type="password" value={data.aap.vault_password} onChange={(_, v) => set('aap.vault_password', v)} /></FormGroup></GridItem>
                     <GridItem span={6}>
                       <FormGroup label="TLS Certificate Verification">
                         <Checkbox
@@ -4676,21 +4741,25 @@ ${vaultYaml}
                     <GridItem span={6}>
                       <FormGroup label="AAP Hub">
                         <Checkbox
-                          label="Add infra.ado collection to validated content in AAP Hub"
+                          label="Update infra.ado collection in validated AAP Hub content"
                           isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
                           onChange={(_, v) => setAapHubValidated(v)}
                         />
                         <Checkbox
-                          label="Force update infra.ado collection in AAP Hub"
+                          label="Force update infra.ado collection in validated content"
                           isChecked={data.aap.hub_force_ado_collection_update}
                           isDisabled={!data.aap.hub_publish_ado_collection}
                           onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
                         />
+                        <Checkbox
+                          label="Update collection only"
+                          isChecked={data.aap.hub_update_collection_only}
+                          isDisabled={!data.aap.hub_publish_ado_collection}
+                          onChange={(_, v) => set('aap.hub_update_collection_only', v)}
+                        />
                       </FormGroup>
                     </GridItem>
                   </Grid>
-
-                  {renderAdditionalAapCredentials()}
                 </>
               )}
             </CardBody>

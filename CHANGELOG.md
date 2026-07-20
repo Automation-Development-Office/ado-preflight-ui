@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added a dedicated Credentials card above Git Configuration with Vault, Machine, and Additional tabs, and moved vault credential fields out of the AAP Configuration card.
+- Clarified AAP Hub collection update wording and moved Hub update state into the ADO Bootstrap Recap AAP Hub section, removing the redundant installed collection line.
+- Added pre-run validation for AAP Hub publishing so collection-only runs stop immediately when AAP OAuth token or admin password auth is missing.
+- Fixed AAP Hub update-only runs so they still invoke the AAP apply path and publish the bundled infra.ado collection, and show Hub publish/force/update-only states in the recap.
+- Added an unchecked AAP Hub "Update collection only" mode so infra.ado can be published without generating component bootstrap content.
+- Bootstrap components are no longer preselected by default; operators must choose the components they want or use collection-only mode.
+- AAP Hub publishing now stages a source tree with `galaxy.yml` from the bundled infra.ado collection artifact before calling the Hub publish role.
 - Added an AAP Hub force-update option for the `infra.ado` collection and pass it through the preflight payload.
 - The runtime now installs the highest-version bundled `infra-ado-*.tar.gz` with `--no-deps`, preventing stale `1.0.0` installs from hiding newly added roles.
 - The runtime now installs the bundled `ansible.hub` collection when present so AAP Hub publishing can run `ansible.hub.ah_build`.
