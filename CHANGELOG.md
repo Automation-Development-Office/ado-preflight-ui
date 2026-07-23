@@ -2,8 +2,8 @@
 
 ## Unreleased
 
+- Bootstrap no longer applies Controller execution environments via `infra.aap_configuration` (stops PATCH of stock `ee-supported-rhel9`). Custom Hub EE images are created only when Hub EE push is explicitly enabled.
 - AAP connectivity no longer launches Demo Job Template by default; when smoke test is enabled it skips cleanly if that template does not exist.
-- Bootstrap no longer creates/updates stock `ee-supported-*` Controller execution environments (already present in AAP/Hub). Hub EE push stays opt-in and refuses stock `ee-supported-*` images — only custom local images (for example `ado-ee`) are pushed when explicitly enabled.
 - Added Git Configuration TLS/SSL skip control (default disabled verification) for UI and CLI; sets local `git config http.sslVerify false` when skip is enabled.
 - When SCM tool is Bitbucket, git clone/push uses `http.extraHeader='Authorization: Bearer <token>'` instead of GitLab-style `oauth2:<token>` basic auth.
 - Hub EE push always uses a local podman image only (never pulls from the internet); the image must already exist locally before enabling push.
