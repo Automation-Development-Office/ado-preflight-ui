@@ -448,6 +448,10 @@ const defaults = {
     execution_environment: 'ee-supported-rhel9',
     vault_credential_name: 'ADO-vault',
     skip_tls_verify: false,
+    project_sync_timeout: 45,
+    project_sync_retries: 20,
+    project_sync_delay: 5,
+    project_playbook_wait_seconds: 45,
     // Hub publishing removed from UI — always skipped in bootstrap
     hub_publish_ado_collection: false,
     hub_mark_ado_validated: false,
@@ -1203,6 +1207,11 @@ function App() {
       ...credential,
       id: credential.id || `imported-credential-${index + 1}`
     }));
+    if (merged.aap.skip_tls_verify === undefined) merged.aap.skip_tls_verify = false;
+    if (merged.aap.project_sync_timeout === undefined) merged.aap.project_sync_timeout = 45;
+    if (merged.aap.project_sync_retries === undefined) merged.aap.project_sync_retries = 20;
+    if (merged.aap.project_sync_delay === undefined) merged.aap.project_sync_delay = 5;
+    if (merged.aap.project_playbook_wait_seconds === undefined) merged.aap.project_playbook_wait_seconds = 45;
     // Hub publishing removed — force off on import
     merged.aap.hub_publish_ado_collection = false;
     merged.aap.hub_mark_ado_validated = false;
@@ -5074,6 +5083,29 @@ ${vaultYaml}
 
                       <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
                       <GridItem span={6}><FormGroup label="Admin Password"><TextInput type="password" value={data.aap.admin_password} onChange={(_, v) => set('aap.admin_password', v)} /></FormGroup></GridItem>
+                      <GridItem span={6}>
+                        <FormGroup label="Project sync timeout (seconds)">
+                          <TextInput
+                            type="number"
+                            value={data.aap.project_sync_timeout}
+                            onChange={(_, v) => set('aap.project_sync_timeout', Number(v))}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={6}>
+                        <FormGroup label="Project sync retries">
+                          <TextInput
+                            type="number"
+                            value={data.aap.project_sync_retries}
+                            onChange={(_, v) => set('aap.project_sync_retries', Number(v))}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={12}>
+                        <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: 0 }}>
+                          Default wait is 45s per sync attempt with 20 retries (5s between attempts). Increase timeout for slow Git remotes. After a successful sync, bootstrap pauses briefly so playbooks are visible before creating job templates.
+                        </p>
+                      </GridItem>
                       <GridItem span={6}>
                         <FormGroup label="TLS Certificate Verification">
                           <Checkbox

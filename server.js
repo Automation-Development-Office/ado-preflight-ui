@@ -607,6 +607,10 @@ function normalizePreflightPayload(input) {
 
   if (data.aap.enabled === undefined) data.aap.enabled = true;
   if (data.aap.skip_tls_verify === undefined) data.aap.skip_tls_verify = false;
+  data.aap.project_sync_timeout = Math.max(1, normalizeNonNegativeInt(data.aap.project_sync_timeout, 45) || 45);
+  data.aap.project_sync_retries = Math.max(1, normalizeNonNegativeInt(data.aap.project_sync_retries, 20) || 20);
+  data.aap.project_sync_delay = Math.max(0, normalizeNonNegativeInt(data.aap.project_sync_delay, 5));
+  data.aap.project_playbook_wait_seconds = Math.max(0, normalizeNonNegativeInt(data.aap.project_playbook_wait_seconds, 45));
   if (!data.aap.organization) data.aap.organization = 'ADO';
   data.aap.inventory = normalizeOrgScopedName(data.aap.inventory, data.aap.organization, 'inventory');
   data.aap.project = normalizeOrgScopedName(data.aap.project, data.aap.organization, 'project');
@@ -2400,6 +2404,10 @@ ansible-playbook \\
   -e bootstrap_generate_playbook_repo_git_auth_mode=${gitUsesBearerAuth ? 'bearer' : 'basic'} \\
   -e generate_playbook_repo_git_username=${JSON.stringify(gitUsername)} \\
   -e bootstrap_generate_playbook_repo_git_username=${JSON.stringify(gitUsername)} \\
+  -e bootstrap_controller_project_sync_timeout=${Number(data?.aap?.project_sync_timeout) || 45} \\
+  -e bootstrap_controller_project_sync_retries=${Number(data?.aap?.project_sync_retries) || 20} \\
+  -e bootstrap_controller_project_sync_delay=${Number(data?.aap?.project_sync_delay) || 5} \\
+  -e bootstrap_controller_project_playbook_wait_seconds=${Number(data?.aap?.project_playbook_wait_seconds) || 45} \\
   -e generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e bootstrap_generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e generate_playbook_repo_git_commit_message="Generate ADO bootstrap content for ${envName}" \\

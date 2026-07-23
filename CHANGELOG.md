@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- AAP project sync wait is configurable in UI/CLI (`aap.project_sync_timeout`, retries, delay); defaults to 45s per attempt, 20 retries, 5s delay, plus a 45s post-sync pause.
 - Restored generated `collections/requirements.yml` to name/version-only entries (`redhat.satellite`, `infra.ado`, `community.general`, `community.crypto`, `ansible.posix`) and stopped auto-adding a Galaxy `source` URL.
 - For Bitbucket SCM only, Source Control / git credential username is set to `x-token-auth` (token remains the password); GitLab and others stay `oauth2`.
 - Removed the AAP Hub tab; Hub collection publish and Hub EE push are forced off in bootstrap.
