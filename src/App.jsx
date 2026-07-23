@@ -445,6 +445,7 @@ const defaults = {
     git_url: 'https://gitlab-git.apps.ocp.prod.rhlab/redhat-lab/bootstrap-sample.git',
     git_branch: 'main',
     execution_environment: 'ee-supported-rhel9',
+    manage_execution_environments: true,
     vault_credential_name: 'ADO-vault',
     skip_tls_verify: false,
     smoke_test_enabled: true,
@@ -1205,6 +1206,7 @@ function App() {
     }));
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.smoke_test_enabled === undefined) merged.aap.smoke_test_enabled = true;
+    if (merged.aap.manage_execution_environments === undefined) merged.aap.manage_execution_environments = true;
     if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
     if (merged.aap.hub_push_ee === undefined) merged.aap.hub_push_ee = false;
@@ -1329,6 +1331,7 @@ function App() {
       payload.aap.machine_credential.name = normalizeOrgScopedName(payload.aap.machine_credential.name, org, 'machine');
       payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
       if (payload.aap.smoke_test_enabled === undefined) payload.aap.smoke_test_enabled = true;
+      if (payload.aap.manage_execution_environments === undefined) payload.aap.manage_execution_environments = true;
       if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = false;
       if (payload.aap.hub_update_collection_only === undefined) payload.aap.hub_update_collection_only = false;
       if (payload.aap.hub_push_ee === undefined) payload.aap.hub_push_ee = false;
@@ -5073,6 +5076,15 @@ ${vaultYaml}
                               onChange={(_, v) => set('aap.execution_environment', v)}
                             />
                           )}
+                          <Checkbox
+                            id="aap-manage-execution-environments"
+                            label="Create or update this Controller execution environment"
+                            isChecked={data.aap.manage_execution_environments !== false}
+                            onChange={(_, v) => set('aap.manage_execution_environments', v)}
+                          />
+                          <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
+                            When unchecked, job templates still reference the EE name above, but bootstrap will not create or update the EE object in AAP.
+                          </p>
                         </FormGroup>
                       </GridItem>
                       <GridItem span={6}>

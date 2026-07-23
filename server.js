@@ -602,6 +602,7 @@ function normalizePreflightPayload(input) {
   if (data.aap.enabled === undefined) data.aap.enabled = true;
   if (data.aap.skip_tls_verify === undefined) data.aap.skip_tls_verify = false;
   if (data.aap.smoke_test_enabled === undefined) data.aap.smoke_test_enabled = true;
+  if (data.aap.manage_execution_environments === undefined) data.aap.manage_execution_environments = true;
   if (!data.aap.organization) data.aap.organization = 'ADO';
   data.aap.inventory = normalizeOrgScopedName(data.aap.inventory, data.aap.organization, 'inventory');
   data.aap.project = normalizeOrgScopedName(data.aap.project, data.aap.organization, 'project');
@@ -2031,6 +2032,7 @@ app.post('/api/bootstrap', async (req, res) => {
   const ansibleVerbosityFlag = verbosityFlag(ansibleVerbosity);
   const skipTlsVerify = data?.aap?.skip_tls_verify === true;
   const smokeTestEnabled = data?.aap?.smoke_test_enabled !== false;
+  const manageExecutionEnvironments = data?.aap?.manage_execution_environments !== false;
   const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
   const encryptVaultFiles = data?.vault?.encrypt !== false;
   const bootstrapEnv = buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify);
@@ -2041,6 +2043,7 @@ app.post('/api/bootstrap', async (req, res) => {
   append(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}\n`);
   append(`Skip TLS Verification: ${skipTlsVerify}\n`);
   append(`AAP Smoke Test Enabled: ${smokeTestEnabled}\n`);
+  append(`Manage Execution Environments: ${manageExecutionEnvironments}\n`);
   append(`Git Skip TLS/SSL Verification: ${gitSkipTlsVerify}\n`);
   append(`Encrypt Vault Files: ${encryptVaultFiles}\n`);
 
@@ -2050,6 +2053,7 @@ app.post('/api/bootstrap', async (req, res) => {
   event(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}`);
   event(`Skip TLS Verification: ${skipTlsVerify}`);
   event(`AAP Smoke Test Enabled: ${smokeTestEnabled}`);
+  event(`Manage Execution Environments: ${manageExecutionEnvironments}`);
   event(`Git Skip TLS/SSL Verification: ${gitSkipTlsVerify}`);
   event(`Encrypt vault files: ${encryptVaultFiles}`);
 
@@ -2304,6 +2308,7 @@ ansible-galaxy collection list
     ansible_tls_verify: skipTlsVerify ? 'false' : 'true',
     smoke_test_enabled: smokeTestEnabled,
     bootstrap_controller_aap_smoke_test_enabled: smokeTestEnabled,
+    manage_execution_environments: manageExecutionEnvironments,
     ansible_verbosity: ansibleVerbosity,
     ansible_verbosity_flag: ansibleVerbosityFlag,
     encrypt_vault_files: encryptVaultFiles,
@@ -2373,7 +2378,10 @@ ansible-playbook \\
   -e apply_aap_configs=true \\
   -e bootstrap_apply_aap_configs=true \\
   -e bootstrap_controller_apply_aap_configs=true \\
-  -e generate_playbook_repo_pause_for_push=false \\
+${manageExecutionEnvironments ? '' : `  -e controller_bootstrap_controller_execution_environments=[] \\
+  -e bootstrap_controller_controller_execution_environments=[] \\
+  -e controller_execution_environments=[] \\
+`}  -e generate_playbook_repo_pause_for_push=false \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_commit=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\
@@ -2411,6 +2419,7 @@ ansible-playbook \\
     ansibleVerbosityFlag,
     skipTlsVerify,
     smokeTestEnabled,
+    manageExecutionEnvironments,
     gitSkipTlsVerify,
     encryptVaultFiles,
     bootstrapRecap,
