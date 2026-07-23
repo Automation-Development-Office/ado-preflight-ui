@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Bootstrap no longer applies Controller execution environments via `infra.aap_configuration` (stops PATCH of stock `ee-supported-rhel9`). Custom Hub EE images are created only when Hub EE push is explicitly enabled.
-- AAP connectivity no longer launches Demo Job Template by default; when smoke test is enabled it skips cleanly if that template does not exist.
+- Restored the AAP Hub tab (collection publish + optional ado-ee push). Rebuild/redeploy the UI image so it installs `infra-ado-1.0.2` — `1.0.1` still patches stock `ee-supported-rhel9`.
+- `1.0.2` keeps the real fixes: no `controller_execution_environments` manage of stock EEs; Demo Job smoke test off by default / skip if missing; Hub EE push stays opt-in and refuses `ee-supported-*`.
 - Added Git Configuration TLS/SSL skip control (default disabled verification) for UI and CLI; sets local `git config http.sslVerify false` when skip is enabled.
 - When SCM tool is Bitbucket, git clone/push uses `http.extraHeader='Authorization: Bearer <token>'` instead of GitLab-style `oauth2:<token>` basic auth.
 - Hub EE push always uses a local podman image only (never pulls from the internet); the image must already exist locally before enabling push.

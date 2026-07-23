@@ -451,7 +451,7 @@ const defaults = {
     hub_mark_ado_validated: true,
     hub_force_ado_collection_update: false,
     hub_update_collection_only: false,
-    // Optional Hub EE mirror — uses local podman image only (never pulls from internet)
+    // Optional Hub EE mirror — local image only (never pulls); off by default
     hub_push_ee: false,
     hub_ee_source_image: 'ghcr.io/automation-development-office/ado-ee:latest',
     hub_ee_name: 'ado-ee',
@@ -5120,7 +5120,7 @@ ${vaultYaml}
                       <GridItem span={12}>
                         <FormGroup label="Execution environment (optional)">
                           <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
-                            Optional and off by default. Requires the source image already present locally (for example via <code>podman images</code>). Never pulls from the internet — only tags and pushes a custom local image (for example <code>ado-ee</code>) to Private Automation Hub. Stock <code>ee-supported-*</code> images are already in Hub and are never pushed.
+                            Optional and off by default. Requires the source image already present locally (for example via <code>podman images</code>). Never pulls from the internet — only tags and pushes a custom local image (for example <code>ado-ee</code>) to Private Automation Hub. Stock <code>ee-supported-*</code> images are already in Hub and are never pushed or patched by bootstrap.
                           </p>
                           <Checkbox
                             id="aap-hub-push-ee"
