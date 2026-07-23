@@ -447,11 +447,11 @@ const defaults = {
     execution_environment: 'ee-supported-rhel9',
     vault_credential_name: 'ADO-vault',
     skip_tls_verify: false,
-    hub_publish_ado_collection: true,
-    hub_mark_ado_validated: true,
+    // Hub publishing removed from UI — always skipped in bootstrap
+    hub_publish_ado_collection: false,
+    hub_mark_ado_validated: false,
     hub_force_ado_collection_update: false,
     hub_update_collection_only: false,
-    // Optional Hub EE mirror — local image only (never pulls); off by default
     hub_push_ee: false,
     hub_ee_source_image: 'ghcr.io/automation-development-office/ado-ee:latest',
     hub_ee_name: 'ado-ee',
@@ -1202,10 +1202,12 @@ function App() {
       ...credential,
       id: credential.id || `imported-credential-${index + 1}`
     }));
-    merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
-    if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
-    if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
-    if (merged.aap.hub_push_ee === undefined) merged.aap.hub_push_ee = false;
+    // Hub publishing removed — force off on import
+    merged.aap.hub_publish_ado_collection = false;
+    merged.aap.hub_mark_ado_validated = false;
+    merged.aap.hub_force_ado_collection_update = false;
+    merged.aap.hub_update_collection_only = false;
+    merged.aap.hub_push_ee = false;
     if (merged.aap.hub_ee_source_image === undefined) {
       merged.aap.hub_ee_source_image = defaults.aap.hub_ee_source_image;
     }
@@ -1325,22 +1327,13 @@ function App() {
       payload.aap.vault_credential_name = normalizeOrgScopedName(payload.aap.vault_credential_name, org, 'vault');
       if (!payload.aap.machine_credential) payload.aap.machine_credential = {};
       payload.aap.machine_credential.name = normalizeOrgScopedName(payload.aap.machine_credential.name, org, 'machine');
-      payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
-      if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = false;
-      if (payload.aap.hub_update_collection_only === undefined) payload.aap.hub_update_collection_only = false;
-      if (payload.aap.hub_push_ee === undefined) payload.aap.hub_push_ee = false;
+      // Hub publishing removed — never publish/push Hub during bootstrap
+      payload.aap.hub_publish_ado_collection = false;
+      payload.aap.hub_mark_ado_validated = false;
+      payload.aap.hub_force_ado_collection_update = false;
+      payload.aap.hub_update_collection_only = false;
+      payload.aap.hub_push_ee = false;
       payload.aap.hub_ee_pull = false;
-      if (payload.aap.hub_update_collection_only === true) {
-        payload.aap.hub_publish_ado_collection = true;
-        payload.aap.hub_mark_ado_validated = true;
-        payload.aap.hub_force_ado_collection_update = true;
-        payload.components = [];
-        delete payload.component;
-        payload.platform = [];
-        payload.selected_component_apps = [];
-        payload.component_config = {};
-        payload.component_options = {};
-      }
       payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
         const { id, ...credentialPayload } = credential;
         return credentialPayload;
@@ -5032,9 +5025,8 @@ ${vaultYaml}
               {data.aap.enabled && aapOpen && (
                 <>
                   <br />
-                  <Tabs activeKey={activeAapConfigTab} onSelect={(_, key) => setActiveAapConfigTab(key)}>
+                  <Tabs activeKey={activeAapConfigTab === 'hub' ? 'general' : activeAapConfigTab} onSelect={(_, key) => setActiveAapConfigTab(key)}>
                     <Tab eventKey="general" title="General" />
-                    <Tab eventKey="hub" title="Hub" />
                     <Tab eventKey="galaxy" title="Galaxy" />
                   </Tabs>
                   <br />
@@ -5047,29 +5039,10 @@ ${vaultYaml}
                       <GridItem span={6}><FormGroup label="Project Name"><TextInput value={data.aap.project} onChange={(_, v) => set('aap.project', v)} /></FormGroup></GridItem>
                       <GridItem span={6}>
                         <FormGroup label="Execution Environment">
-                          {data.aap.hub_push_ee ? (() => {
-                            const hubEe = resolveHubExecutionEnvironmentName(data.aap);
-                            const options = [...new Set([hubEe, DEFAULT_AAP_EXECUTION_ENVIRONMENT, data.aap.execution_environment].filter(Boolean))];
-                            const selected = options.includes(data.aap.execution_environment)
-                              ? data.aap.execution_environment
-                              : hubEe;
-                            return (
-                              <select
-                                value={selected}
-                                onChange={e => set('aap.execution_environment', e.target.value)}
-                                style={{ width: '100%', padding: '8px' }}
-                              >
-                                {options.map(option => (
-                                  <option key={option} value={option}>{option}</option>
-                                ))}
-                              </select>
-                            );
-                          })() : (
-                            <TextInput
-                              value={data.aap.execution_environment}
-                              onChange={(_, v) => set('aap.execution_environment', v)}
-                            />
-                          )}
+                          <TextInput
+                            value={data.aap.execution_environment}
+                            onChange={(_, v) => set('aap.execution_environment', v)}
+                          />
                         </FormGroup>
                       </GridItem>
                       <GridItem span={6}>
@@ -5092,125 +5065,6 @@ ${vaultYaml}
                           />
                         </FormGroup>
                       </GridItem>
-                    </Grid>
-                  )}
-                  {activeAapConfigTab === 'hub' && (
-                    <Grid hasGutter>
-                      <GridItem span={12}>
-                        <FormGroup label="Collections">
-                          <Checkbox
-                            label="Update infra.ado collection in validated AAP Hub content"
-                            isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
-                            onChange={(_, v) => setAapHubValidated(v)}
-                          />
-                          <Checkbox
-                            label="Force update infra.ado collection in validated content"
-                            isChecked={data.aap.hub_force_ado_collection_update}
-                            isDisabled={!data.aap.hub_publish_ado_collection}
-                            onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
-                          />
-                          <Checkbox
-                            label="Update collection only"
-                            isChecked={data.aap.hub_update_collection_only}
-                            isDisabled={!data.aap.hub_publish_ado_collection}
-                            onChange={(_, v) => set('aap.hub_update_collection_only', v)}
-                          />
-                        </FormGroup>
-                      </GridItem>
-                      <GridItem span={12}>
-                        <FormGroup label="Execution environment (optional)">
-                          <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
-                            Optional and off by default. Requires the source image already present locally (for example via <code>podman images</code>). Never pulls from the internet — only tags and pushes a custom local image (for example <code>ado-ee</code>) to Private Automation Hub. Stock <code>ee-supported-*</code> images are already in Hub and are never pushed or patched by bootstrap.
-                          </p>
-                          <Checkbox
-                            id="aap-hub-push-ee"
-                            label="Push local ado-ee image to AAP Hub (optional)"
-                            isChecked={data.aap.hub_push_ee === true}
-                            onChange={(_, v) => setAapHubPushEe(v)}
-                          />
-                        </FormGroup>
-                      </GridItem>
-                      {data.aap.hub_push_ee && (
-                        <>
-                          <GridItem span={8}>
-                            <FormGroup label="Source image (must exist locally)">
-                              <TextInput
-                                value={data.aap.hub_ee_source_image}
-                                onChange={(_, v) => set('aap.hub_ee_source_image', v)}
-                              />
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={4}>
-                            <FormGroup label="Hub EE name">
-                              <TextInput
-                                value={data.aap.hub_ee_name}
-                                onChange={(_, v) => setAapHubEeNameField('hub_ee_name', v)}
-                              />
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={4}>
-                            <FormGroup label="Tag">
-                              <TextInput
-                                value={data.aap.hub_ee_tag}
-                                onChange={(_, v) => set('aap.hub_ee_tag', v)}
-                              />
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={8}>
-                            <FormGroup
-                              label={(
-                                <span>
-                                  Hub registry host (optional)
-                                  <span style={{ color: mutedTextColor, fontWeight: 400 }}>
-                                    {' — Defaults to the AAP hostname when empty'}
-                                  </span>
-                                </span>
-                              )}
-                            >
-                              <TextInput
-                                value={data.aap.hub_ee_registry}
-                                onChange={(_, v) => set('aap.hub_ee_registry', v)}
-                                placeholder="hub.example.com"
-                              />
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={12}>
-                            <Checkbox
-                              id="aap-hub-ee-create-ee"
-                              label="Create Controller execution environment after push"
-                              isChecked={data.aap.hub_ee_create_execution_environment !== false}
-                              onChange={(_, v) => set('aap.hub_ee_create_execution_environment', v)}
-                            />
-                          </GridItem>
-                          {data.aap.hub_ee_create_execution_environment !== false && (
-                            <GridItem span={6}>
-                              <FormGroup
-                                label={(
-                                  <span>
-                                    Controller EE name
-                                    <span style={{ color: mutedTextColor, fontWeight: 400 }}>
-                                      {' — Defaults to Hub EE name when empty'}
-                                    </span>
-                                  </span>
-                                )}
-                              >
-                                <TextInput
-                                  value={data.aap.hub_ee_execution_environment_name}
-                                  onChange={(_, v) => setAapHubEeNameField('hub_ee_execution_environment_name', v)}
-                                />
-                              </FormGroup>
-                            </GridItem>
-                          )}
-                          <GridItem span={12}>
-                            <FormGroup label="Hub EE description (optional)">
-                              <TextInput
-                                value={data.aap.hub_ee_description}
-                                onChange={(_, v) => set('aap.hub_ee_description', v)}
-                              />
-                            </FormGroup>
-                          </GridItem>
-                        </>
-                      )}
                     </Grid>
                   )}
                   {activeAapConfigTab === 'galaxy' && (

@@ -553,20 +553,14 @@ function normalizePreflightPayload(input) {
   const data = JSON.parse(JSON.stringify(input || {}));
 
   if (!data.aap) data.aap = {};
-  if (data.aap.hub_update_collection_only === undefined) data.aap.hub_update_collection_only = false;
-  const hubUpdateCollectionOnly = data.aap.hub_update_collection_only === true;
+  // Hub publishing removed — always skip Hub collection/EE bootstrap
+  data.aap.hub_update_collection_only = false;
+  data.aap.hub_publish_ado_collection = false;
+  data.aap.hub_mark_ado_validated = false;
+  data.aap.hub_force_ado_collection_update = false;
+  data.aap.hub_push_ee = false;
 
-  if (hubUpdateCollectionOnly) {
-    data.components = [];
-    delete data.component;
-    data.platform = [];
-    data.component_apps = { openshift: [], rhel: [], patching: [], provision: [] };
-    data.component_config = {};
-    data.component_options = {};
-    data.aap.hub_publish_ado_collection = true;
-    data.aap.hub_mark_ado_validated = true;
-    data.aap.hub_force_ado_collection_update = true;
-  } else if (!Array.isArray(data.components) || data.components.length === 0) {
+  if (!Array.isArray(data.components) || data.components.length === 0) {
     if (Array.isArray(data.platform) && data.platform.length > 0) {
       data.components = data.platform.includes('all') ? ['all'] : data.platform;
     } else if (data.component) {
@@ -605,12 +599,12 @@ function normalizePreflightPayload(input) {
   data.aap.inventory = normalizeOrgScopedName(data.aap.inventory, data.aap.organization, 'inventory');
   data.aap.project = normalizeOrgScopedName(data.aap.project, data.aap.organization, 'project');
   data.aap.vault_credential_name = normalizeOrgScopedName(data.aap.vault_credential_name, data.aap.organization, 'vault');
-  if (data.aap.hub_publish_ado_collection === undefined) data.aap.hub_publish_ado_collection = true;
-  if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = true;
-  if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = false;
-  data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
-  // Optional Hub EE push — local image only (never pulls from the internet)
-  if (data.aap.hub_push_ee === undefined) data.aap.hub_push_ee = false;
+  // Hub publishing removed — always skip
+  data.aap.hub_publish_ado_collection = false;
+  data.aap.hub_mark_ado_validated = false;
+  data.aap.hub_force_ado_collection_update = false;
+  data.aap.hub_update_collection_only = false;
+  data.aap.hub_push_ee = false;
   if (data.aap.hub_ee_source_image === undefined) {
     data.aap.hub_ee_source_image = 'ghcr.io/automation-development-office/ado-ee:latest';
   }

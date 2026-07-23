@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Restored the AAP Hub tab (collection publish + optional ado-ee push). Rebuild/redeploy the UI image so it installs `infra-ado-1.0.2` — `1.0.1` still patches stock `ee-supported-rhel9`.
-- `1.0.2` keeps the real fixes: no `controller_execution_environments` manage of stock EEs; Demo Job smoke test off by default / skip if missing; Hub EE push stays opt-in and refuses `ee-supported-*`.
+- Removed the AAP Hub tab; Hub collection publish and Hub EE push are forced off in bootstrap.
+- Bundled fixed collection `infra-ado-1.0.3` (does not PATCH stock `ee-supported-rhel9`; Hub publish off). Rebuild/redeploy the UI image and confirm logs show `infra-ado-1.0.3` — earlier `1.0.2` artifacts on disk were corrupted/overwritten with old content.
 - Added Git Configuration TLS/SSL skip control (default disabled verification) for UI and CLI; sets local `git config http.sslVerify false` when skip is enabled.
 - When SCM tool is Bitbucket, git clone/push uses `http.extraHeader='Authorization: Bearer <token>'` instead of GitLab-style `oauth2:<token>` basic auth.
 - Hub EE push always uses a local podman image only (never pulls from the internet); the image must already exist locally before enabling push.
