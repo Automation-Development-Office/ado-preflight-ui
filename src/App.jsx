@@ -5120,7 +5120,7 @@ ${vaultYaml}
                       <GridItem span={12}>
                         <FormGroup label="Execution environment (optional)">
                           <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
-                            Requires the source image already present locally (for example via <code>podman images</code>). Never pulls from the internet — only tags and pushes the local image to Private Automation Hub.
+                            Optional and off by default. Requires the source image already present locally (for example via <code>podman images</code>). Never pulls from the internet — only tags and pushes a custom local image (for example <code>ado-ee</code>) to Private Automation Hub. Stock <code>ee-supported-*</code> images are already in Hub and are never pushed.
                           </p>
                           <Checkbox
                             id="aap-hub-push-ee"

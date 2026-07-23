@@ -2010,6 +2010,17 @@ app.post('/api/bootstrap', async (req, res) => {
     });
   }
 
+  const hubEeSource = String(data?.aap?.hub_ee_source_image || '').toLowerCase();
+  const hubEeName = String(data?.aap?.hub_ee_name || '').toLowerCase();
+  if (hubPushEeRequested && (hubEeSource.includes('ee-supported') || hubEeName.includes('ee-supported'))) {
+    event('Bootstrap failed: AAP Hub EE push refused for stock ee-supported image');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'Stock ee-supported-* images are already in Hub. Only push a custom local image (for example ado-ee).'
+    });
+  }
+
   const selectedComponents = hubUpdateCollectionOnly
     ? 'hub_collection_update'
     : (
