@@ -2066,6 +2066,7 @@ app.post('/api/bootstrap', async (req, res) => {
   const preflightFile = `ado-preflight-${envName}.json`;
   const preflightPath = path.join(repoDir, preflightFile);
   const extraVarsPath = path.join(repoDir, 'ado-extra-vars.json');
+  const skipEeVarsPath = path.join(repoDir, 'ado-skip-ee-vars.json');
   const vaultPassPath = path.join(repoDir, '.vault_pass');
   latestDebug.repoDir = repoDir;
   latestDebug.preflightPath = preflightPath;
@@ -2321,6 +2322,20 @@ ansible-galaxy collection list
     data?.aap?.vault_password || data.vault_password || 'redhat123'
   );
 
+  let skipEeExtraVarsArg = '';
+  if (!manageExecutionEnvironments) {
+    // Ansible key=value -e parses "[]" as a string, not an empty list.
+    // Use JSON extra-vars so these stay real empty lists and EE apply is skipped.
+    event('Writing ado-skip-ee-vars.json to skip Controller EE create/update');
+    fs.writeFileSync(skipEeVarsPath, JSON.stringify({
+      controller_bootstrap_controller_execution_environments: [],
+      bootstrap_controller_controller_execution_environments: [],
+      controller_execution_environments: []
+    }, null, 2));
+    skipEeExtraVarsArg = `  -e @${skipEeVarsPath} \\
+`;
+  }
+
   const code = await runStream('bash', ['-lc', `
 export ANSIBLE_COLLECTIONS_PATH=/workspace/collections:/usr/share/ansible/collections
 export ANSIBLE_COLLECTIONS_PATHS=/workspace/collections:/usr/share/ansible/collections
@@ -2378,10 +2393,8 @@ ansible-playbook \\
   -e apply_aap_configs=true \\
   -e bootstrap_apply_aap_configs=true \\
   -e bootstrap_controller_apply_aap_configs=true \\
-${manageExecutionEnvironments ? '' : `  -e controller_bootstrap_controller_execution_environments=[] \\
-  -e bootstrap_controller_controller_execution_environments=[] \\
-  -e controller_execution_environments=[] \\
-`}  -e generate_playbook_repo_pause_for_push=false \\
+${skipEeExtraVarsArg}
+  -e generate_playbook_repo_pause_for_push=false \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_commit=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\

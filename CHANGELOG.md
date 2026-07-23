@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added an AAP General checkbox to create/update the Controller execution environment (defaults to on); uncheck to leave the existing EE unchanged while still referencing its name on job templates.
+- Fixed skipped-EE mode so empty execution-environment lists are passed as JSON extra-vars (Ansible `key=[]` was coercing them to the string `"[]"`).
 - Added an AAP General checkbox to run or skip the Demo Job Template smoke test before applying controller objects (defaults to on).
 - Added Git Configuration TLS/SSL skip control (default disabled verification) for UI and CLI; sets local `git config http.sslVerify false` when skip is enabled.
 - When SCM tool is Bitbucket, git clone/push uses `http.extraHeader='Authorization: Bearer <token>'` instead of GitLab-style `oauth2:<token>` basic auth.
