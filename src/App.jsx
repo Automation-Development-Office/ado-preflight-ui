@@ -447,6 +447,7 @@ const defaults = {
     execution_environment: 'ee-supported-rhel9',
     vault_credential_name: 'ADO-vault',
     skip_tls_verify: false,
+    smoke_test_enabled: true,
     hub_publish_ado_collection: true,
     hub_mark_ado_validated: true,
     hub_force_ado_collection_update: false,
@@ -1203,6 +1204,7 @@ function App() {
       id: credential.id || `imported-credential-${index + 1}`
     }));
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
+    if (merged.aap.smoke_test_enabled === undefined) merged.aap.smoke_test_enabled = true;
     if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
     if (merged.aap.hub_push_ee === undefined) merged.aap.hub_push_ee = false;
@@ -1326,6 +1328,7 @@ function App() {
       if (!payload.aap.machine_credential) payload.aap.machine_credential = {};
       payload.aap.machine_credential.name = normalizeOrgScopedName(payload.aap.machine_credential.name, org, 'machine');
       payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
+      if (payload.aap.smoke_test_enabled === undefined) payload.aap.smoke_test_enabled = true;
       if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = false;
       if (payload.aap.hub_update_collection_only === undefined) payload.aap.hub_update_collection_only = false;
       if (payload.aap.hub_push_ee === undefined) payload.aap.hub_push_ee = false;
@@ -5089,6 +5092,16 @@ ${vaultYaml}
                             label="Skip TLS certificate verification for self-signed certificates"
                             isChecked={data.aap.skip_tls_verify}
                             onChange={(_, v) => set('aap.skip_tls_verify', v)}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={6}>
+                        <FormGroup label="AAP Smoke Test">
+                          <Checkbox
+                            id="aap-smoke-test-enabled"
+                            label="Run Demo Job Template smoke test before applying AAP objects"
+                            isChecked={data.aap.smoke_test_enabled !== false}
+                            onChange={(_, v) => set('aap.smoke_test_enabled', v)}
                           />
                         </FormGroup>
                       </GridItem>

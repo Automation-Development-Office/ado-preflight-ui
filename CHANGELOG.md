@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added an AAP General checkbox to run or skip the Demo Job Template smoke test before applying controller objects (defaults to on).
 - Added Git Configuration TLS/SSL skip control (default disabled verification) for UI and CLI; sets local `git config http.sslVerify false` when skip is enabled.
 - When SCM tool is Bitbucket, git clone/push uses `http.extraHeader='Authorization: Bearer <token>'` instead of GitLab-style `oauth2:<token>` basic auth.
 - Hub EE push always uses a local podman image only (never pulls from the internet); the image must already exist locally before enabling push.
