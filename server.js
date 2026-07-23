@@ -37,7 +37,7 @@ const rhbkOptionApps = {
   federation: 'rhbk_federation'
 };
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '100mb' }));
 app.use(express.static(uiDir));
 
 let latestLog = '';
@@ -448,7 +448,11 @@ function defaultComponentConfig(component) {
       inventory_update_on_launch: true,
       inventory_update_cache_timeout: 0,
       inventory_verbosity: 0,
-      inventory_host_filter: ''
+      inventory_host_filter: '',
+      manifest_file: '',
+      manifest_content_base64: '',
+      manifest_encoding: 'base64',
+      manifest_organization: ''
     });
   }
 
@@ -562,6 +566,22 @@ function normalizePreflightPayload(input) {
   if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = true;
   if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = false;
   data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
+  // Optional Hub EE push — default off for disconnected environments
+  if (data.aap.hub_push_ee === undefined) data.aap.hub_push_ee = false;
+  if (data.aap.hub_ee_source_image === undefined) {
+    data.aap.hub_ee_source_image = 'ghcr.io/automation-development-office/ado-ee:latest';
+  }
+  if (data.aap.hub_ee_name === undefined) data.aap.hub_ee_name = 'ado-ee';
+  if (data.aap.hub_ee_tag === undefined) data.aap.hub_ee_tag = 'latest';
+  if (data.aap.hub_ee_registry === undefined) data.aap.hub_ee_registry = '';
+  if (data.aap.hub_ee_pull === undefined) data.aap.hub_ee_pull = true;
+  if (data.aap.hub_ee_create_execution_environment === undefined) {
+    data.aap.hub_ee_create_execution_environment = true;
+  }
+  if (data.aap.hub_ee_execution_environment_name === undefined) {
+    data.aap.hub_ee_execution_environment_name = '';
+  }
+  if (data.aap.hub_ee_description === undefined) data.aap.hub_ee_description = '';
   if (!Array.isArray(data.aap.additional_credentials)) data.aap.additional_credentials = [];
   data.aap.additional_credentials = data.aap.additional_credentials.map(({ id, ...credential }) => credential);
   if (!data.aap.machine_credential) data.aap.machine_credential = {};
@@ -1591,7 +1611,8 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
     `AAP Hub collection update: ${data?.aap?.hub_publish_ado_collection ? 'yes' : 'no'}`,
     `AAP Hub force update: ${data?.aap?.hub_force_ado_collection_update ? 'yes' : 'no'}`,
     `AAP Hub update only: ${data?.aap?.hub_update_collection_only ? 'yes' : 'no'}`,
-    `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`
+    `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`,
+    `AAP Hub EE push: ${data?.aap?.hub_push_ee ? 'yes' : 'no (optional; default off)'}`
   ];
 
   appendListRecap(lines, 'Components', selectedComponentApps);
@@ -1823,6 +1844,7 @@ app.post('/api/bootstrap', async (req, res) => {
 
   const hubUpdateCollectionOnly = data?.aap?.hub_update_collection_only === true;
   const hubPublishRequested = data?.aap?.hub_publish_ado_collection === true || hubUpdateCollectionOnly;
+  const hubPushEeRequested = data?.aap?.hub_push_ee === true;
   const hasAapOAuthToken = Boolean(String(data?.aap?.oauth_token || '').trim());
   const hasAapPasswordAuth = Boolean(
     String(data?.aap?.admin_username || '').trim()
@@ -1835,6 +1857,24 @@ app.post('/api/bootstrap', async (req, res) => {
       status: 'failed',
       exitCode: 2,
       error: 'AAP Hub publishing requires an AAP OAuth Token or Admin Username and Admin Password.'
+    });
+  }
+
+  if (hubPushEeRequested && !hasAapOAuthToken && !hasAapPasswordAuth) {
+    event('Bootstrap failed: AAP Hub EE push needs AAP OAuth token or admin username/password');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'AAP Hub EE push requires an AAP OAuth Token or Admin Username and Admin Password.'
+    });
+  }
+
+  if (hubPushEeRequested && !String(data?.aap?.hub_ee_source_image || '').trim()) {
+    event('Bootstrap failed: AAP Hub EE push needs a source image');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'AAP Hub EE push requires a source image (aap.hub_ee_source_image).'
     });
   }
 

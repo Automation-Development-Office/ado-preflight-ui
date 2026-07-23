@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added an optional AAP Hub tab control to push the `ado-ee` image to Private Automation Hub; it defaults to off for disconnected environments and is skipped unless explicitly enabled.
+- When Hub EE push is enabled, the AAP Execution Environment field becomes a dropdown defaulting to the pushed EE name (switchable back to `ee-supported-rhel9`); when push is off it stays the normal default.
+- Added Satellite manifest ZIP upload to the Satellite configuration form and increased the bootstrap API payload limit so uploaded manifests can be written into the generated repo `files/` directory.
+- Fixed provision bootstrap so selecting Provision / `openshift_virt` reliably creates the `{org} | Provision OpenShift Virt VM` AAP job template, including when only the Provision group is selected.
 - Added a dedicated Credentials card above Git Configuration with Vault, Machine, and Additional tabs, and moved vault credential fields out of the AAP Configuration card.
 - Clarified AAP Hub collection update wording and moved Hub update state into the ADO Bootstrap Recap AAP Hub section, removing the redundant installed collection line.
 - Added pre-run validation for AAP Hub publishing so collection-only runs stop immediately when AAP OAuth token or admin password auth is missing.
