@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Restored generated `collections/requirements.yml` to name/version-only entries (`redhat.satellite`, `infra.ado`, `community.general`, `community.crypto`, `ansible.posix`) and stopped auto-adding a Galaxy `source` URL.
 - For Bitbucket SCM only, Source Control / git credential username is set to `x-token-auth` (token remains the password); GitLab and others stay `oauth2`.
 - Removed the AAP Hub tab; Hub collection publish and Hub EE push are forced off in bootstrap.
 - Bundled fixed collection `infra-ado-1.0.3` (does not PATCH stock `ee-supported-rhel9`; Hub publish off). Rebuild/redeploy the UI image and confirm logs show `infra-ado-1.0.3` — earlier `1.0.2` artifacts on disk were corrupted/overwritten with old content.
