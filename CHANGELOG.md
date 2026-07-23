@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-- Added an optional AAP Hub tab control to push the `ado-ee` image to Private Automation Hub; it defaults to off for disconnected environments and is skipped unless explicitly enabled.
+- Added Git Configuration TLS/SSL skip control (default disabled verification) for UI and CLI; sets local `git config http.sslVerify false` when skip is enabled.
+- When SCM tool is Bitbucket, git clone/push uses `http.extraHeader='Authorization: Bearer <token>'` instead of GitLab-style `oauth2:<token>` basic auth.
+- Hub EE push always uses a local podman image only (never pulls from the internet); the image must already exist locally before enabling push.
+- Added an AAP Configuration Galaxy tab to optionally create Hub/Galaxy API Token credentials, a Container Registry EE credential, a Controller user account, and attach Galaxy credentials to the organization (default off for disconnected).
+- Fixed OpenShift Virt VM provisioning so missing `provision_openshift_virt_skip_tls_verify` no longer fails the job; it defaults to `true` in the playbook and job template extra vars.
+- Added an optional AAP Hub tab control to push the local `ado-ee` image to Private Automation Hub; it defaults to off and is skipped unless explicitly enabled.
 - When Hub EE push is enabled, the AAP Execution Environment field becomes a dropdown defaulting to the pushed EE name (switchable back to `ee-supported-rhel9`); when push is off it stays the normal default.
 - Added Satellite manifest ZIP upload to the Satellite configuration form and increased the bootstrap API payload limit so uploaded manifests can be written into the generated repo `files/` directory.
 - Fixed provision bootstrap so selecting Provision / `openshift_virt` reliably creates the `{org} | Provision OpenShift Virt VM` AAP job template, including when only the Provision group is selected.
