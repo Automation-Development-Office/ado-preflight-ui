@@ -355,11 +355,17 @@ function buildAnsibleEnv(skipTlsVerify = false, gitSkipTlsVerify = true) {
   return ansibleEnv;
 }
 
-function gitCredentialLine(repoUrl, token) {
+function gitCredentialLine(repoUrl, token, username = 'oauth2') {
   const u = new URL(repoUrl);
-  const username = encodeURIComponent('oauth2');
+  const user = encodeURIComponent(String(username || 'oauth2').trim() || 'oauth2');
   const password = encodeURIComponent(token);
-  return `${u.protocol}//${username}:${password}@${u.host}\n`;
+  return `${u.protocol}//${user}:${password}@${u.host}\n`;
+}
+
+function defaultGitUsername(scmTool) {
+  return String(scmTool || '').trim().toLowerCase() === 'bitbucket'
+    ? 'x-token-auth'
+    : 'oauth2';
 }
 
 function usesBearerGitAuth(scmTool) {
@@ -589,6 +595,12 @@ function normalizePreflightPayload(input) {
   if (data.git.auto_push === undefined) data.git.auto_push = true;
   if (data.git.skip_tls_verify === undefined) data.git.skip_tls_verify = true;
   if (data.git.token === undefined) data.git.token = '';
+  // Bitbucket Source Control / HTTP token auth uses fixed username x-token-auth
+  if (String(data.scm_tool || '').trim().toLowerCase() === 'bitbucket') {
+    data.git.username = 'x-token-auth';
+  } else if (!data.git.username) {
+    data.git.username = 'oauth2';
+  }
 
   if (!data.vault) data.vault = {};
   if (data.vault.encrypt === undefined) data.vault.encrypt = true;
@@ -1312,11 +1324,12 @@ function configureGitCredentials(repoUrl, token, scmTool = 'gitlab') {
 
   const home = process.env.HOME || '/tmp';
   const credPath = path.join(home, '.git-credentials');
+  const username = defaultGitUsername(scmTool);
 
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(credPath, gitCredentialLine(repoUrl, token), { mode: 0o600 });
+  fs.writeFileSync(credPath, gitCredentialLine(repoUrl, token, username), { mode: 0o600 });
 
-  event(`Configured Git credentials for ${new URL(repoUrl).host}`);
+  event(`Configured Git credentials for ${new URL(repoUrl).host} (username ${username})`);
 }
 
 function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
@@ -2056,6 +2069,12 @@ app.post('/api/bootstrap', async (req, res) => {
 
   const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
   const gitUsesBearerAuth = usesBearerGitAuth(scmTool);
+  const gitUsername = String(data?.git?.username || defaultGitUsername(scmTool)).trim() || defaultGitUsername(scmTool);
+  data.git = data.git || {};
+  data.git.username = gitUsername;
+  if (scmTool === 'bitbucket') {
+    event('Bitbucket Source Control username set to x-token-auth');
+  }
 
   configureGitCredentials(repoUrl, gitToken, scmTool);
 
@@ -2379,6 +2398,8 @@ ansible-playbook \\
   -e bootstrap_generate_playbook_repo_git_ssl_verify=${gitSkipTlsVerify ? 'false' : 'true'} \\
   -e generate_playbook_repo_git_auth_mode=${gitUsesBearerAuth ? 'bearer' : 'basic'} \\
   -e bootstrap_generate_playbook_repo_git_auth_mode=${gitUsesBearerAuth ? 'bearer' : 'basic'} \\
+  -e generate_playbook_repo_git_username=${JSON.stringify(gitUsername)} \\
+  -e bootstrap_generate_playbook_repo_git_username=${JSON.stringify(gitUsername)} \\
   -e generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e bootstrap_generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e generate_playbook_repo_git_commit_message="Generate ADO bootstrap content for ${envName}" \\

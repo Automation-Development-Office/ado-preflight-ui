@@ -259,7 +259,8 @@ const defaults = {
   git: {
     auto_push: true,
     skip_tls_verify: true,
-    token: ''
+    token: '',
+    username: 'oauth2'
   },
 
   components: [],
@@ -1244,6 +1245,11 @@ function App() {
     if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
     if (!merged.git) merged.git = { ...defaults.git };
     if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
+    if (String(merged.scm_tool || '').toLowerCase() === 'bitbucket') {
+      merged.git.username = 'x-token-auth';
+    } else if (!merged.git.username) {
+      merged.git.username = 'oauth2';
+    }
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
     if (!merged.collections) merged.collections = { ...defaults.collections };
     if (!merged.tools) merged.tools = { ...defaults.tools };
@@ -4947,13 +4953,25 @@ ${vaultYaml}
                         label={v}
                         name="scm"
                         isChecked={data.scm_tool === v}
-                        onChange={() => set('scm_tool', v)}
+                        onChange={() => {
+                          setData(prev => {
+                            const copy = JSON.parse(JSON.stringify(prev));
+                            copy.scm_tool = v;
+                            if (!copy.git) copy.git = {};
+                            if (v === 'bitbucket') {
+                              copy.git.username = 'x-token-auth';
+                            } else if (!copy.git.username || copy.git.username === 'x-token-auth') {
+                              copy.git.username = 'oauth2';
+                            }
+                            return copy;
+                          });
+                        }}
                       />
                     )}
                   </FormGroup>
                   {data.scm_tool === 'bitbucket' && (
                     <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
-                      Bitbucket uses <code>Authorization: Bearer</code> for git clone/push.
+                      Bitbucket uses <code>Authorization: Bearer</code> for bootstrap git clone/push, and Source Control credentials use username <code>x-token-auth</code> with the token as the password.
                     </p>
                   )}
 
