@@ -329,7 +329,7 @@ function verbosityFlag(level) {
   return `-${'v'.repeat(normalized)}`;
 }
 
-function buildAnsibleEnv(skipTlsVerify = false) {
+function buildAnsibleEnv(skipTlsVerify = false, gitSkipTlsVerify = true) {
   const ansibleEnv = {
     ...process.env,
     ANSIBLE_FORCE_COLOR: 'false',
@@ -341,9 +341,12 @@ function buildAnsibleEnv(skipTlsVerify = false) {
     REQUESTS_CA_BUNDLE: '',
     CURL_CA_BUNDLE: '',
     PYTHONHTTPSVERIFY: '0',
-    GIT_SSL_NO_VERIFY: 'true',
     GIT_TERMINAL_PROMPT: '0'
   };
+
+  if (gitSkipTlsVerify) {
+    ansibleEnv.GIT_SSL_NO_VERIFY = 'true';
+  }
 
   if (skipTlsVerify) {
     ansibleEnv.ANSIBLE_TLS_VERIFY = 'false';
@@ -357,6 +360,45 @@ function gitCredentialLine(repoUrl, token) {
   const username = encodeURIComponent('oauth2');
   const password = encodeURIComponent(token);
   return `${u.protocol}//${username}:${password}@${u.host}\n`;
+}
+
+function usesBearerGitAuth(scmTool) {
+  return String(scmTool || '').trim().toLowerCase() === 'bitbucket';
+}
+
+function gitBearerExtraHeader(token) {
+  return `Authorization: Bearer ${String(token || '').trim()}`;
+}
+
+function redactGitArgsForLog(args) {
+  return args.map(arg => {
+    if (typeof arg !== 'string') return arg;
+    return arg
+      .replace(/Authorization:\s*Bearer\s+\S+/gi, 'Authorization: Bearer ***')
+      .replace(/:\/\/[^/@\s]+:[^/@\s]+@/g, '://***:***@');
+  });
+}
+
+function buildGitCloneArgs({
+  repoUrl,
+  branch,
+  repoDir,
+  token,
+  scmTool,
+  gitSkipTlsVerify
+}) {
+  const args = [];
+
+  if (gitSkipTlsVerify) {
+    args.push('-c', 'http.sslVerify=false');
+  }
+
+  if (usesBearerGitAuth(scmTool) && token) {
+    args.push('-c', `http.extraHeader=${gitBearerExtraHeader(token)}`);
+  }
+
+  args.push('clone', '--branch', branch, '--single-branch', repoUrl, repoDir);
+  return args;
 }
 
 function selectedComponentAppsFrom(data) {
@@ -448,7 +490,11 @@ function defaultComponentConfig(component) {
       inventory_update_on_launch: true,
       inventory_update_cache_timeout: 0,
       inventory_verbosity: 0,
-      inventory_host_filter: ''
+      inventory_host_filter: '',
+      manifest_file: '',
+      manifest_content_base64: '',
+      manifest_encoding: 'base64',
+      manifest_organization: ''
     });
   }
 
@@ -547,6 +593,7 @@ function normalizePreflightPayload(input) {
 
   if (!data.git) data.git = {};
   if (data.git.auto_push === undefined) data.git.auto_push = true;
+  if (data.git.skip_tls_verify === undefined) data.git.skip_tls_verify = true;
   if (data.git.token === undefined) data.git.token = '';
 
   if (!data.vault) data.vault = {};
@@ -562,6 +609,104 @@ function normalizePreflightPayload(input) {
   if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = true;
   if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = false;
   data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
+  // Optional Hub EE push — local image only (never pulls from the internet)
+  if (data.aap.hub_push_ee === undefined) data.aap.hub_push_ee = false;
+  if (data.aap.hub_ee_source_image === undefined) {
+    data.aap.hub_ee_source_image = 'ghcr.io/automation-development-office/ado-ee:latest';
+  }
+  if (data.aap.hub_ee_name === undefined) data.aap.hub_ee_name = 'ado-ee';
+  if (data.aap.hub_ee_tag === undefined) data.aap.hub_ee_tag = 'latest';
+  if (data.aap.hub_ee_registry === undefined) data.aap.hub_ee_registry = '';
+  data.aap.hub_ee_pull = false;
+  if (data.aap.hub_ee_create_execution_environment === undefined) {
+    data.aap.hub_ee_create_execution_environment = true;
+  }
+  if (data.aap.hub_ee_execution_environment_name === undefined) {
+    data.aap.hub_ee_execution_environment_name = '';
+  }
+  if (data.aap.hub_ee_description === undefined) data.aap.hub_ee_description = '';
+  if (data.aap.galaxy_setup_enabled === undefined) data.aap.galaxy_setup_enabled = false;
+  if (data.aap.galaxy_hub_token === undefined) data.aap.galaxy_hub_token = '';
+  if (!data.aap.galaxy_user_account || typeof data.aap.galaxy_user_account !== 'object') {
+    data.aap.galaxy_user_account = {
+      enabled: false,
+      username: '',
+      password: '',
+      email: '',
+      is_superuser: false
+    };
+  }
+  if (data.aap.galaxy_user_account.enabled === undefined) data.aap.galaxy_user_account.enabled = false;
+  if (!Array.isArray(data.aap.galaxy_credentials) || data.aap.galaxy_credentials.length === 0) {
+    const org = data.aap.organization || 'ADO';
+    const hostname = data.aap.hostname || '';
+    const base = String(hostname).replace(/\/+$/, '');
+    const hubContent = base ? `${base}/api/galaxy/content` : '';
+    data.aap.galaxy_credentials = [
+      {
+        id: 'validated',
+        name: `${org}-validated`,
+        credential_type: 'Ansible Galaxy/Automation Hub API Token',
+        url: hubContent ? `${hubContent}/validated/` : '',
+        auth_url: '',
+        token: '',
+        enabled: true,
+        attach_to_org: true
+      },
+      {
+        id: 'published',
+        name: `${org}-published`,
+        credential_type: 'Ansible Galaxy/Automation Hub API Token',
+        url: hubContent ? `${hubContent}/published/` : '',
+        auth_url: '',
+        token: '',
+        enabled: true,
+        attach_to_org: true
+      },
+      {
+        id: 'community',
+        name: `${org}-community`,
+        credential_type: 'Ansible Galaxy/Automation Hub API Token',
+        url: hubContent ? `${hubContent}/community/` : '',
+        auth_url: '',
+        token: '',
+        enabled: true,
+        attach_to_org: true
+      },
+      {
+        id: 'certified',
+        name: `${org}-certified`,
+        credential_type: 'Ansible Galaxy/Automation Hub API Token',
+        url: hubContent ? `${hubContent}/rh-certified/` : '',
+        auth_url: '',
+        token: '',
+        enabled: true,
+        attach_to_org: true
+      },
+      {
+        id: 'galaxy',
+        name: 'Ansible Galaxy',
+        credential_type: 'Ansible Galaxy/Automation Hub API Token',
+        url: 'https://galaxy.ansible.com/',
+        auth_url: '',
+        token: '',
+        enabled: true,
+        attach_to_org: true
+      }
+    ];
+  }
+  if (!data.aap.container_registry_credential || typeof data.aap.container_registry_credential !== 'object') {
+    const org = data.aap.organization || 'ADO';
+    data.aap.container_registry_credential = {
+      enabled: true,
+      name: `${org}-EE`,
+      credential_type: 'Container Registry',
+      host: String(data.aap.hostname || '').replace(/\/+$/, ''),
+      username: '',
+      password: '',
+      verify_ssl: true
+    };
+  }
   if (!Array.isArray(data.aap.additional_credentials)) data.aap.additional_credentials = [];
   data.aap.additional_credentials = data.aap.additional_credentials.map(({ id, ...credential }) => credential);
   if (!data.aap.machine_credential) data.aap.machine_credential = {};
@@ -1160,9 +1305,14 @@ function pruneSelectedPayload(data, selectedComponentApps) {
   return data;
 }
 
-function configureGitCredentials(repoUrl, token) {
+function configureGitCredentials(repoUrl, token, scmTool = 'gitlab') {
   if (!token) {
     event('No Git token provided; Git push will require existing credentials or anonymous push access');
+    return;
+  }
+
+  if (usesBearerGitAuth(scmTool)) {
+    event(`Configured Bitbucket Bearer token auth for ${new URL(repoUrl).host}`);
     return;
   }
 
@@ -1181,7 +1331,7 @@ function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
       event(eventLabel);
     }
 
-    append(`\n\n$ ${cmd} ${args.join(' ')}\n`);
+    append(`\n\n$ ${cmd} ${redactGitArgsForLog(args).join(' ')}\n`);
 
     const child = spawn(cmd, args, {
       cwd,
@@ -1591,7 +1741,10 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
     `AAP Hub collection update: ${data?.aap?.hub_publish_ado_collection ? 'yes' : 'no'}`,
     `AAP Hub force update: ${data?.aap?.hub_force_ado_collection_update ? 'yes' : 'no'}`,
     `AAP Hub update only: ${data?.aap?.hub_update_collection_only ? 'yes' : 'no'}`,
-    `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`
+    `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`,
+    `AAP Hub EE push: ${data?.aap?.hub_push_ee ? 'yes' : 'no (optional; default off)'}`,
+    `AAP Galaxy credentials setup: ${data?.aap?.galaxy_setup_enabled ? 'yes' : 'no (optional; default off)'}`,
+    `Git SSL verify: ${data?.git?.skip_tls_verify === false ? 'enabled' : 'disabled (default)'}`
   ];
 
   appendListRecap(lines, 'Components', selectedComponentApps);
@@ -1823,6 +1976,7 @@ app.post('/api/bootstrap', async (req, res) => {
 
   const hubUpdateCollectionOnly = data?.aap?.hub_update_collection_only === true;
   const hubPublishRequested = data?.aap?.hub_publish_ado_collection === true || hubUpdateCollectionOnly;
+  const hubPushEeRequested = data?.aap?.hub_push_ee === true;
   const hasAapOAuthToken = Boolean(String(data?.aap?.oauth_token || '').trim());
   const hasAapPasswordAuth = Boolean(
     String(data?.aap?.admin_username || '').trim()
@@ -1835,6 +1989,24 @@ app.post('/api/bootstrap', async (req, res) => {
       status: 'failed',
       exitCode: 2,
       error: 'AAP Hub publishing requires an AAP OAuth Token or Admin Username and Admin Password.'
+    });
+  }
+
+  if (hubPushEeRequested && !hasAapOAuthToken && !hasAapPasswordAuth) {
+    event('Bootstrap failed: AAP Hub EE push needs AAP OAuth token or admin username/password');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'AAP Hub EE push requires an AAP OAuth Token or Admin Username and Admin Password.'
+    });
+  }
+
+  if (hubPushEeRequested && !String(data?.aap?.hub_ee_source_image || '').trim()) {
+    event('Bootstrap failed: AAP Hub EE push needs a source image');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'AAP Hub EE push requires a source image (aap.hub_ee_source_image).'
     });
   }
 
@@ -1857,14 +2029,16 @@ app.post('/api/bootstrap', async (req, res) => {
   const ansibleVerbosity = normalizeVerbosity(data?.ansible?.verbosity ?? data?.verbosity ?? 0);
   const ansibleVerbosityFlag = verbosityFlag(ansibleVerbosity);
   const skipTlsVerify = data?.aap?.skip_tls_verify === true;
+  const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
   const encryptVaultFiles = data?.vault?.encrypt !== false;
-  const bootstrapEnv = buildAnsibleEnv(skipTlsVerify);
+  const bootstrapEnv = buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify);
 
   append(`\nSelected Components: ${selectedComponents}\n`);
   append(`Selected Component Apps: ${selectedComponentApps.join(',')}\n`);
   append(`Auto Git Push: ${autoGitPush}\n`);
   append(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}\n`);
   append(`Skip TLS Verification: ${skipTlsVerify}\n`);
+  append(`Git Skip TLS/SSL Verification: ${gitSkipTlsVerify}\n`);
   append(`Encrypt Vault Files: ${encryptVaultFiles}\n`);
 
   event(`Selected components: ${selectedComponents}`);
@@ -1872,9 +2046,13 @@ app.post('/api/bootstrap', async (req, res) => {
   event(`Auto Git Push: ${autoGitPush}`);
   event(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}`);
   event(`Skip TLS Verification: ${skipTlsVerify}`);
+  event(`Git Skip TLS/SSL Verification: ${gitSkipTlsVerify}`);
   event(`Encrypt vault files: ${encryptVaultFiles}`);
 
-  configureGitCredentials(repoUrl, gitToken);
+  const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
+  const gitUsesBearerAuth = usesBearerGitAuth(scmTool);
+
+  configureGitCredentials(repoUrl, gitToken, scmTool);
 
   const repoDir = path.join(workRoot, 'bootstrap-sample');
   const preflightFile = `ado-preflight-${envName}.json`;
@@ -2036,25 +2214,39 @@ ansible-galaxy collection list
     'Configuring Git user name'
   );
 
-  await runStream(
-    'git',
-    ['config', '--global', 'credential.helper', 'store'],
-    workRoot,
-    'Configuring Git credential helper'
-  );
+  if (!gitUsesBearerAuth) {
+    await runStream(
+      'git',
+      ['config', '--global', 'credential.helper', 'store'],
+      workRoot,
+      'Configuring Git credential helper'
+    );
 
-  await runStream(
-    'git',
-    ['config', '--global', 'credential.useHttpPath', 'false'],
-    workRoot,
-    'Configuring Git credential scope'
-  );
+    await runStream(
+      'git',
+      ['config', '--global', 'credential.useHttpPath', 'false'],
+      workRoot,
+      'Configuring Git credential scope'
+    );
+  }
+
+  const cloneArgs = buildGitCloneArgs({
+    repoUrl,
+    branch: data.aap.git_branch,
+    repoDir,
+    token: gitToken,
+    scmTool,
+    gitSkipTlsVerify
+  });
 
   const cloneCode = await runStream(
     'git',
-    ['-c', 'http.sslVerify=false', 'clone', '--branch', data.aap.git_branch, '--single-branch', repoUrl, repoDir],
+    cloneArgs,
     workRoot,
-    'Cloning Git repository'
+    gitUsesBearerAuth
+      ? 'Cloning Git repository with Authorization Bearer header'
+      : 'Cloning Git repository',
+    buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify)
   );
 
   if (cloneCode !== 0 || !fs.existsSync(repoDir)) {
@@ -2069,6 +2261,15 @@ ansible-galaxy collection list
   }
 
   event('Git repository cloned');
+
+  if (gitUsesBearerAuth && gitToken) {
+    await runStream(
+      'git',
+      ['config', '--local', 'http.extraHeader', gitBearerExtraHeader(gitToken)],
+      repoDir,
+      'Configuring local Bitbucket Bearer auth for push'
+    );
+  }
 
   ensureStarterFiles(repoDir, envName);
 
@@ -2092,6 +2293,9 @@ ansible-galaxy collection list
     component_options: data.component_options || {},
     machine_credential: data.aap.machine_credential || {},
     git_auto_push: autoGitPush,
+    git_skip_tls_verify: gitSkipTlsVerify,
+    scm_tool: scmTool,
+    git_auth_mode: gitUsesBearerAuth ? 'bearer' : 'basic',
     skip_tls_verify: skipTlsVerify,
     ansible_tls_verify: skipTlsVerify ? 'false' : 'true',
     ansible_verbosity: ansibleVerbosity,
@@ -2117,11 +2321,16 @@ export TOWER_VERIFY_SSL=false
 export REQUESTS_CA_BUNDLE=
 export CURL_CA_BUNDLE=
 export PYTHONHTTPSVERIFY=0
-export GIT_SSL_NO_VERIFY=true
+${gitSkipTlsVerify ? 'export GIT_SSL_NO_VERIFY=true' : 'unset GIT_SSL_NO_VERIFY || true'}
 
 cd ${repoDir}
 
-git config http.sslVerify false || true
+${gitSkipTlsVerify
+  ? 'git config --local http.sslVerify false || true'
+  : 'git config --local http.sslVerify true || true'}
+${gitUsesBearerAuth && gitToken
+  ? `git config --local http.extraHeader ${JSON.stringify(gitBearerExtraHeader(gitToken))} || true`
+  : ''}
 
 echo ""
 echo "=== Remove old generated bootstrap content ==="
@@ -2161,6 +2370,10 @@ ansible-playbook \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_commit=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\
+  -e generate_playbook_repo_git_ssl_verify=${gitSkipTlsVerify ? 'false' : 'true'} \\
+  -e bootstrap_generate_playbook_repo_git_ssl_verify=${gitSkipTlsVerify ? 'false' : 'true'} \\
+  -e generate_playbook_repo_git_auth_mode=${gitUsesBearerAuth ? 'bearer' : 'basic'} \\
+  -e bootstrap_generate_playbook_repo_git_auth_mode=${gitUsesBearerAuth ? 'bearer' : 'basic'} \\
   -e generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e bootstrap_generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e generate_playbook_repo_git_commit_message="Generate ADO bootstrap content for ${envName}" \\
@@ -2190,6 +2403,7 @@ ansible-playbook \\
     ansibleVerbosity,
     ansibleVerbosityFlag,
     skipTlsVerify,
+    gitSkipTlsVerify,
     encryptVaultFiles,
     bootstrapRecap,
     gitTokenProvided: Boolean(gitToken)

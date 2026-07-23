@@ -174,6 +174,79 @@ const agentInstallerDefaults = {
   nodes: [0, 1, 2].map(defaultAgentInstallerNode)
 };
 
+const buildDefaultGalaxyCredentials = (org = 'ADO', hostname = '') => {
+  const prefix = (org || 'ADO').trim() || 'ADO';
+  const base = String(hostname || '').replace(/\/+$/, '');
+  const hubContent = base ? `${base}/api/galaxy/content` : '';
+
+  return [
+    {
+      id: 'validated',
+      name: `${prefix}-validated`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/validated/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true
+    },
+    {
+      id: 'published',
+      name: `${prefix}-published`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/published/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true
+    },
+    {
+      id: 'community',
+      name: `${prefix}-community`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/community/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true
+    },
+    {
+      id: 'certified',
+      name: `${prefix}-certified`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/rh-certified/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true
+    },
+    {
+      id: 'galaxy',
+      name: 'Ansible Galaxy',
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: 'https://galaxy.ansible.com/',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true
+    }
+  ];
+};
+
+const buildDefaultContainerRegistryCredential = (org = 'ADO', hostname = '') => {
+  const prefix = (org || 'ADO').trim() || 'ADO';
+  const base = String(hostname || '').replace(/\/+$/, '');
+  return {
+    enabled: true,
+    name: `${prefix}-EE`,
+    credential_type: 'Container Registry',
+    host: base || '',
+    username: '',
+    password: '',
+    verify_ssl: true
+  };
+};
+
 const defaults = {
   scm_tool: 'gitlab',
   environment: 'prod',
@@ -185,6 +258,7 @@ const defaults = {
 
   git: {
     auto_push: true,
+    skip_tls_verify: true,
     token: ''
   },
 
@@ -377,6 +451,31 @@ const defaults = {
     hub_mark_ado_validated: true,
     hub_force_ado_collection_update: false,
     hub_update_collection_only: false,
+    // Optional Hub EE mirror — uses local podman image only (never pulls from internet)
+    hub_push_ee: false,
+    hub_ee_source_image: 'ghcr.io/automation-development-office/ado-ee:latest',
+    hub_ee_name: 'ado-ee',
+    hub_ee_tag: 'latest',
+    hub_ee_registry: '',
+    hub_ee_pull: false,
+    hub_ee_create_execution_environment: true,
+    hub_ee_execution_environment_name: '',
+    hub_ee_description: '',
+    // Optional Galaxy/Hub credentials + org association (default off for disconnected)
+    galaxy_setup_enabled: false,
+    galaxy_hub_token: '',
+    galaxy_user_account: {
+      enabled: false,
+      username: '',
+      password: '',
+      email: '',
+      is_superuser: false
+    },
+    galaxy_credentials: buildDefaultGalaxyCredentials('ADO', 'https://aap-aap.apps.ocp.prod.rhlab'),
+    container_registry_credential: buildDefaultContainerRegistryCredential(
+      'ADO',
+      'https://aap-aap.apps.ocp.prod.rhlab'
+    ),
     additional_credentials: [],
     machine_credential: {
       name: 'ADO-machine',
@@ -507,6 +606,7 @@ function App() {
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
   const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
+  const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
   const [importStatus, setImportStatus] = useState('');
@@ -753,6 +853,14 @@ function App() {
 
   const credentialTabKey = (credential, index) => credential.id || `credential-${index}`;
 
+  const DEFAULT_AAP_EXECUTION_ENVIRONMENT = 'ee-supported-rhel9';
+
+  const resolveHubExecutionEnvironmentName = aap => {
+    const custom = String(aap?.hub_ee_execution_environment_name || '').trim();
+    if (custom) return custom;
+    return String(aap?.hub_ee_name || 'ado-ee').trim() || 'ado-ee';
+  };
+
   const setAapHubValidated = value => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
@@ -760,6 +868,44 @@ function App() {
       copy.aap.hub_publish_ado_collection = value;
       copy.aap.hub_mark_ado_validated = value;
       if (!value) copy.aap.hub_update_collection_only = false;
+      return copy;
+    });
+  };
+
+  const setAapHubPushEe = value => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      const previousHubEe = resolveHubExecutionEnvironmentName(copy.aap);
+      copy.aap.hub_push_ee = value === true;
+      if (copy.aap.hub_push_ee) {
+        copy.aap.execution_environment = resolveHubExecutionEnvironmentName(copy.aap);
+      } else if (
+        !copy.aap.execution_environment
+        || copy.aap.execution_environment === previousHubEe
+      ) {
+        copy.aap.execution_environment = DEFAULT_AAP_EXECUTION_ENVIRONMENT;
+      }
+      return copy;
+    });
+  };
+
+  const setAapHubEeNameField = (field, value) => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      const previousHubEe = resolveHubExecutionEnvironmentName(copy.aap);
+      copy.aap[field] = value;
+      if (copy.aap.hub_push_ee) {
+        const nextHubEe = resolveHubExecutionEnvironmentName(copy.aap);
+        if (
+          !copy.aap.execution_environment
+          || copy.aap.execution_environment === previousHubEe
+          || copy.aap.execution_environment === DEFAULT_AAP_EXECUTION_ENVIRONMENT
+        ) {
+          copy.aap.execution_environment = nextHubEe;
+        }
+      }
       return copy;
     });
   };
@@ -800,6 +946,36 @@ function App() {
       if (!copy.aap.machine_credential) copy.aap.machine_credential = {};
       if (!copy.aap.machine_credential.name || copy.aap.machine_credential.name === oldNames.machine_credential_name) {
         copy.aap.machine_credential.name = newNames.machine_credential_name;
+      }
+
+      const oldPrefix = (previous || 'ADO').trim() || 'ADO';
+      const newPrefix = (value || 'ADO').trim() || 'ADO';
+      if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
+        copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(newPrefix, copy.aap.hostname);
+      } else {
+        copy.aap.galaxy_credentials = copy.aap.galaxy_credentials.map(credential => {
+          if (!credential || credential.id === 'galaxy' || credential.name === 'Ansible Galaxy') {
+            return credential;
+          }
+          const next = { ...credential };
+          if (!next.name || next.name === `${oldPrefix}-${next.id}` || next.name.startsWith(`${oldPrefix}-`)) {
+            next.name = `${newPrefix}-${next.id || 'galaxy'}`;
+            if (next.id === 'validated') next.name = `${newPrefix}-validated`;
+            if (next.id === 'published') next.name = `${newPrefix}-published`;
+            if (next.id === 'community') next.name = `${newPrefix}-community`;
+            if (next.id === 'certified') next.name = `${newPrefix}-certified`;
+          }
+          return next;
+        });
+      }
+      if (!copy.aap.container_registry_credential) {
+        copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(newPrefix, copy.aap.hostname);
+      } else {
+        const registry = { ...copy.aap.container_registry_credential };
+        if (!registry.name || registry.name === `${oldPrefix}-EE`) {
+          registry.name = `${newPrefix}-EE`;
+        }
+        copy.aap.container_registry_credential = registry;
       }
 
       return copy;
@@ -1029,9 +1205,43 @@ function App() {
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
+    if (merged.aap.hub_push_ee === undefined) merged.aap.hub_push_ee = false;
+    if (merged.aap.hub_ee_source_image === undefined) {
+      merged.aap.hub_ee_source_image = defaults.aap.hub_ee_source_image;
+    }
+    if (merged.aap.hub_ee_name === undefined) merged.aap.hub_ee_name = defaults.aap.hub_ee_name;
+    if (merged.aap.hub_ee_tag === undefined) merged.aap.hub_ee_tag = defaults.aap.hub_ee_tag;
+    if (merged.aap.hub_ee_registry === undefined) merged.aap.hub_ee_registry = '';
+    if (merged.aap.hub_ee_pull === undefined) merged.aap.hub_ee_pull = false;
+    merged.aap.hub_ee_pull = false;
+    if (merged.aap.hub_ee_create_execution_environment === undefined) {
+      merged.aap.hub_ee_create_execution_environment = true;
+    }
+    if (merged.aap.hub_ee_execution_environment_name === undefined) {
+      merged.aap.hub_ee_execution_environment_name = '';
+    }
+    if (merged.aap.hub_ee_description === undefined) merged.aap.hub_ee_description = '';
+    if (merged.aap.galaxy_setup_enabled === undefined) merged.aap.galaxy_setup_enabled = false;
+    if (merged.aap.galaxy_hub_token === undefined) merged.aap.galaxy_hub_token = '';
+    if (!merged.aap.galaxy_user_account) {
+      merged.aap.galaxy_user_account = { ...defaults.aap.galaxy_user_account };
+    }
+    if (!Array.isArray(merged.aap.galaxy_credentials) || merged.aap.galaxy_credentials.length === 0) {
+      merged.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
+        merged.aap.organization || 'ADO',
+        merged.aap.hostname || ''
+      );
+    }
+    if (!merged.aap.container_registry_credential) {
+      merged.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
+        merged.aap.organization || 'ADO',
+        merged.aap.hostname || ''
+      );
+    }
 
     if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
     if (!merged.git) merged.git = { ...defaults.git };
+    if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
     if (!merged.collections) merged.collections = { ...defaults.collections };
     if (!merged.tools) merged.tools = { ...defaults.tools };
@@ -1118,6 +1328,8 @@ function App() {
       payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
       if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = false;
       if (payload.aap.hub_update_collection_only === undefined) payload.aap.hub_update_collection_only = false;
+      if (payload.aap.hub_push_ee === undefined) payload.aap.hub_push_ee = false;
+      payload.aap.hub_ee_pull = false;
       if (payload.aap.hub_update_collection_only === true) {
         payload.aap.hub_publish_ado_collection = true;
         payload.aap.hub_mark_ado_validated = true;
@@ -1224,6 +1436,19 @@ function App() {
 
       copy.components = next;
       copy.component = next.length === 0 ? '' : next[0];
+
+      if (!copy.component_apps) copy.component_apps = {};
+      if (component === 'provision') {
+        if (!wasSelected) {
+          // Default to OpenShift Virt so bootstrap creates the provision JT.
+          const currentApps = copy.component_apps.provision || [];
+          copy.component_apps.provision = currentApps.includes('openshift_virt')
+            ? currentApps
+            : [...currentApps, 'openshift_virt'];
+        } else {
+          copy.component_apps.provision = [];
+        }
+      }
 
       if (!copy.jira) copy.jira = {};
       copy.jira.enabled = next.includes('all') || next.includes('jira');
@@ -1898,7 +2123,7 @@ function App() {
     apiHost: 'OpenShift API server URL for the virtualization cluster. Example: https://api.ocp.prod.rhlab:6443.',
     apiToken: 'OpenShift token used to create the VM. Stored in generated vault files.',
     skipTls: 'Skip OpenShift API certificate validation for self-signed or lab certificates.',
-    sshPublicKey: 'Public SSH key attached to the VM job template and added to the launch-time cloud-init user.'
+    sshPublicKey: 'SSH public key (ssh-rsa / ssh-ed25519), not a private key. Attached to the VM job template and added to launch-time cloud-init.'
   };
 
   const openshiftHelp = {
@@ -2979,6 +3204,12 @@ echo $TOKEN
           'Provisioning Options',
           'Select which provisioning targets to include.'
         )}
+
+        <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '8px', marginBottom: '8px' }}>
+          Select <code>openshift_virt</code> to create the AAP job template{' '}
+          <code>{(data.aap?.organization || 'ADO')} | Provision OpenShift Virt VM</code>.
+          Search AAP for <code>Provision OpenShift Virt</code> (avoid a trailing <code>|</code> in the filter).
+        </div>
 
         {(data.component_apps?.provision || []).includes('openshift_virt') && (
         <div
@@ -4727,6 +4958,11 @@ ${vaultYaml}
                       />
                     )}
                   </FormGroup>
+                  {data.scm_tool === 'bitbucket' && (
+                    <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
+                      Bitbucket uses <code>Authorization: Bearer</code> for git clone/push.
+                    </p>
+                  )}
 
                   <br />
 
@@ -4735,6 +4971,18 @@ ${vaultYaml}
                     isChecked={data.git.auto_push}
                     onChange={(_, v) => set('git.auto_push', v)}
                   />
+
+                  <br />
+
+                  <Checkbox
+                    id="git-skip-tls-verify"
+                    label="Skip TLS/SSL verification for Git (self-signed certificates)"
+                    isChecked={data.git.skip_tls_verify !== false}
+                    onChange={(_, v) => set('git.skip_tls_verify', v)}
+                  />
+                  <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
+                    Default is SSL verification disabled. When checked, local git uses <code>http.sslVerify=false</code>.
+                  </p>
                 </GridItem>
 
                 <GridItem span={8}>
@@ -4784,55 +5032,408 @@ ${vaultYaml}
               {data.aap.enabled && aapOpen && (
                 <>
                   <br />
-                  <Grid hasGutter>
-                    <GridItem span={6}><FormGroup label="AAP Hostname URL"><TextInput value={data.aap.hostname} onChange={(_, v) => set('aap.hostname', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="AAP Version"><select value={data.aap.version} onChange={e => set('aap.version', e.target.value)} style={{ width: '100%', padding: '8px' }}><option value="24">2.4</option><option value="25">2.5</option><option value="26">2.6</option></select></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Organization Name"><TextInput value={data.aap.organization} onChange={(_, v) => setAapOrganization(v)} /></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Inventory Name"><TextInput value={data.aap.inventory} onChange={(_, v) => set('aap.inventory', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Project Name"><TextInput value={data.aap.project} onChange={(_, v) => set('aap.project', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Execution Environment"><TextInput value={data.aap.execution_environment} onChange={(_, v) => set('aap.execution_environment', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}>
-                      <FormGroup label="OAuth Token">
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          <TextInput type={showAapOauthToken ? 'text' : 'password'} value={data.aap.oauth_token} onChange={(_, v) => set('aap.oauth_token', v)} />
-                          <Button variant="secondary" onClick={() => setShowAapOauthToken(!showAapOauthToken)}>{showAapOauthToken ? 'Hide' : 'Show'}</Button>
-                        </div>
-                      </FormGroup>
-                    </GridItem>
+                  <Tabs activeKey={activeAapConfigTab} onSelect={(_, key) => setActiveAapConfigTab(key)}>
+                    <Tab eventKey="general" title="General" />
+                    <Tab eventKey="hub" title="Hub" />
+                    <Tab eventKey="galaxy" title="Galaxy" />
+                  </Tabs>
+                  <br />
+                  {activeAapConfigTab === 'general' && (
+                    <Grid hasGutter>
+                      <GridItem span={6}><FormGroup label="AAP Hostname URL"><TextInput value={data.aap.hostname} onChange={(_, v) => set('aap.hostname', v)} /></FormGroup></GridItem>
+                      <GridItem span={6}><FormGroup label="AAP Version"><select value={data.aap.version} onChange={e => set('aap.version', e.target.value)} style={{ width: '100%', padding: '8px' }}><option value="24">2.4</option><option value="25">2.5</option><option value="26">2.6</option></select></FormGroup></GridItem>
+                      <GridItem span={6}><FormGroup label="Organization Name"><TextInput value={data.aap.organization} onChange={(_, v) => setAapOrganization(v)} /></FormGroup></GridItem>
+                      <GridItem span={6}><FormGroup label="Inventory Name"><TextInput value={data.aap.inventory} onChange={(_, v) => set('aap.inventory', v)} /></FormGroup></GridItem>
+                      <GridItem span={6}><FormGroup label="Project Name"><TextInput value={data.aap.project} onChange={(_, v) => set('aap.project', v)} /></FormGroup></GridItem>
+                      <GridItem span={6}>
+                        <FormGroup label="Execution Environment">
+                          {data.aap.hub_push_ee ? (() => {
+                            const hubEe = resolveHubExecutionEnvironmentName(data.aap);
+                            const options = [...new Set([hubEe, DEFAULT_AAP_EXECUTION_ENVIRONMENT, data.aap.execution_environment].filter(Boolean))];
+                            const selected = options.includes(data.aap.execution_environment)
+                              ? data.aap.execution_environment
+                              : hubEe;
+                            return (
+                              <select
+                                value={selected}
+                                onChange={e => set('aap.execution_environment', e.target.value)}
+                                style={{ width: '100%', padding: '8px' }}
+                              >
+                                {options.map(option => (
+                                  <option key={option} value={option}>{option}</option>
+                                ))}
+                              </select>
+                            );
+                          })() : (
+                            <TextInput
+                              value={data.aap.execution_environment}
+                              onChange={(_, v) => set('aap.execution_environment', v)}
+                            />
+                          )}
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={6}>
+                        <FormGroup label="OAuth Token">
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <TextInput type={showAapOauthToken ? 'text' : 'password'} value={data.aap.oauth_token} onChange={(_, v) => set('aap.oauth_token', v)} />
+                            <Button variant="secondary" onClick={() => setShowAapOauthToken(!showAapOauthToken)}>{showAapOauthToken ? 'Hide' : 'Show'}</Button>
+                          </div>
+                        </FormGroup>
+                      </GridItem>
 
-                    <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}><FormGroup label="Admin Password"><TextInput type="password" value={data.aap.admin_password} onChange={(_, v) => set('aap.admin_password', v)} /></FormGroup></GridItem>
-                    <GridItem span={6}>
-                      <FormGroup label="TLS Certificate Verification">
-                        <Checkbox
-                          label="Skip TLS certificate verification for self-signed certificates"
-                          isChecked={data.aap.skip_tls_verify}
-                          onChange={(_, v) => set('aap.skip_tls_verify', v)}
-                        />
-                      </FormGroup>
-                    </GridItem>
-                    <GridItem span={6}>
-                      <FormGroup label="AAP Hub">
-                        <Checkbox
-                          label="Update infra.ado collection in validated AAP Hub content"
-                          isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
-                          onChange={(_, v) => setAapHubValidated(v)}
-                        />
-                        <Checkbox
-                          label="Force update infra.ado collection in validated content"
-                          isChecked={data.aap.hub_force_ado_collection_update}
-                          isDisabled={!data.aap.hub_publish_ado_collection}
-                          onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
-                        />
-                        <Checkbox
-                          label="Update collection only"
-                          isChecked={data.aap.hub_update_collection_only}
-                          isDisabled={!data.aap.hub_publish_ado_collection}
-                          onChange={(_, v) => set('aap.hub_update_collection_only', v)}
-                        />
-                      </FormGroup>
-                    </GridItem>
-                  </Grid>
+                      <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
+                      <GridItem span={6}><FormGroup label="Admin Password"><TextInput type="password" value={data.aap.admin_password} onChange={(_, v) => set('aap.admin_password', v)} /></FormGroup></GridItem>
+                      <GridItem span={6}>
+                        <FormGroup label="TLS Certificate Verification">
+                          <Checkbox
+                            label="Skip TLS certificate verification for self-signed certificates"
+                            isChecked={data.aap.skip_tls_verify}
+                            onChange={(_, v) => set('aap.skip_tls_verify', v)}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                    </Grid>
+                  )}
+                  {activeAapConfigTab === 'hub' && (
+                    <Grid hasGutter>
+                      <GridItem span={12}>
+                        <FormGroup label="Collections">
+                          <Checkbox
+                            label="Update infra.ado collection in validated AAP Hub content"
+                            isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
+                            onChange={(_, v) => setAapHubValidated(v)}
+                          />
+                          <Checkbox
+                            label="Force update infra.ado collection in validated content"
+                            isChecked={data.aap.hub_force_ado_collection_update}
+                            isDisabled={!data.aap.hub_publish_ado_collection}
+                            onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
+                          />
+                          <Checkbox
+                            label="Update collection only"
+                            isChecked={data.aap.hub_update_collection_only}
+                            isDisabled={!data.aap.hub_publish_ado_collection}
+                            onChange={(_, v) => set('aap.hub_update_collection_only', v)}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={12}>
+                        <FormGroup label="Execution environment (optional)">
+                          <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
+                            Requires the source image already present locally (for example via <code>podman images</code>). Never pulls from the internet — only tags and pushes the local image to Private Automation Hub.
+                          </p>
+                          <Checkbox
+                            id="aap-hub-push-ee"
+                            label="Push local ado-ee image to AAP Hub (optional)"
+                            isChecked={data.aap.hub_push_ee === true}
+                            onChange={(_, v) => setAapHubPushEe(v)}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      {data.aap.hub_push_ee && (
+                        <>
+                          <GridItem span={8}>
+                            <FormGroup label="Source image (must exist locally)">
+                              <TextInput
+                                value={data.aap.hub_ee_source_image}
+                                onChange={(_, v) => set('aap.hub_ee_source_image', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          <GridItem span={4}>
+                            <FormGroup label="Hub EE name">
+                              <TextInput
+                                value={data.aap.hub_ee_name}
+                                onChange={(_, v) => setAapHubEeNameField('hub_ee_name', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          <GridItem span={4}>
+                            <FormGroup label="Tag">
+                              <TextInput
+                                value={data.aap.hub_ee_tag}
+                                onChange={(_, v) => set('aap.hub_ee_tag', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          <GridItem span={8}>
+                            <FormGroup
+                              label={(
+                                <span>
+                                  Hub registry host (optional)
+                                  <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                    {' — Defaults to the AAP hostname when empty'}
+                                  </span>
+                                </span>
+                              )}
+                            >
+                              <TextInput
+                                value={data.aap.hub_ee_registry}
+                                onChange={(_, v) => set('aap.hub_ee_registry', v)}
+                                placeholder="hub.example.com"
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          <GridItem span={12}>
+                            <Checkbox
+                              id="aap-hub-ee-create-ee"
+                              label="Create Controller execution environment after push"
+                              isChecked={data.aap.hub_ee_create_execution_environment !== false}
+                              onChange={(_, v) => set('aap.hub_ee_create_execution_environment', v)}
+                            />
+                          </GridItem>
+                          {data.aap.hub_ee_create_execution_environment !== false && (
+                            <GridItem span={6}>
+                              <FormGroup
+                                label={(
+                                  <span>
+                                    Controller EE name
+                                    <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                      {' — Defaults to Hub EE name when empty'}
+                                    </span>
+                                  </span>
+                                )}
+                              >
+                                <TextInput
+                                  value={data.aap.hub_ee_execution_environment_name}
+                                  onChange={(_, v) => setAapHubEeNameField('hub_ee_execution_environment_name', v)}
+                                />
+                              </FormGroup>
+                            </GridItem>
+                          )}
+                          <GridItem span={12}>
+                            <FormGroup label="Hub EE description (optional)">
+                              <TextInput
+                                value={data.aap.hub_ee_description}
+                                onChange={(_, v) => set('aap.hub_ee_description', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                        </>
+                      )}
+                    </Grid>
+                  )}
+                  {activeAapConfigTab === 'galaxy' && (
+                    <Grid hasGutter>
+                      <GridItem span={12}>
+                        <FormGroup label="Galaxy / Hub credentials">
+                          <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
+                            Optional for disconnected sites. Creates Galaxy API Token credentials, an optional Container Registry credential, attaches Galaxy creds to the organization, and can create a Controller user account.
+                          </p>
+                          <Checkbox
+                            id="aap-galaxy-setup-enabled"
+                            label="Configure Galaxy credentials and attach them to the organization"
+                            isChecked={data.aap.galaxy_setup_enabled === true}
+                            onChange={(_, v) => {
+                              setData(prev => {
+                                const copy = JSON.parse(JSON.stringify(prev));
+                                if (!copy.aap) copy.aap = {};
+                                copy.aap.galaxy_setup_enabled = v === true;
+                                if (v) {
+                                  if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
+                                    copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
+                                      copy.aap.organization || 'ADO',
+                                      copy.aap.hostname || ''
+                                    );
+                                  }
+                                  if (!copy.aap.container_registry_credential) {
+                                    copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
+                                      copy.aap.organization || 'ADO',
+                                      copy.aap.hostname || ''
+                                    );
+                                  } else if (!copy.aap.container_registry_credential.host) {
+                                    copy.aap.container_registry_credential.host = String(copy.aap.hostname || '').replace(/\/+$/, '');
+                                  }
+                                }
+                                return copy;
+                              });
+                            }}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      {data.aap.galaxy_setup_enabled && (
+                        <>
+                          <GridItem span={12}>
+                            <FormGroup label="Controller user account (optional)">
+                              <Checkbox
+                                id="aap-galaxy-user-enabled"
+                                label="Create a Controller user with password in this organization"
+                                isChecked={data.aap.galaxy_user_account?.enabled === true}
+                                onChange={(_, v) => set('aap.galaxy_user_account.enabled', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          {data.aap.galaxy_user_account?.enabled && (
+                            <>
+                              <GridItem span={4}>
+                                <FormGroup label="Username">
+                                  <TextInput
+                                    value={data.aap.galaxy_user_account.username}
+                                    onChange={(_, v) => set('aap.galaxy_user_account.username', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={4}>
+                                <FormGroup label="Password">
+                                  <TextInput
+                                    type="password"
+                                    value={data.aap.galaxy_user_account.password}
+                                    onChange={(_, v) => set('aap.galaxy_user_account.password', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={4}>
+                                <FormGroup label="Email (optional)">
+                                  <TextInput
+                                    value={data.aap.galaxy_user_account.email}
+                                    onChange={(_, v) => set('aap.galaxy_user_account.email', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                            </>
+                          )}
+                          <GridItem span={12}>
+                            <FormGroup
+                              label={(
+                                <span>
+                                  Shared Hub API token
+                                  <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                    {' — used for Hub repo credentials when their token is empty'}
+                                  </span>
+                                </span>
+                              )}
+                            >
+                              <TextInput
+                                type="password"
+                                value={data.aap.galaxy_hub_token}
+                                onChange={(_, v) => set('aap.galaxy_hub_token', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          {(data.aap.galaxy_credentials || []).map((credential, index) => (
+                            <GridItem span={12} key={credential.id || `galaxy-cred-${index}`}>
+                              <Card style={{ boxShadow: 'none', border: '1px solid #d2d2d2' }}>
+                                <CardBody>
+                                  <Grid hasGutter>
+                                    <GridItem span={12}>
+                                      <Checkbox
+                                        id={`aap-galaxy-cred-enabled-${index}`}
+                                        label={`Create ${credential.name || 'credential'}`}
+                                        isChecked={credential.enabled !== false}
+                                        onChange={(_, v) => set(`aap.galaxy_credentials.${index}.enabled`, v)}
+                                      />
+                                    </GridItem>
+                                    {credential.enabled !== false && (
+                                      <>
+                                        <GridItem span={4}>
+                                          <FormGroup label="Name">
+                                            <TextInput
+                                              value={credential.name}
+                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.name`, v)}
+                                            />
+                                          </FormGroup>
+                                        </GridItem>
+                                        <GridItem span={8}>
+                                          <FormGroup label="Galaxy Server URL">
+                                            <TextInput
+                                              value={credential.url}
+                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.url`, v)}
+                                            />
+                                          </FormGroup>
+                                        </GridItem>
+                                        <GridItem span={6}>
+                                          <FormGroup label="Auth Server URL (optional)">
+                                            <TextInput
+                                              value={credential.auth_url || ''}
+                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.auth_url`, v)}
+                                            />
+                                          </FormGroup>
+                                        </GridItem>
+                                        <GridItem span={6}>
+                                          <FormGroup label="API Token (optional override)">
+                                            <TextInput
+                                              type="password"
+                                              value={credential.token || ''}
+                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.token`, v)}
+                                            />
+                                          </FormGroup>
+                                        </GridItem>
+                                        <GridItem span={12}>
+                                          <Checkbox
+                                            id={`aap-galaxy-cred-attach-${index}`}
+                                            label="Attach to organization Galaxy credentials"
+                                            isChecked={credential.attach_to_org !== false}
+                                            onChange={(_, v) => set(`aap.galaxy_credentials.${index}.attach_to_org`, v)}
+                                          />
+                                        </GridItem>
+                                      </>
+                                    )}
+                                  </Grid>
+                                </CardBody>
+                              </Card>
+                            </GridItem>
+                          ))}
+                          <GridItem span={12}>
+                            <FormGroup label="Container Registry credential (EE pull)">
+                              <Checkbox
+                                id="aap-galaxy-ee-registry-enabled"
+                                label={`Create ${data.aap.container_registry_credential?.name || 'ADO-EE'} (Container Registry)`}
+                                isChecked={data.aap.container_registry_credential?.enabled !== false}
+                                onChange={(_, v) => set('aap.container_registry_credential.enabled', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          {data.aap.container_registry_credential?.enabled !== false && (
+                            <>
+                              <GridItem span={4}>
+                                <FormGroup label="Name">
+                                  <TextInput
+                                    value={data.aap.container_registry_credential.name}
+                                    onChange={(_, v) => set('aap.container_registry_credential.name', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={8}>
+                                <FormGroup label="Registry host">
+                                  <TextInput
+                                    value={data.aap.container_registry_credential.host}
+                                    onChange={(_, v) => set('aap.container_registry_credential.host', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={4}>
+                                <FormGroup label="Username">
+                                  <TextInput
+                                    value={data.aap.container_registry_credential.username}
+                                    onChange={(_, v) => set('aap.container_registry_credential.username', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={4}>
+                                <FormGroup label="Password / token">
+                                  <TextInput
+                                    type="password"
+                                    value={data.aap.container_registry_credential.password}
+                                    onChange={(_, v) => set('aap.container_registry_credential.password', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={4}>
+                                <FormGroup label="TLS">
+                                  <Checkbox
+                                    id="aap-galaxy-ee-verify-ssl"
+                                    label="Verify SSL"
+                                    isChecked={data.aap.container_registry_credential.verify_ssl !== false}
+                                    onChange={(_, v) => set('aap.container_registry_credential.verify_ssl', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </Grid>
+                  )}
                 </>
               )}
             </CardBody>
