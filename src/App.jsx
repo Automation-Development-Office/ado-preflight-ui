@@ -36,6 +36,20 @@ const openshiftApps = [
   'oadp','openshift','pega','quay','rhbk'
 ];
 
+const DEFAULT_SURVEY_ENVIRONMENTS = ['dev', 'test', 'preprod', 'prod'];
+
+// Components with simple env/state surveys where operators can edit env choices.
+// Excluded: satellite, openshift_virt/provision, rhel/patching/compliance/stig, jira
+// (those already have large forms or complex surveys).
+const SURVEY_ENV_EDITABLE_COMPONENTS = new Set([
+  'aap', 'acs', 'acm', 'cert_manager', 'console', 'devspaces', 'dirsrv', 'eck',
+  'gitops', 'gitlab', 'grafana', 'idm', 'kafka', 'oadp', 'pega', 'quay', 'rhbk',
+  'rhbk_client', 'rhbk_idp', 'rhbk_realm', 'rhbk_federation',
+  'admin_htpasswd', 'openshift_ldap_auth', 'openshift_oauth_rhbk',
+  'openshift_discover_routes_print', 'openshift_discover_routes_alt',
+  'openshift_update_pull_secret'
+]);
+
 const rhelApps = [
   'rhel','satellite','idm','aap','dirsrv',
   'eck','gitlab','grafana','kafka','rhbk',
@@ -263,6 +277,10 @@ const defaults = {
     username: 'oauth2'
   },
 
+  vault: {
+    encrypt: true
+  },
+
   components: [],
 
   component_apps: {
@@ -416,6 +434,9 @@ const defaults = {
     stig: ['rhel_9_stig']
   },
 
+  // Per-component AAP survey env choices (simple env/state surveys only)
+  component_survey: {},
+
   collections: {
     infra_ado: true,
     ansible_controller: true,
@@ -452,7 +473,7 @@ const defaults = {
     project_sync_retries: 20,
     project_sync_delay: 5,
     project_playbook_wait_seconds: 45,
-    // Hub publishing removed from UI — always skipped in bootstrap
+    // Hub actions are optional (off by default). Stock ee-supported-* is never pushed/managed.
     hub_publish_ado_collection: false,
     hub_mark_ado_validated: false,
     hub_force_ado_collection_update: false,
@@ -624,6 +645,7 @@ function App() {
   const [agentInstallerProfiles, setAgentInstallerProfiles] = useState([]);
   const outputRef = useRef(null);
   const importFileRef = useRef(null);
+  const publishFileRef = useRef(null);
 
   const isDark = theme === 'dark';
 
@@ -1212,12 +1234,11 @@ function App() {
     if (merged.aap.project_sync_retries === undefined) merged.aap.project_sync_retries = 20;
     if (merged.aap.project_sync_delay === undefined) merged.aap.project_sync_delay = 5;
     if (merged.aap.project_playbook_wait_seconds === undefined) merged.aap.project_playbook_wait_seconds = 45;
-    // Hub publishing removed — force off on import
-    merged.aap.hub_publish_ado_collection = false;
-    merged.aap.hub_mark_ado_validated = false;
-    merged.aap.hub_force_ado_collection_update = false;
-    merged.aap.hub_update_collection_only = false;
-    merged.aap.hub_push_ee = false;
+    if (merged.aap.hub_publish_ado_collection === undefined) merged.aap.hub_publish_ado_collection = false;
+    if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
+    if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
+    if (merged.aap.hub_push_ee === undefined) merged.aap.hub_push_ee = false;
+    merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.hub_ee_source_image === undefined) {
       merged.aap.hub_ee_source_image = defaults.aap.hub_ee_source_image;
     }
@@ -1259,6 +1280,24 @@ function App() {
     } else if (!merged.git.username) {
       merged.git.username = 'oauth2';
     }
+    if (!merged.vault) merged.vault = { ...defaults.vault };
+    if (merged.vault.encrypt === undefined) merged.vault.encrypt = true;
+    if (!merged.component_survey || typeof merged.component_survey !== 'object') {
+      merged.component_survey = {};
+    }
+    Object.entries(merged.component_survey).forEach(([component, survey]) => {
+      if (!survey || typeof survey !== 'object') {
+        merged.component_survey[component] = { environments: [...DEFAULT_SURVEY_ENVIRONMENTS] };
+        return;
+      }
+      if (!Array.isArray(survey.environments) || survey.environments.length === 0) {
+        survey.environments = [...DEFAULT_SURVEY_ENVIRONMENTS];
+      } else {
+        survey.environments = survey.environments
+          .map(value => String(value || '').trim())
+          .filter(Boolean);
+      }
+    });
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
     if (!merged.collections) merged.collections = { ...defaults.collections };
     if (!merged.tools) merged.tools = { ...defaults.tools };
@@ -1309,8 +1348,8 @@ function App() {
     }
   };
 
-  const buildPreflightPayload = () => {
-    const payload = hydrateSelectedComponentConfigs(pruneInactiveComponentApps(data));
+  const buildPreflightPayload = (source = data) => {
+    const payload = hydrateSelectedComponentConfigs(pruneInactiveComponentApps(source));
     const selectedApps = selectedComponentAppsFrom(payload);
     const selectedGroups = Array.isArray(payload.components) ? payload.components : [];
     const allowedConfig = new Set([...selectedApps, ...selectedGroups]);
@@ -1342,13 +1381,22 @@ function App() {
       payload.aap.vault_credential_name = normalizeOrgScopedName(payload.aap.vault_credential_name, org, 'vault');
       if (!payload.aap.machine_credential) payload.aap.machine_credential = {};
       payload.aap.machine_credential.name = normalizeOrgScopedName(payload.aap.machine_credential.name, org, 'machine');
-      // Hub publishing removed — never publish/push Hub during bootstrap
-      payload.aap.hub_publish_ado_collection = false;
-      payload.aap.hub_mark_ado_validated = false;
-      payload.aap.hub_force_ado_collection_update = false;
-      payload.aap.hub_update_collection_only = false;
-      payload.aap.hub_push_ee = false;
+      payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
+      if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = false;
+      if (payload.aap.hub_update_collection_only === undefined) payload.aap.hub_update_collection_only = false;
+      if (payload.aap.hub_push_ee === undefined) payload.aap.hub_push_ee = false;
       payload.aap.hub_ee_pull = false;
+      if (payload.aap.hub_update_collection_only === true) {
+        payload.aap.hub_publish_ado_collection = true;
+        payload.aap.hub_mark_ado_validated = true;
+        payload.aap.hub_force_ado_collection_update = true;
+        payload.components = [];
+        delete payload.component;
+        payload.platform = [];
+        payload.selected_component_apps = [];
+        payload.component_config = {};
+        payload.component_options = {};
+      }
       payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
         const { id, ...credentialPayload } = credential;
         return credentialPayload;
@@ -1789,12 +1837,12 @@ function App() {
     setYamlError('');
   };
 
-  const runBootstrapInsideContainer = async () => {
+  const runScaffoldingJob = async ({ endpoint = '/api/bootstrap', startMessage = 'Starting bootstrap inside container...' } = {}) => {
     setRunFinished(false);
     setShowRawOutput(false);
     setActiveTab('logs');
-    setPreview('Starting bootstrap inside container...\n');
-    setEvents('Starting bootstrap request...\n');
+    setPreview(`${startMessage}\n`);
+    setEvents(`${startMessage}\n`);
 
     let keepPolling = true;
 
@@ -1815,7 +1863,7 @@ function App() {
     }, 1000);
 
     try {
-      const response = await fetch('/api/bootstrap', {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildPreflightPayload())
@@ -1830,14 +1878,127 @@ function App() {
       const eventsText = await eventsResp.text();
 
       const recap = result.bootstrapRecap ? `\n${result.bootstrapRecap}` : '';
-      setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}${recap}`);
+      const errorLine = result.error ? `\nERROR: ${result.error}` : '';
+      setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}${errorLine}${recap}`);
       setEvents(eventsText || 'No events were returned.');
+      if (!response.ok || result.status === 'failed') {
+        setImportStatus(result.error || `${endpoint} failed`);
+      }
     } catch (err) {
       setPreview(`ERROR:\n${err.message}`);
     } finally {
       keepPolling = false;
       clearInterval(poller);
       setRunFinished(true);
+    }
+  };
+
+  const runBootstrapInsideContainer = async () => {
+    await runScaffoldingJob({
+      endpoint: '/api/bootstrap',
+      startMessage: 'Starting bootstrap inside container...'
+    });
+  };
+
+  const runEncryptAndPush = async (payloadOverride = null) => {
+    let sourceData = data;
+    if (payloadOverride) {
+      sourceData = normalizeImportedPreflight(payloadOverride);
+      setData(sourceData);
+      selectImportedConfigPanel(sourceData);
+      setImportStatus('Loaded JSON for encrypt & push');
+    }
+
+    const payload = buildPreflightPayload(sourceData);
+
+    if (!payload?.aap?.git_url) {
+      setImportStatus('Push needs Project Git Source URL');
+      setPreview('ERROR: Missing Project Git Source URL (Git Configuration).\n');
+      setActiveTab('logs');
+      return;
+    }
+    if (!payload?.git?.token) {
+      setImportStatus('Push needs a Git token');
+      setPreview('ERROR: Missing Git token (Git Configuration).\n');
+      setActiveTab('logs');
+      return;
+    }
+    if (payload?.vault?.encrypt !== false && !String(payload?.aap?.vault_password || '').trim()) {
+      setImportStatus('Push needs a Vault password when encrypt is enabled');
+      setPreview('ERROR: Missing Vault password (Credentials → Vault), or uncheck Encrypt preflight JSON.\n');
+      setActiveTab('logs');
+      return;
+    }
+
+    if (!payload.vault) payload.vault = { encrypt: true };
+    if (payload.vault.encrypt === undefined) payload.vault.encrypt = true;
+    payload.git = { ...(payload.git || {}), auto_push: true };
+
+    setRunFinished(false);
+    setShowRawOutput(false);
+    setActiveTab('logs');
+    setPreview('Pushing preflight JSON to Git (no bootstrap)...\n');
+    setEvents('Starting publish request...\n');
+    setActionsOpen(false);
+
+    let keepPolling = true;
+    const poller = setInterval(async () => {
+      if (!keepPolling) return;
+      try {
+        const logs = await fetch('/api/logs');
+        setPreview((await logs.text()) || 'Running...');
+        const eventsResp = await fetch('/api/events');
+        setEvents((await eventsResp.text()) || 'No events yet.');
+      } catch (err) {
+        setPreview(`ERROR reading logs:\n${err.message}`);
+      }
+    }, 1000);
+
+    try {
+      const response = await fetch('/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      const text = await (await fetch('/api/logs')).text();
+      const eventsText = await (await fetch('/api/events')).text();
+      const recap = result.bootstrapRecap ? `\n${result.bootstrapRecap}` : '';
+      const errorLine = result.error ? `\nERROR: ${result.error}` : '';
+      setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}${errorLine}${recap}`);
+      setEvents(eventsText || 'No events were returned.');
+      setImportStatus(
+        response.ok && result.status === 'complete'
+          ? (result.encryptJson
+            ? `Pushed encrypted ${result.preflightFile || 'preflight JSON'} to Git`
+            : `Pushed ${result.preflightFile || 'preflight JSON'} to Git`)
+          : (result.error || 'Push JSON to Git failed')
+      );
+    } catch (err) {
+      setPreview(`ERROR:\n${err.message}`);
+      setImportStatus(`Push JSON failed: ${err.message}`);
+    } finally {
+      keepPolling = false;
+      clearInterval(poller);
+      setRunFinished(true);
+    }
+  };
+
+  const publishJsonFile = async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const imported = JSON.parse(text);
+      setImportStatus(`Uploading ${file.name} for encrypt & push...`);
+      await runEncryptAndPush(imported);
+    } catch (err) {
+      setImportStatus(`Publish failed: ${err.message}`);
+      setPreview(`ERROR:\n${err.message}`);
+      setActiveTab('logs');
+    } finally {
+      event.target.value = '';
     }
   };
 
@@ -2053,6 +2214,62 @@ function App() {
       </FormGroup>
     </GridItem>
   );
+
+  const parseSurveyEnvironments = value => (
+    String(value || '')
+      .split(/[\n,]+/)
+      .map(part => part.trim())
+      .filter(Boolean)
+  );
+
+  const getComponentSurveyEnvironments = component => {
+    const configured = data.component_survey?.[component]?.environments;
+    if (Array.isArray(configured) && configured.length > 0) {
+      return configured;
+    }
+    return [...DEFAULT_SURVEY_ENVIRONMENTS];
+  };
+
+  const setComponentSurveyEnvironments = (component, rawValue) => {
+    const environments = parseSurveyEnvironments(rawValue);
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.component_survey) copy.component_survey = {};
+      copy.component_survey[component] = {
+        ...(copy.component_survey[component] || {}),
+        environments: environments.length > 0 ? environments : [...DEFAULT_SURVEY_ENVIRONMENTS]
+      };
+      return copy;
+    });
+  };
+
+  const renderComponentSurveyEnvironments = component => {
+    if (!SURVEY_ENV_EDITABLE_COMPONENTS.has(component)) return null;
+
+    return (
+      <Grid hasGutter style={{ marginBottom: '16px' }}>
+        <GridItem span={12}>
+          <FormGroup
+            label={labelWithHelp(
+              'Survey environments',
+              'Choices shown in the AAP job-template env survey for this component. Comma or newline separated. Defaults: dev, test, preprod, prod.'
+            )}
+          >
+            <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
+              Applies to this component&apos;s simple <code>env</code> survey only (not Satellite / VM / complex surveys).
+            </p>
+            <textarea
+              value={getComponentSurveyEnvironments(component).join(', ')}
+              onChange={e => setComponentSurveyEnvironments(component, e.target.value)}
+              rows={2}
+              style={{ width: '100%', padding: '8px' }}
+              placeholder="dev, test, preprod, prod"
+            />
+          </FormGroup>
+        </GridItem>
+      </Grid>
+    );
+  };
 
   const defaultComponentHelp = {
     hostname: 'Hostname or URL for this component. Example: https://grafana.apps.ocp.prod.rhlab or grafana.server.lab.',
@@ -3887,40 +4104,64 @@ echo $TOKEN
   const renderConfigForm = (panelOverride = null) => {
     const panel = panelOverride || activeConfigPanel || 'all';
 
+    let body;
     switch (panel) {
       case 'all':
-        return renderAllConfig();
+        body = renderAllConfig();
+        break;
       case 'openshift':
-        return renderOpenShiftGroupConfig();
+        body = renderOpenShiftGroupConfig();
+        break;
       case 'admin_htpasswd':
-        return renderOpenShiftAdminHtpasswdConfig();
+        body = renderOpenShiftAdminHtpasswdConfig();
+        break;
       case 'console_banner':
-        return renderOpenShiftConsoleBannerConfig();
+        body = renderOpenShiftConsoleBannerConfig();
+        break;
       case 'agent_installer':
-        return renderAgentInstallerConfig();
+        body = renderAgentInstallerConfig();
+        break;
       case 'rhel':
-        return renderRhelConfig();
+        body = renderRhelConfig();
+        break;
       case 'patching':
-        return renderPatchingConfig();
+        body = renderPatchingConfig();
+        break;
       case 'provision':
-        return renderProvisionConfig();
+        body = renderProvisionConfig();
+        break;
       case 'jira':
-        return renderJiraConfig();
+        body = renderJiraConfig();
+        break;
       case 'grafana':
-        return renderGrafanaConfig();
+        body = renderGrafanaConfig();
+        break;
       case 'rhbk':
-        return renderRhbkConfig();
+        body = renderRhbkConfig();
+        break;
       case 'satellite':
-        return renderSatelliteConfig();
+        body = renderSatelliteConfig();
+        break;
       case 'idm':
-        return renderIdmConfig();
+        body = renderIdmConfig();
+        break;
       case 'compliance':
-        return renderComplianceConfig();
+        body = renderComplianceConfig();
+        break;
       case 'stig':
-        return renderStigConfig();
+        body = renderStigConfig();
+        break;
       default:
-        return renderDefaultComponentConfig(panel);
+        body = renderDefaultComponentConfig(panel);
+        break;
     }
+
+    return (
+      <>
+        {renderComponentSurveyEnvironments(panel)}
+        {body}
+      </>
+    );
   };
 
   const isVaultKey = key => {
@@ -4870,7 +5111,7 @@ ${vaultYaml}
                     </div>
                   )}
                 </div>
-                <div>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                   <input
                     ref={importFileRef}
                     type="file"
@@ -4878,8 +5119,18 @@ ${vaultYaml}
                     style={{ display: 'none' }}
                     onChange={importJsonFile}
                   />
+                  <input
+                    ref={publishFileRef}
+                    type="file"
+                    accept="application/json,.json"
+                    style={{ display: 'none' }}
+                    onChange={publishJsonFile}
+                  />
                   <Button variant="secondary" onClick={() => importFileRef.current?.click()}>
                     Upload JSON
+                  </Button>
+                  <Button variant="secondary" onClick={() => publishFileRef.current?.click()}>
+                    Upload JSON → Push to Git
                   </Button>
                 </div>
               </div>
@@ -4995,6 +5246,18 @@ ${vaultYaml}
                   <br />
 
                   <Checkbox
+                    id="vault-encrypt-files"
+                    label="Encrypt preflight JSON with ansible-vault before Git push"
+                    isChecked={data.vault?.encrypt !== false}
+                    onChange={(_, v) => set('vault.encrypt', v)}
+                  />
+                  <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
+                    Only used by <code>Upload JSON → Push to Git</code> / Actions → Push Preflight JSON. Uses the Vault password from Credentials. Does not run bootstrap.
+                  </p>
+
+                  <br />
+
+                  <Checkbox
                     id="git-skip-tls-verify"
                     label="Skip TLS/SSL verification for Git (self-signed certificates)"
                     isChecked={data.git.skip_tls_verify !== false}
@@ -5052,8 +5315,9 @@ ${vaultYaml}
               {data.aap.enabled && aapOpen && (
                 <>
                   <br />
-                  <Tabs activeKey={activeAapConfigTab === 'hub' ? 'general' : activeAapConfigTab} onSelect={(_, key) => setActiveAapConfigTab(key)}>
+                  <Tabs activeKey={activeAapConfigTab} onSelect={(_, key) => setActiveAapConfigTab(key)}>
                     <Tab eventKey="general" title="General" />
+                    <Tab eventKey="hub" title="Hub" />
                     <Tab eventKey="galaxy" title="Galaxy" />
                   </Tabs>
                   <br />
@@ -5066,10 +5330,25 @@ ${vaultYaml}
                       <GridItem span={6}><FormGroup label="Project Name"><TextInput value={data.aap.project} onChange={(_, v) => set('aap.project', v)} /></FormGroup></GridItem>
                       <GridItem span={6}>
                         <FormGroup label="Execution Environment">
-                          <TextInput
-                            value={data.aap.execution_environment}
-                            onChange={(_, v) => set('aap.execution_environment', v)}
-                          />
+                          {data.aap.hub_push_ee ? (
+                            <select
+                              value={data.aap.execution_environment}
+                              onChange={e => set('aap.execution_environment', e.target.value)}
+                              style={{ width: '100%', padding: '8px' }}
+                            >
+                              <option value={resolveHubExecutionEnvironmentName(data.aap)}>
+                                {resolveHubExecutionEnvironmentName(data.aap)}
+                              </option>
+                              <option value={DEFAULT_AAP_EXECUTION_ENVIRONMENT}>
+                                {DEFAULT_AAP_EXECUTION_ENVIRONMENT}
+                              </option>
+                            </select>
+                          ) : (
+                            <TextInput
+                              value={data.aap.execution_environment}
+                              onChange={(_, v) => set('aap.execution_environment', v)}
+                            />
+                          )}
                         </FormGroup>
                       </GridItem>
                       <GridItem span={6}>
@@ -5115,6 +5394,128 @@ ${vaultYaml}
                           />
                         </FormGroup>
                       </GridItem>
+                    </Grid>
+                  )}
+                  {activeAapConfigTab === 'hub' && (
+                    <Grid hasGutter>
+                      <GridItem span={12}>
+                        <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
+                          Optional. Leave all Hub actions unchecked for disconnected sites. Bootstrap never manages stock <code>ee-supported-*</code> Controller EEs.
+                        </p>
+                        <FormGroup label="Collections">
+                          <Checkbox
+                            label="Update infra.ado collection in validated AAP Hub content"
+                            isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
+                            onChange={(_, v) => setAapHubValidated(v)}
+                          />
+                          <Checkbox
+                            label="Force update infra.ado collection in validated content"
+                            isChecked={data.aap.hub_force_ado_collection_update}
+                            isDisabled={!data.aap.hub_publish_ado_collection}
+                            onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
+                          />
+                          <Checkbox
+                            label="Update collection only"
+                            isChecked={data.aap.hub_update_collection_only}
+                            isDisabled={!data.aap.hub_publish_ado_collection}
+                            onChange={(_, v) => set('aap.hub_update_collection_only', v)}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={12}>
+                        <FormGroup label="Execution environment (optional)">
+                          <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
+                            Requires the source image already present locally (for example via <code>podman images</code>). Never pulls from the internet — only tags and pushes the local image to Private Automation Hub.
+                          </p>
+                          <Checkbox
+                            id="aap-hub-push-ee"
+                            label="Push local ado-ee image to AAP Hub (optional)"
+                            isChecked={data.aap.hub_push_ee === true}
+                            onChange={(_, v) => setAapHubPushEe(v)}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      {data.aap.hub_push_ee && (
+                        <>
+                          <GridItem span={8}>
+                            <FormGroup label="Source image (must exist locally)">
+                              <TextInput
+                                value={data.aap.hub_ee_source_image}
+                                onChange={(_, v) => set('aap.hub_ee_source_image', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          <GridItem span={4}>
+                            <FormGroup label="Hub EE name">
+                              <TextInput
+                                value={data.aap.hub_ee_name}
+                                onChange={(_, v) => setAapHubEeNameField('hub_ee_name', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          <GridItem span={4}>
+                            <FormGroup label="Tag">
+                              <TextInput
+                                value={data.aap.hub_ee_tag}
+                                onChange={(_, v) => set('aap.hub_ee_tag', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          <GridItem span={8}>
+                            <FormGroup
+                              label={(
+                                <span>
+                                  Hub registry host (optional)
+                                  <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                    {' — Defaults to the AAP hostname when empty'}
+                                  </span>
+                                </span>
+                              )}
+                            >
+                              <TextInput
+                                value={data.aap.hub_ee_registry}
+                                onChange={(_, v) => set('aap.hub_ee_registry', v)}
+                                placeholder="hub.example.com"
+                              />
+                            </FormGroup>
+                          </GridItem>
+                          <GridItem span={12}>
+                            <Checkbox
+                              id="aap-hub-ee-create-ee"
+                              label="Create Controller execution environment after push"
+                              isChecked={data.aap.hub_ee_create_execution_environment !== false}
+                              onChange={(_, v) => set('aap.hub_ee_create_execution_environment', v)}
+                            />
+                          </GridItem>
+                          {data.aap.hub_ee_create_execution_environment !== false && (
+                            <GridItem span={6}>
+                              <FormGroup
+                                label={(
+                                  <span>
+                                    Controller EE name
+                                    <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                      {' — Defaults to Hub EE name when empty'}
+                                    </span>
+                                  </span>
+                                )}
+                              >
+                                <TextInput
+                                  value={data.aap.hub_ee_execution_environment_name}
+                                  onChange={(_, v) => setAapHubEeNameField('hub_ee_execution_environment_name', v)}
+                                />
+                              </FormGroup>
+                            </GridItem>
+                          )}
+                          <GridItem span={12}>
+                            <FormGroup label="Hub EE description (optional)">
+                              <TextInput
+                                value={data.aap.hub_ee_description}
+                                onChange={(_, v) => set('aap.hub_ee_description', v)}
+                              />
+                            </FormGroup>
+                          </GridItem>
+                        </>
+                      )}
                     </Grid>
                   )}
                   {activeAapConfigTab === 'galaxy' && (
@@ -5386,6 +5787,7 @@ ${vaultYaml}
                     <DropdownList>
                       <DropdownItem onClick={previewJson}>Preview JSON</DropdownItem>
                       <DropdownItem onClick={downloadJson}>Download JSON</DropdownItem>
+                      <DropdownItem onClick={() => runEncryptAndPush()}>Push Preflight JSON to Git</DropdownItem>
                       <DropdownItem onClick={resetOutput}>Reset</DropdownItem>
                     </DropdownList>
                   </Dropdown>

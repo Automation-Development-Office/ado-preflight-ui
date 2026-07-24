@@ -356,10 +356,23 @@ function buildAnsibleEnv(skipTlsVerify = false, gitSkipTlsVerify = true) {
 }
 
 function gitCredentialLine(repoUrl, token, username = 'oauth2') {
+  // Include full path (host + pathname) so credential.helper store matches the remote.
+  // Host-only lines fail on some GitLab setups when useHttpPath defaults to true.
   const u = new URL(repoUrl);
   const user = encodeURIComponent(String(username || 'oauth2').trim() || 'oauth2');
-  const password = encodeURIComponent(token);
-  return `${u.protocol}//${user}:${password}@${u.host}\n`;
+  const password = encodeURIComponent(String(token || '').trim());
+  const pathname = u.pathname || '/';
+  return `${u.protocol}//${user}:${password}@${u.host}${pathname}\n`;
+}
+
+function authenticatedGitUrl(repoUrl, token, username = 'oauth2') {
+  const u = new URL(repoUrl);
+  const user = encodeURIComponent(String(username || 'oauth2').trim() || 'oauth2');
+  const password = encodeURIComponent(String(token || '').trim());
+  const pathname = u.pathname || '/';
+  const search = u.search || '';
+  const hash = u.hash || '';
+  return `${u.protocol}//${user}:${password}@${u.host}${pathname}${search}${hash}`;
 }
 
 function defaultGitUsername(scmTool) {
@@ -559,14 +572,20 @@ function normalizePreflightPayload(input) {
   const data = JSON.parse(JSON.stringify(input || {}));
 
   if (!data.aap) data.aap = {};
-  // Hub publishing removed — always skip Hub collection/EE bootstrap
-  data.aap.hub_update_collection_only = false;
-  data.aap.hub_publish_ado_collection = false;
-  data.aap.hub_mark_ado_validated = false;
-  data.aap.hub_force_ado_collection_update = false;
-  data.aap.hub_push_ee = false;
+  if (data.aap.hub_update_collection_only === undefined) data.aap.hub_update_collection_only = false;
+  const hubUpdateCollectionOnly = data.aap.hub_update_collection_only === true;
 
-  if (!Array.isArray(data.components) || data.components.length === 0) {
+  if (hubUpdateCollectionOnly) {
+    data.components = [];
+    delete data.component;
+    data.platform = [];
+    data.component_apps = { openshift: [], rhel: [], patching: [], provision: [] };
+    data.component_config = {};
+    data.component_options = {};
+    data.aap.hub_publish_ado_collection = true;
+    data.aap.hub_mark_ado_validated = true;
+    data.aap.hub_force_ado_collection_update = true;
+  } else if (!Array.isArray(data.components) || data.components.length === 0) {
     if (Array.isArray(data.platform) && data.platform.length > 0) {
       data.components = data.platform.includes('all') ? ['all'] : data.platform;
     } else if (data.component) {
@@ -615,12 +634,13 @@ function normalizePreflightPayload(input) {
   data.aap.inventory = normalizeOrgScopedName(data.aap.inventory, data.aap.organization, 'inventory');
   data.aap.project = normalizeOrgScopedName(data.aap.project, data.aap.organization, 'project');
   data.aap.vault_credential_name = normalizeOrgScopedName(data.aap.vault_credential_name, data.aap.organization, 'vault');
-  // Hub publishing removed — always skip
-  data.aap.hub_publish_ado_collection = false;
-  data.aap.hub_mark_ado_validated = false;
-  data.aap.hub_force_ado_collection_update = false;
-  data.aap.hub_update_collection_only = false;
-  data.aap.hub_push_ee = false;
+  if (data.aap.hub_publish_ado_collection === undefined) data.aap.hub_publish_ado_collection = false;
+  if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = false;
+  if (data.aap.hub_update_collection_only === undefined) data.aap.hub_update_collection_only = false;
+  data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
+  // Optional Hub EE push — local image only; never manages stock ee-supported-*
+  if (data.aap.hub_push_ee === undefined) data.aap.hub_push_ee = false;
+  data.aap.hub_push_ee = data.aap.hub_push_ee === true;
   if (data.aap.hub_ee_source_image === undefined) {
     data.aap.hub_ee_source_image = 'ghcr.io/automation-development-office/ado-ee:latest';
   }
@@ -1331,9 +1351,208 @@ function configureGitCredentials(repoUrl, token, scmTool = 'gitlab') {
   const username = defaultGitUsername(scmTool);
 
   fs.mkdirSync(home, { recursive: true });
+  // Always rewrite so a stale token/path from a prior run cannot break push.
   fs.writeFileSync(credPath, gitCredentialLine(repoUrl, token, username), { mode: 0o600 });
 
-  event(`Configured Git credentials for ${new URL(repoUrl).host} (username ${username})`);
+  event(`Configured Git credentials for ${new URL(repoUrl).host} (username ${username}, file ${credPath})`);
+}
+
+/**
+ * Shared Git setup used by bootstrap and publish-json.
+ * One auth model: Bitbucket = Bearer header; GitLab/GitHub = credential.helper store
+ * + authenticated clone/push URL (oauth2:<token>@host/path).
+ */
+async function prepareGitAuthAndClone({
+  repoUrl,
+  branch,
+  repoDir,
+  token,
+  scmTool,
+  gitSkipTlsVerify = true,
+  gitName = 'ADO Preflight UI',
+  gitEmail = 'ado-preflight@localhost',
+  cleanRepoDir = true
+}) {
+  const tool = String(scmTool || 'gitlab').trim().toLowerCase();
+  const gitUsesBearerAuth = usesBearerGitAuth(tool);
+  const gitUsername = defaultGitUsername(tool);
+  const gitEnv = buildAnsibleEnv(false, gitSkipTlsVerify);
+
+  configureGitCredentials(repoUrl, token, tool);
+
+  if (cleanRepoDir) {
+    event(`Cleaning repo directory ${repoDir}`);
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(path.dirname(repoDir), { recursive: true });
+  fs.mkdirSync(workRoot, { recursive: true });
+
+  await runStream(
+    'git',
+    ['config', '--global', 'user.email', gitEmail],
+    workRoot,
+    'Configuring Git user email'
+  );
+  await runStream(
+    'git',
+    ['config', '--global', 'user.name', gitName],
+    workRoot,
+    'Configuring Git user name'
+  );
+
+  if (!gitUsesBearerAuth) {
+    await runStream(
+      'git',
+      ['config', '--global', 'credential.helper', 'store'],
+      workRoot,
+      'Configuring Git credential helper'
+    );
+    await runStream(
+      'git',
+      ['config', '--global', 'credential.useHttpPath', 'false'],
+      workRoot,
+      'Configuring Git credential scope'
+    );
+  }
+
+  const cloneUrl = (!gitUsesBearerAuth && token)
+    ? authenticatedGitUrl(repoUrl, token, gitUsername)
+    : repoUrl;
+
+  const cloneArgs = buildGitCloneArgs({
+    repoUrl: cloneUrl,
+    branch,
+    repoDir,
+    token,
+    scmTool: tool,
+    gitSkipTlsVerify
+  });
+
+  const cloneCode = await runStream(
+    'git',
+    cloneArgs,
+    workRoot,
+    gitUsesBearerAuth
+      ? 'Cloning Git repository with Authorization Bearer header'
+      : 'Cloning Git repository',
+    gitEnv
+  );
+
+  if (cloneCode !== 0 || !fs.existsSync(repoDir)) {
+    return {
+      ok: false,
+      code: cloneCode || 128,
+      gitUsesBearerAuth,
+      gitUsername,
+      error: 'Git clone failed. Check logs.'
+    };
+  }
+
+  event('Git repository cloned');
+
+  if (gitSkipTlsVerify) {
+    await runStream(
+      'git',
+      ['config', '--local', 'http.sslVerify', 'false'],
+      repoDir,
+      'Disabling git SSL verify'
+    );
+  }
+
+  if (gitUsesBearerAuth && token) {
+    await runStream(
+      'git',
+      ['config', '--local', '--unset-all', 'http.extraHeader'],
+      repoDir,
+      'Clearing previous Bitbucket Bearer headers'
+    );
+    await runStream(
+      'git',
+      ['config', '--local', 'http.extraHeader', gitBearerExtraHeader(token)],
+      repoDir,
+      'Configuring local Bitbucket Bearer auth for push'
+    );
+    await runStream(
+      'git',
+      ['remote', 'set-url', 'origin', repoUrl],
+      repoDir,
+      'Setting origin remote URL'
+    );
+  } else if (token) {
+    // Keep origin authenticated for later push (publish or ansible).
+    await runStream(
+      'git',
+      ['remote', 'set-url', 'origin', authenticatedGitUrl(repoUrl, token, gitUsername)],
+      repoDir,
+      'Setting authenticated origin remote URL'
+    );
+    await runStream(
+      'git',
+      ['config', '--local', 'credential.helper', 'store'],
+      repoDir,
+      'Configuring local Git credential helper'
+    );
+  }
+
+  return {
+    ok: true,
+    code: 0,
+    gitUsesBearerAuth,
+    gitUsername,
+    error: null
+  };
+}
+
+async function gitCommitAndPush({
+  repoDir,
+  repoUrl,
+  branch,
+  pathsToAdd,
+  commitMessage,
+  token,
+  scmTool,
+  gitSkipTlsVerify = true
+}) {
+  const tool = String(scmTool || 'gitlab').trim().toLowerCase();
+  const gitUsesBearerAuth = usesBearerGitAuth(tool);
+  const gitUsername = defaultGitUsername(tool);
+  const files = (Array.isArray(pathsToAdd) ? pathsToAdd : [pathsToAdd])
+    .filter(Boolean)
+    .map(file => JSON.stringify(file))
+    .join(' ');
+
+  const pushCode = await runStream('bash', ['-lc', `
+set -euo pipefail
+cd ${JSON.stringify(repoDir)}
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=true
+${gitSkipTlsVerify ? 'git config --local http.sslVerify false || true' : 'true'}
+${gitUsesBearerAuth && token
+  ? `git config --local --unset-all http.extraHeader || true
+git config --local http.extraHeader ${JSON.stringify(gitBearerExtraHeader(token))} || true
+git remote set-url origin ${JSON.stringify(repoUrl)}`
+  : `git config --local credential.helper store || true
+git remote set-url origin ${JSON.stringify(authenticatedGitUrl(repoUrl, token, gitUsername))}`}
+
+git add -- ${files}
+if git diff --cached --quiet; then
+  echo "No changes to commit (already up to date)."
+else
+  git -c user.email="ado-preflight@localhost" -c user.name="ADO Preflight UI" commit -m ${JSON.stringify(commitMessage)}
+fi
+
+git push origin ${JSON.stringify(`HEAD:${branch}`)}
+echo "Pushed to origin/${branch}"
+
+# Scrub credentials from local remote after push
+git remote set-url origin ${JSON.stringify(repoUrl)} || true
+`], repoDir, 'Committing and pushing to Git', buildAnsibleEnv(false, gitSkipTlsVerify));
+
+  return {
+    ok: pushCode === 0,
+    code: pushCode,
+    error: pushCode === 0 ? null : 'Git commit/push failed. Check logs.'
+  };
 }
 
 function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
@@ -1960,6 +2179,182 @@ app.post('/api/openshift-agent/download', (req, res) => {
 });
 
 app.post('/api/bootstrap', async (req, res) => {
+  return handleScaffoldingRequest(req, res);
+});
+
+app.post('/api/publish', async (req, res) => {
+  return handlePublishJsonRequest(req, res);
+});
+
+async function handlePublishJsonRequest(req, res) {
+  latestLog = '';
+  latestEvents = '';
+  latestDebug = {
+    repoDir: '',
+    preflightPath: '',
+    extraVarsPath: '',
+    normalizedPayload: null,
+    selectedComponents: '',
+    selectedComponentApps: [],
+    result: null
+  };
+
+  event('Publish JSON started');
+
+  const data = normalizePreflightPayload(req.body || {});
+  const envName = data.environment || 'prod';
+  const repoUrl = data?.aap?.git_url;
+  const branch = String(data?.aap?.git_branch || 'main').trim() || 'main';
+  const gitToken = data?.git?.token || '';
+  const encryptJson = data?.vault?.encrypt !== false;
+  const vaultPassword = String(data?.aap?.vault_password || data.vault_password || '').trim();
+  const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
+  const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
+  const gitUsername = String(data?.git?.username || defaultGitUsername(scmTool)).trim() || defaultGitUsername(scmTool);
+  data.git = data.git || {};
+  data.git.username = gitUsername;
+
+  if (!repoUrl) {
+    event('Publish failed: missing Project Git Source URL');
+    return res.status(400).json({ error: 'Missing Project Git Source URL' });
+  }
+  if (!gitToken) {
+    event('Publish failed: Git token required');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'Git token is required to push the preflight JSON to your repository.'
+    });
+  }
+  if (encryptJson && !vaultPassword) {
+    event('Publish failed: vault password required to encrypt JSON');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'Vault password is required when Encrypt vault files is enabled (Credentials → Vault).'
+    });
+  }
+
+  const selectedComponentApps = selectedComponentAppsFrom(data);
+  data.selected_component_apps = selectedComponentApps;
+  pruneSelectedPayload(data, selectedComponentApps);
+  latestDebug.normalizedPayload = redactSecrets(data);
+  latestDebug.selectedComponents = Array.isArray(data.components) ? data.components.join(',') : '';
+  latestDebug.selectedComponentApps = selectedComponentApps;
+
+  // Same workspace bootstrap uses, so one git auth path; publish only adds the JSON.
+  const repoDir = path.join(workRoot, 'bootstrap-sample');
+  const preflightFile = `ado-preflight-${envName}.json`;
+  const preflightPath = path.join(repoDir, preflightFile);
+  const vaultPassPath = path.join(repoDir, '.vault_pass');
+  latestDebug.repoDir = repoDir;
+  latestDebug.preflightPath = preflightPath;
+
+  append(`\nMode: publish-json-only\n`);
+  append(`Git URL: ${repoUrl}\n`);
+  append(`Git branch: ${branch}\n`);
+  append(`Preflight file: ${preflightFile}\n`);
+  append(`Encrypt JSON with ansible-vault: ${encryptJson}\n`);
+  append(`Git Skip TLS/SSL Verification: ${gitSkipTlsVerify}\n`);
+  event('Mode: publish-json-only (shared git helpers; no bootstrap / no AAP apply)');
+  event(`Writing ${preflightFile} to ${repoUrl} (${branch})`);
+  event(`Encrypt JSON: ${encryptJson}`);
+
+  const prepared = await prepareGitAuthAndClone({
+    repoUrl,
+    branch,
+    repoDir,
+    token: gitToken,
+    scmTool,
+    gitSkipTlsVerify,
+    gitName: data?.git?.name || 'ADO Preflight UI',
+    gitEmail: data?.git?.email || 'ado-preflight@localhost',
+    cleanRepoDir: true
+  });
+
+  if (!prepared.ok) {
+    event(`Publish failed during git clone exitCode=${prepared.code}`);
+    latestDebug.result = {
+      status: 'failed',
+      exitCode: prepared.code,
+      mode: 'publish',
+      repoDir,
+      error: prepared.error
+    };
+    return res.json(latestDebug.result);
+  }
+
+  event(`Writing ${preflightFile}`);
+  fs.writeFileSync(preflightPath, `${JSON.stringify(data, null, 2)}\n`);
+
+  if (encryptJson) {
+    event('Encrypting preflight JSON with ansible-vault');
+    fs.writeFileSync(vaultPassPath, `${vaultPassword}\n`);
+    const encryptCode = await runStream(
+      'ansible-vault',
+      ['encrypt', preflightFile, '--vault-password-file', '.vault_pass'],
+      repoDir,
+      'Encrypting preflight JSON'
+    );
+    try { fs.rmSync(vaultPassPath, { force: true }); } catch (_err) { /* ignore */ }
+    if (encryptCode !== 0) {
+      event(`Publish failed during ansible-vault encrypt exitCode=${encryptCode}`);
+      latestDebug.result = {
+        status: 'failed',
+        exitCode: encryptCode,
+        mode: 'publish',
+        repoDir,
+        preflightFile,
+        error: 'ansible-vault encrypt failed. Check logs.'
+      };
+      return res.json(latestDebug.result);
+    }
+  }
+
+  try { fs.rmSync(vaultPassPath, { force: true }); } catch (_err) { /* ignore */ }
+
+  const pushed = await gitCommitAndPush({
+    repoDir,
+    repoUrl,
+    branch,
+    pathsToAdd: [preflightFile],
+    commitMessage: encryptJson
+      ? `Add encrypted preflight JSON ${preflightFile}`
+      : `Add preflight JSON ${preflightFile}`,
+    token: gitToken,
+    scmTool,
+    gitSkipTlsVerify
+  });
+
+  event(`Publish JSON finished exitCode=${pushed.code}`);
+  latestDebug.result = {
+    status: pushed.ok ? 'complete' : 'failed',
+    exitCode: pushed.code,
+    mode: 'publish',
+    repoDir,
+    preflightFile,
+    branch,
+    encryptJson,
+    gitTokenProvided: Boolean(gitToken),
+    bootstrapRecap: [
+      '',
+      '=== ADO Publish Recap ===',
+      'Mode: push preflight JSON only (shared git helpers)',
+      `Git: ${repoUrl}`,
+      `Branch: ${branch}`,
+      `File: ${preflightFile}`,
+      `Encrypted: ${encryptJson ? 'yes (ansible-vault)' : 'no'}`,
+      'AAP apply: skipped',
+      'Bootstrap: skipped',
+      ''
+    ].join('\n'),
+    error: pushed.error || undefined
+  };
+
+  return res.json(latestDebug.result);
+}
+
+async function handleScaffoldingRequest(req, res) {
   latestLog = '';
   latestEvents = '';
   latestDebug = {
@@ -1974,7 +2369,7 @@ app.post('/api/bootstrap', async (req, res) => {
 
   event('Bootstrap started');
 
-  const data = normalizePreflightPayload(req.body);
+  const data = normalizePreflightPayload(req.body || {});
   const envName = data.environment || 'prod';
   const repoUrl = data?.aap?.git_url;
 
@@ -2032,6 +2427,9 @@ app.post('/api/bootstrap', async (req, res) => {
     });
   }
 
+  const encryptVaultFiles = data?.vault?.encrypt !== false;
+  const vaultPassword = String(data?.aap?.vault_password || data.vault_password || '').trim();
+
   const selectedComponents = hubUpdateCollectionOnly
     ? 'hub_collection_update'
     : (
@@ -2052,7 +2450,6 @@ app.post('/api/bootstrap', async (req, res) => {
   const ansibleVerbosityFlag = verbosityFlag(ansibleVerbosity);
   const skipTlsVerify = data?.aap?.skip_tls_verify === true;
   const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
-  const encryptVaultFiles = data?.vault?.encrypt !== false;
   const bootstrapEnv = buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify);
 
   append(`\nSelected Components: ${selectedComponents}\n`);
@@ -2080,8 +2477,6 @@ app.post('/api/bootstrap', async (req, res) => {
     event('Bitbucket Source Control username set to x-token-auth');
   }
 
-  configureGitCredentials(repoUrl, gitToken, scmTool);
-
   const repoDir = path.join(workRoot, 'bootstrap-sample');
   const preflightFile = `ado-preflight-${envName}.json`;
   const preflightPath = path.join(repoDir, preflightFile);
@@ -2091,8 +2486,6 @@ app.post('/api/bootstrap', async (req, res) => {
   latestDebug.preflightPath = preflightPath;
   latestDebug.extraVarsPath = extraVarsPath;
 
-  event(`Cleaning repo directory ${repoDir}`);
-  fs.rmSync(repoDir, { recursive: true, force: true });
   fs.mkdirSync(workRoot, { recursive: true });
 
   const collectionInstallCode = await runStream('bash', ['-lc', `
@@ -2228,75 +2621,27 @@ ansible-galaxy collection list
     return res.json(latestDebug.result);
   }
 
-  await runStream(
-    'git',
-    ['config', '--global', 'user.email', data?.git?.email || 'ado-preflight@example.local'],
-    workRoot,
-    'Configuring Git user email'
-  );
-
-  await runStream(
-    'git',
-    ['config', '--global', 'user.name', data?.git?.name || 'ADO Preflight UI'],
-    workRoot,
-    'Configuring Git user name'
-  );
-
-  if (!gitUsesBearerAuth) {
-    await runStream(
-      'git',
-      ['config', '--global', 'credential.helper', 'store'],
-      workRoot,
-      'Configuring Git credential helper'
-    );
-
-    await runStream(
-      'git',
-      ['config', '--global', 'credential.useHttpPath', 'false'],
-      workRoot,
-      'Configuring Git credential scope'
-    );
-  }
-
-  const cloneArgs = buildGitCloneArgs({
+  const prepared = await prepareGitAuthAndClone({
     repoUrl,
-    branch: data.aap.git_branch,
+    branch: data.aap.git_branch || 'main',
     repoDir,
     token: gitToken,
     scmTool,
-    gitSkipTlsVerify
+    gitSkipTlsVerify,
+    gitName: data?.git?.name || 'ADO Preflight UI',
+    gitEmail: data?.git?.email || 'ado-preflight@example.local',
+    cleanRepoDir: true
   });
 
-  const cloneCode = await runStream(
-    'git',
-    cloneArgs,
-    workRoot,
-    gitUsesBearerAuth
-      ? 'Cloning Git repository with Authorization Bearer header'
-      : 'Cloning Git repository',
-    buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify)
-  );
-
-  if (cloneCode !== 0 || !fs.existsSync(repoDir)) {
-    event(`Bootstrap failed during git clone exitCode=${cloneCode}`);
+  if (!prepared.ok) {
+    event(`Bootstrap failed during git clone exitCode=${prepared.code}`);
     latestDebug.result = {
       status: 'failed',
-      exitCode: cloneCode || 128,
+      exitCode: prepared.code,
       repoDir,
-      error: 'Git clone failed. Check logs.'
+      error: prepared.error
     };
     return res.json(latestDebug.result);
-  }
-
-  event('Git repository cloned');
-
-  if (gitUsesBearerAuth && gitToken) {
-    await runStream(
-      'git',
-      ['config', '--local', 'http.extraHeader', gitBearerExtraHeader(gitToken)],
-      repoDir,
-      'Configuring local Bitbucket Bearer auth for push'
-    );
   }
 
   ensureStarterFiles(repoDir, envName);
@@ -2335,7 +2680,7 @@ ansible-galaxy collection list
   event('Writing vault password file');
   fs.writeFileSync(
     vaultPassPath,
-    data?.aap?.vault_password || data.vault_password || 'redhat123'
+    vaultPassword || 'redhat123'
   );
 
   const code = await runStream('bash', ['-lc', `
@@ -2410,7 +2755,7 @@ ansible-playbook \\
   -e bootstrap_controller_project_playbook_wait_seconds=${Number(data?.aap?.project_playbook_wait_seconds) || 45} \\
   -e generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e bootstrap_generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
-  -e generate_playbook_repo_git_commit_message="Generate ADO bootstrap content for ${envName}" \\
+  -e generate_playbook_repo_git_commit_message=${JSON.stringify(`Generate ADO bootstrap content for ${envName}`)} \\
   -e bootstrap_generate_env_vars_force=true \\
   -e generate_env_vars_force=true \\
   -e generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
@@ -2429,6 +2774,7 @@ ansible-playbook \\
   latestDebug.result = {
     status: code === 0 ? 'complete' : 'failed',
     exitCode: code,
+    mode: 'bootstrap',
     repoDir,
     preflightFile,
     selectedComponents,
@@ -2444,7 +2790,7 @@ ansible-playbook \\
   };
 
   res.json(latestDebug.result);
-});
+}
 
 app.use((req, res) => {
   res.sendFile(path.join(uiDir, 'index.html'));

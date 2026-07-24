@@ -2,11 +2,17 @@
 
 ## Unreleased
 
+- Added per-component AAP survey environment choices for simple env/state surveys (Grafana, GitLab, etc.). Edit under each component as “Survey environments”. Satellite, OpenShift Virt VM, RHEL patch/compliance/STIG, and Jira are excluded.
+- Unified bootstrap and publish onto shared git helpers (`prepareGitAuthAndClone` / `gitCommitAndPush`): one auth model for GitLab/GitHub (`oauth2:<token>@` + credential store) and Bitbucket (Bearer). Publish only writes/optionally encrypts the JSON then reuses that path — no second git implementation.
+- Added **Upload JSON → Push to Git** (and Actions → Push Preflight JSON to Git): clones the configured repo, writes `ado-preflight-<env>.json`, optionally ansible-vault encrypts that JSON, commits, and pushes — no bootstrap, collections install, or AAP apply.
+- Added a Git Configuration checkbox to toggle encrypting the preflight JSON before push (`vault.encrypt`, default on).
+- Restored the optional AAP Hub tab (collection publish + local ado-ee push); both default off. Stock `ee-supported-*` Controller EEs are still never managed/PATCHed.
+- Fixed Satellite RHN org ID / activation key generation so vars no longer render as the literal `" + name + "` (Ansible Jinja was rewriting the Python `vault_ref` helper).
+- Fixed bootstrap failing at “Overlay preflight…” with unbalanced Jinja: the `vault_ref` comment still contained `{{`, which broke templating of the shell task.
 - AAP project sync wait is configurable in UI/CLI (`aap.project_sync_timeout`, retries, delay); defaults to 45s per attempt, 20 retries, 5s delay, plus a 45s post-sync pause.
 - Restored generated `collections/requirements.yml` to name/version-only entries (`redhat.satellite`, `infra.ado`, `community.general`, `community.crypto`, `ansible.posix`) and stopped auto-adding a Galaxy `source` URL.
 - For Bitbucket SCM only, Source Control / git credential username is set to `x-token-auth` (token remains the password); GitLab and others stay `oauth2`.
-- Removed the AAP Hub tab; Hub collection publish and Hub EE push are forced off in bootstrap.
-- Bundled fixed collection `infra-ado-1.0.3` (does not PATCH stock `ee-supported-rhel9`; Hub publish off). Rebuild/redeploy the UI image and confirm logs show `infra-ado-1.0.3` — earlier `1.0.2` artifacts on disk were corrupted/overwritten with old content.
+- Bundled fixed collection `infra-ado-1.0.3` (does not PATCH stock `ee-supported-rhel9`; Hub actions opt-in). Rebuild/redeploy the UI image and confirm logs show `infra-ado-1.0.3` — earlier `1.0.2` artifacts on disk were corrupted/overwritten with old content.
 - Added Git Configuration TLS/SSL skip control (default disabled verification) for UI and CLI; sets local `git config http.sslVerify false` when skip is enabled.
 - When SCM tool is Bitbucket, git clone/push uses `http.extraHeader='Authorization: Bearer <token>'` instead of GitLab-style `oauth2:<token>` basic auth.
 - Hub EE push always uses a local podman image only (never pulls from the internet); the image must already exist locally before enabling push.
