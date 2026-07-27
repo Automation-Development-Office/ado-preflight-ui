@@ -2,14 +2,32 @@
 
 ## Unreleased
 
+- AAP Configuration **Auth** tab (Keycloak OIDC, LDAP, Keycloak SAML) under `aap.auth`. Bootstrap generates `vault_gateway_auth.yml` and applies `gateway_authenticators` / `gateway_authenticator_maps` via `infra.aap_configuration` for AAP 2.5+. Same JSON works for UI and CLI.
+- OpenShift Virt: Network tab (suggested IP range, prefix, gateway, DNS); removed Default Static IP. Fixed JT survey rejecting prefix_length when the default was a quoted string `"24"` instead of integer `24`.
+- OpenShift AAP install panel: checkbox **Have bootstrap install AAP on OpenShift**. Checked runs install-only in the preflight pod (skips Controller config/apply; rerun later to configure) and skips the Install AAP job template; unchecked keeps the existing JT + OpenShift workflow node. Bundled `kubernetes.core` for token-auth install; `redhat.openshift` not required when an OpenShift API token is provided.
+- OpenShift AAP install: **Admin username/password** (vault `aap_admin_password`, K8s `{instance}-admin-password` secret + `spec.admin_password_secret`) and **Minimal footprint** (Controller+Gateway only; disables Hub/EDA/Lightspeed for CPU-constrained clusters).
+- OpenShift Virtualization preflight now accepts optional default Static IP, prefix, Gateway, and DNS servers; those values are written into generated vars (and job survey defaults) without being required.
+- OpenShift Virtualization VM TLS now inherits OpenShift Configuration `skip_tls_verify` (and API host/token when left blank); the VM playbook also falls back to generated OpenShift TLS vars so older generated content no longer fails with an undefined variable.
+- Fixed OpenShift Virtualization VM provisioning variable resolution by carrying the configured OpenShift applications domain as both `apps_domain` and `app_domain`; the resolver also derives `apps.<domain>` for older generated vars.
+- Added AAP 2.5/2.6 OpenShift installation settings (version, namespace, unified/individual deployment, Controller/Hub/EDA/Lightspeed, replicas, and Hub storage). Bootstrap now creates one AAP installer job template backed by the vendored `infra.aap_utilities.aap_ocp_install` role.
+- Satellite form: RHN Connected checkbox (`component_config.satellite.rhn_connected`, default true) maps to `satellite_config_rhn_connected`; manifest upload now bootstraps `satellite_config_manifest_file` for the configure playbook.
 - Added per-component AAP survey environment choices for simple env/state surveys (Grafana, GitLab, etc.). Edit under each component as “Survey environments”. Satellite, OpenShift Virt VM, RHEL patch/compliance/STIG, and Jira are excluded.
+- Preflight download/bootstrap payload now always includes `component_survey` for selected survey-editable components (defaults if the field was never edited), so custom or default env choices actually reach AAP JT generation.
+- GitHub SCM now auto-sets `git.username` to `test` (token still goes in the Git token field). Bitbucket stays `x-token-auth`; GitLab/other stay `oauth2`.
+- Hardened project sync timeout/retries form parsing and payload normalization so Preview JSON / bootstrap use the values shown in the AAP form.
+- Raised default project sync knobs to 180s per attempt / 40 retries / 10s delay / 60s post-sync wait (timeout is per attempt — short timeouts burn retries). UI exposes delay + playbook wait.
+- Console search filters/highlights matching lines across Logs, Events, and Debug (JSON/ansible output).
+- ADO Bootstrap/Publish Recap now includes `Result: SUCCESS|FAILURE` and renders the recap block green or red in the console.
+- Rebuilt bundled `infra-ado-1.0.3.tar.gz` with valid Galaxy `FILES.json` checksums (fixes install “Checksum mismatch”), restored Satellite baseos/appstream repos + helper packages, and raised project-sync defaults.
+- Satellite form now exposes volume group name (`vg_name`, default `satellite`) and data disk device name (`data_device_name`, blank = auto-discover), plus path prefix / min size — passed through bootstrap to `satellite_install_*`.
+- Hub publish no longer fails the whole bootstrap when `infra.ado` version already exists and force-update is off (`ah_collection` approve IndexError); it warns and continues. Enable Hub force update to overwrite.
 - Unified bootstrap and publish onto shared git helpers (`prepareGitAuthAndClone` / `gitCommitAndPush`): one auth model for GitLab/GitHub (`oauth2:<token>@` + credential store) and Bitbucket (Bearer). Publish only writes/optionally encrypts the JSON then reuses that path — no second git implementation.
 - Added **Upload JSON → Push to Git** (and Actions → Push Preflight JSON to Git): clones the configured repo, writes `ado-preflight-<env>.json`, optionally ansible-vault encrypts that JSON, commits, and pushes — no bootstrap, collections install, or AAP apply.
 - Added a Git Configuration checkbox to toggle encrypting the preflight JSON before push (`vault.encrypt`, default on).
 - Restored the optional AAP Hub tab (collection publish + local ado-ee push); both default off. Stock `ee-supported-*` Controller EEs are still never managed/PATCHed.
 - Fixed Satellite RHN org ID / activation key generation so vars no longer render as the literal `" + name + "` (Ansible Jinja was rewriting the Python `vault_ref` helper).
 - Fixed bootstrap failing at “Overlay preflight…” with unbalanced Jinja: the `vault_ref` comment still contained `{{`, which broke templating of the shell task.
-- AAP project sync wait is configurable in UI/CLI (`aap.project_sync_timeout`, retries, delay); defaults to 45s per attempt, 20 retries, 5s delay, plus a 45s post-sync pause.
+- AAP project sync wait is configurable in UI/CLI (`aap.project_sync_timeout`, retries, delay); defaults to 180s per attempt, 40 retries, 10s delay, plus a 60s post-sync pause.
 - Restored generated `collections/requirements.yml` to name/version-only entries (`redhat.satellite`, `infra.ado`, `community.general`, `community.crypto`, `ansible.posix`) and stopped auto-adding a Galaxy `source` URL.
 - For Bitbucket SCM only, Source Control / git credential username is set to `x-token-auth` (token remains the password); GitLab and others stay `oauth2`.
 - Bundled fixed collection `infra-ado-1.0.3` (does not PATCH stock `ee-supported-rhel9`; Hub actions opt-in). Rebuild/redeploy the UI image and confirm logs show `infra-ado-1.0.3` — earlier `1.0.2` artifacts on disk were corrupted/overwritten with old content.

@@ -10,7 +10,7 @@ FROM registry.access.redhat.com/ubi9/nodejs-20
 USER 0
 
 RUN dnf install -y git python3 python3-pip && \
-    pip3 install ansible-core && \
+    pip3 install ansible-core kubernetes && \
     dnf clean all
 
 WORKDIR /opt/app-root/src

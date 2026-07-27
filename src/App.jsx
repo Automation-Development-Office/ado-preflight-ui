@@ -261,6 +261,68 @@ const buildDefaultContainerRegistryCredential = (org = 'ADO', hostname = '') => 
   };
 };
 
+const buildDefaultAapAuth = (org = 'ADO') => ({
+  keycloak_oidc: {
+    enabled: false,
+    name: 'Keycloak OIDC',
+    slug: 'keycloak-oidc',
+    order: 2,
+    remove_users: false,
+    access_token_url: '',
+    authorization_url: '',
+    key: '',
+    secret: '',
+    public_key: '',
+    groups_claim: 'Group',
+    superuser_groups: '',
+    organization_groups: '',
+    organization: org || 'ADO',
+    organization_role: 'Organization Member'
+  },
+  ldap: {
+    enabled: false,
+    name: 'LDAP',
+    slug: 'ldap',
+    order: 3,
+    remove_users: true,
+    server_uri: '',
+    bind_dn: '',
+    bind_password: '',
+    start_tls: false,
+    user_search: '',
+    group_search: '',
+    group_type: 'MemberDNGroupType',
+    superuser_groups: '',
+    organization_groups: '',
+    organization: org || 'ADO',
+    organization_role: 'Organization Member'
+  },
+  keycloak_saml: {
+    enabled: false,
+    name: 'Keycloak SAML',
+    slug: 'keycloak-saml',
+    order: 4,
+    remove_users: false,
+    sp_entity_id: '',
+    sp_public_cert: '',
+    sp_private_key: '',
+    idp_url: '',
+    idp_entity_id: '',
+    idp_x509_cert: '',
+    idp_attr_username: 'username',
+    idp_attr_email: 'email',
+    idp_attr_first_name: 'firstName',
+    idp_attr_last_name: 'lastName',
+    idp_attr_user_permanent_id: 'name_id',
+    idp_groups: 'Group',
+    callback_url: '',
+    superuser_groups: '',
+    organization_groups: '',
+    organization: org || 'ADO',
+    organization_role: 'Organization Member'
+  }
+});
+
 const defaults = {
   scm_tool: 'gitlab',
   environment: 'prod',
@@ -337,10 +399,15 @@ const defaults = {
         { mount_point: '/var/lib/pulp', lv_name: 'lv_rhspulp', lv_size: '300g' },
         { mount_point: '/var/lib/pgsql', lv_name: 'lv_pgsql', lv_size: '20g' }
       ],
+      vg_name: 'satellite',
+      data_device_name: '',
+      data_device: '/dev',
+      data_disk_min_size: '10G',
       manifest_file: '',
       manifest_content_base64: '',
       manifest_encoding: 'base64',
       manifest_organization: '',
+      rhn_connected: true,
       service_account_username: '',
       service_account_password: '',
       admin_password: '',
@@ -369,7 +436,28 @@ const defaults = {
       admin_password: '',
       directory_manager_password: ''
     },
-    aap: { hostname: '', storage: '' },
+    aap: {
+      deployment_version: '2.6',
+      namespace: 'aap',
+      instance_name: 'aap',
+      create_namespace: true,
+      component_deployment: 'unified',
+      operator_approval: 'automatic',
+      install_during_bootstrap: false,
+      minimal_footprint: false,
+      admin_username: 'admin',
+      admin_password: '',
+      install_controller: true,
+      install_hub: true,
+      install_eda: true,
+      install_lightspeed: false,
+      controller_replicas: 1,
+      hub_storage_type: 'file',
+      hub_storage_class: '',
+      hub_storage_size: '20Gi',
+      hub_s3_secret: '',
+      hub_azure_secret: ''
+    },
     acs: { hostname: '', storage: '' },
     acm: { hostname: '', storage: '' },
     cert_manager: {
@@ -418,8 +506,11 @@ const defaults = {
     openshift_virt: {
       api_host: '',
       api_token: '',
-      skip_tls_verify: true,
-      ssh_public_key: ''
+      ssh_public_key: '',
+      ip_range: '',
+      prefix_length: 24,
+      gateway: '',
+      dns_servers: ''
     }
   },
 
@@ -469,10 +560,10 @@ const defaults = {
     execution_environment: 'ee-supported-rhel9',
     vault_credential_name: 'ADO-vault',
     skip_tls_verify: false,
-    project_sync_timeout: 45,
-    project_sync_retries: 20,
-    project_sync_delay: 5,
-    project_playbook_wait_seconds: 45,
+    project_sync_timeout: 180,
+    project_sync_retries: 40,
+    project_sync_delay: 10,
+    project_playbook_wait_seconds: 60,
     // Hub actions are optional (off by default). Stock ee-supported-* is never pushed/managed.
     hub_publish_ado_collection: false,
     hub_mark_ado_validated: false,
@@ -514,7 +605,8 @@ const defaults = {
     oauth_token: '',
     admin_username: 'admin',
     admin_password: '',
-    vault_password: 'redhat123'
+    vault_password: 'redhat123',
+    auth: buildDefaultAapAuth('ADO')
   },
 
   openshift: {
@@ -633,10 +725,14 @@ function App() {
   const [showGitToken, setShowGitToken] = useState(false);
   const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
   const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
+  const [activeAapAuthTab, setActiveAapAuthTab] = useState('keycloak_oidc');
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
+  const [activeOpenshiftVirtTab, setActiveOpenshiftVirtTab] = useState('general');
   const [importStatus, setImportStatus] = useState('');
   const [runFinished, setRunFinished] = useState(false);
+  const [lastRunStatus, setLastRunStatus] = useState(null);
+  const [consoleSearch, setConsoleSearch] = useState('');
   const [showRawOutput, setShowRawOutput] = useState(false);
   const [consoleFontSize, setConsoleFontSize] = useState(13);
   const [agentInstallerResult, setAgentInstallerResult] = useState(null);
@@ -1124,6 +1220,7 @@ function App() {
       if (config.manifest_content_base64 === undefined) config.manifest_content_base64 = '';
       if (config.manifest_encoding === undefined) config.manifest_encoding = 'base64';
       if (config.manifest_organization === undefined) config.manifest_organization = '';
+      if (config.rhn_connected === undefined) config.rhn_connected = true;
       if (!config.size_profile) config.size_profile = 'default';
       if (!Array.isArray(config.size) || config.size.length === 0) {
         config.size = JSON.parse(JSON.stringify(defaults.component_config.satellite.size));
@@ -1131,6 +1228,37 @@ function App() {
       if (!Array.isArray(config.req_dirs) || config.req_dirs.length === 0) {
         config.req_dirs = JSON.parse(JSON.stringify(defaults.component_config.satellite.req_dirs));
       }
+      if (!config.vg_name) config.vg_name = 'satellite';
+      if (config.data_device_name === undefined) config.data_device_name = '';
+      if (!config.data_device) config.data_device = '/dev';
+      if (!config.data_disk_min_size) config.data_disk_min_size = '10G';
+    }
+
+    if (component === 'aap') {
+      delete config.hostname;
+      delete config.storage;
+      if (!config.deployment_version) config.deployment_version = '2.6';
+      if (!config.namespace) config.namespace = 'aap';
+      if (!config.instance_name) config.instance_name = 'aap';
+      if (config.create_namespace === undefined) config.create_namespace = true;
+      if (!config.component_deployment) config.component_deployment = 'unified';
+      if (!config.operator_approval) config.operator_approval = 'automatic';
+      if (config.install_during_bootstrap === undefined) {
+        config.install_during_bootstrap = false;
+      }
+      if (config.minimal_footprint === undefined) config.minimal_footprint = false;
+      if (!config.admin_username) config.admin_username = 'admin';
+      if (config.admin_password === undefined) config.admin_password = '';
+      if (config.install_controller === undefined) config.install_controller = true;
+      if (config.install_hub === undefined) config.install_hub = true;
+      if (config.install_eda === undefined) config.install_eda = true;
+      if (config.install_lightspeed === undefined) config.install_lightspeed = false;
+      if (config.controller_replicas === undefined) config.controller_replicas = 1;
+      if (!config.hub_storage_type) config.hub_storage_type = 'file';
+      if (config.hub_storage_class === undefined) config.hub_storage_class = '';
+      if (!config.hub_storage_size) config.hub_storage_size = '20Gi';
+      if (config.hub_s3_secret === undefined) config.hub_s3_secret = '';
+      if (config.hub_azure_secret === undefined) config.hub_azure_secret = '';
     }
 
     if (component === 'idm') {
@@ -1230,10 +1358,10 @@ function App() {
       id: credential.id || `imported-credential-${index + 1}`
     }));
     if (merged.aap.skip_tls_verify === undefined) merged.aap.skip_tls_verify = false;
-    if (merged.aap.project_sync_timeout === undefined) merged.aap.project_sync_timeout = 45;
-    if (merged.aap.project_sync_retries === undefined) merged.aap.project_sync_retries = 20;
-    if (merged.aap.project_sync_delay === undefined) merged.aap.project_sync_delay = 5;
-    if (merged.aap.project_playbook_wait_seconds === undefined) merged.aap.project_playbook_wait_seconds = 45;
+    if (merged.aap.project_sync_timeout === undefined) merged.aap.project_sync_timeout = 180;
+    if (merged.aap.project_sync_retries === undefined) merged.aap.project_sync_retries = 40;
+    if (merged.aap.project_sync_delay === undefined) merged.aap.project_sync_delay = 10;
+    if (merged.aap.project_playbook_wait_seconds === undefined) merged.aap.project_playbook_wait_seconds = 60;
     if (merged.aap.hub_publish_ado_collection === undefined) merged.aap.hub_publish_ado_collection = false;
     if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
@@ -1275,10 +1403,15 @@ function App() {
     if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
     if (!merged.git) merged.git = { ...defaults.git };
     if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
-    if (String(merged.scm_tool || '').toLowerCase() === 'bitbucket') {
-      merged.git.username = 'x-token-auth';
-    } else if (!merged.git.username) {
-      merged.git.username = 'oauth2';
+    {
+      const scm = String(merged.scm_tool || '').toLowerCase();
+      if (scm === 'bitbucket') {
+        merged.git.username = 'x-token-auth';
+      } else if (scm === 'github') {
+        merged.git.username = 'test';
+      } else if (!merged.git.username) {
+        merged.git.username = 'oauth2';
+      }
     }
     if (!merged.vault) merged.vault = { ...defaults.vault };
     if (merged.vault.encrypt === undefined) merged.vault.encrypt = true;
@@ -1374,6 +1507,50 @@ function App() {
     payload.selected_component_apps = [...new Set([...selectedGroups, ...selectedApps])];
     payload.component_config = selectedConfig;
     payload.component_options = selectedOptions;
+
+    // Always emit survey env choices for selected editable components.
+    // The UI shows defaults before onChange; without this, component_survey stays {}
+    // and custom multi-env never reaches bootstrap.
+    const selectedSurvey = {};
+    const existingSurvey = payload.component_survey && typeof payload.component_survey === 'object'
+      ? payload.component_survey
+      : {};
+    allowedConfig.forEach(component => {
+      if (!SURVEY_ENV_EDITABLE_COMPONENTS.has(component)) return;
+      const configured = existingSurvey[component]?.environments;
+      const environments = Array.isArray(configured) && configured.length > 0
+        ? configured.map(value => String(value || '').trim()).filter(Boolean)
+        : [...DEFAULT_SURVEY_ENVIRONMENTS];
+      selectedSurvey[component] = {
+        environments: environments.length > 0 ? environments : [...DEFAULT_SURVEY_ENVIRONMENTS]
+      };
+    });
+    payload.component_survey = selectedSurvey;
+
+    if (!payload.git) payload.git = {};
+    {
+      const scm = String(payload.scm_tool || '').toLowerCase();
+      if (scm === 'bitbucket') payload.git.username = 'x-token-auth';
+      else if (scm === 'github') payload.git.username = 'test';
+      else if (!payload.git.username) payload.git.username = 'oauth2';
+    }
+
+    const toPositiveInt = (value, fallback) => {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+    };
+    if (payload.aap) {
+      payload.aap.project_sync_timeout = Math.max(1, toPositiveInt(payload.aap.project_sync_timeout, 180));
+      payload.aap.project_sync_retries = Math.max(1, toPositiveInt(payload.aap.project_sync_retries, 40));
+      payload.aap.project_sync_delay = Math.max(0, toPositiveInt(payload.aap.project_sync_delay, 10));
+      if (payload.aap.project_playbook_wait_seconds !== undefined) {
+        payload.aap.project_playbook_wait_seconds = Math.max(
+          0,
+          toPositiveInt(payload.aap.project_playbook_wait_seconds, 60)
+        );
+      }
+    }
+
     if (payload.aap) {
       const org = payload.aap.organization || 'ADO';
       payload.aap.inventory = normalizeOrgScopedName(payload.aap.inventory, org, 'inventory');
@@ -1396,6 +1573,7 @@ function App() {
         payload.selected_component_apps = [];
         payload.component_config = {};
         payload.component_options = {};
+        payload.component_survey = {};
       }
       payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
         const { id, ...credentialPayload } = credential;
@@ -1758,6 +1936,8 @@ function App() {
     setDebugContent('Select a debug tab to load details.');
     setDebugLoading(false);
     setRunFinished(false);
+    setLastRunStatus(null);
+    setConsoleSearch('');
     setShowRawOutput(false);
     setActiveTab('logs');
     setActionsOpen(false);
@@ -1843,6 +2023,8 @@ function App() {
     setActiveTab('logs');
     setPreview(`${startMessage}\n`);
     setEvents(`${startMessage}\n`);
+    setLastRunStatus(null);
+    setConsoleSearch('');
 
     let keepPolling = true;
 
@@ -1881,11 +2063,13 @@ function App() {
       const errorLine = result.error ? `\nERROR: ${result.error}` : '';
       setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}${errorLine}${recap}`);
       setEvents(eventsText || 'No events were returned.');
+      setLastRunStatus((!response.ok || result.status === 'failed') ? 'failed' : 'complete');
       if (!response.ok || result.status === 'failed') {
         setImportStatus(result.error || `${endpoint} failed`);
       }
     } catch (err) {
       setPreview(`ERROR:\n${err.message}`);
+      setLastRunStatus('failed');
     } finally {
       keepPolling = false;
       clearInterval(poller);
@@ -1967,6 +2151,7 @@ function App() {
       const errorLine = result.error ? `\nERROR: ${result.error}` : '';
       setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}${errorLine}${recap}`);
       setEvents(eventsText || 'No events were returned.');
+      setLastRunStatus((!response.ok || result.status === 'failed') ? 'failed' : 'complete');
       setImportStatus(
         response.ok && result.status === 'complete'
           ? (result.encryptJson
@@ -1976,6 +2161,7 @@ function App() {
       );
     } catch (err) {
       setPreview(`ERROR:\n${err.message}`);
+      setLastRunStatus('failed');
       setImportStatus(`Push JSON failed: ${err.message}`);
     } finally {
       keepPolling = false;
@@ -2002,12 +2188,73 @@ function App() {
     }
   };
 
-  const renderOutput = () => {
-    if (showRawOutput) return preview;
+  const highlightSearchText = (line, query) => {
+    if (!query) return line;
+    const lower = line.toLowerCase();
+    const q = query.toLowerCase();
+    const parts = [];
+    let start = 0;
+    let matchAt = lower.indexOf(q, start);
+    let key = 0;
+    while (matchAt !== -1) {
+      if (matchAt > start) parts.push(line.slice(start, matchAt));
+      parts.push(
+        <mark
+          key={`m-${key++}`}
+          style={{ backgroundColor: '#f0c14b', color: '#151515', padding: 0 }}
+        >
+          {line.slice(matchAt, matchAt + q.length)}
+        </mark>
+      );
+      start = matchAt + q.length;
+      matchAt = lower.indexOf(q, start);
+    }
+    if (start < line.length) parts.push(line.slice(start));
+    return parts.length ? parts : line;
+  };
 
-    return preview.split('\n').map((line, idx) => {
+  const filterConsoleLines = lines => {
+    const q = consoleSearch.trim();
+    if (!q) return lines.map((line, idx) => ({ line, idx }));
+    const needle = q.toLowerCase();
+    return lines
+      .map((line, idx) => ({ line, idx }))
+      .filter(({ line }) => line.toLowerCase().includes(needle));
+  };
+
+  const renderOutput = () => {
+    const allLines = preview.split('\n');
+    if (showRawOutput) {
+      const filtered = filterConsoleLines(allLines);
+      if (!filtered.length) {
+        return <div style={{ color: '#b8bbbe' }}>No lines match “{consoleSearch.trim()}”.</div>;
+      }
+      return filtered.map(({ line, idx }) => (
+        <div key={idx}>{highlightSearchText(line || ' ', consoleSearch.trim())}</div>
+      ));
+    }
+
+    let inRecap = false;
+    let recapTone = null; // 'success' | 'failure' | null
+    const toneForRecapStart = startIdx => {
+      const peek = allLines.slice(startIdx, startIdx + 8).join('\n');
+      if (/Result:\s*FAILURE/i.test(peek)) return 'failure';
+      if (/Result:\s*SUCCESS/i.test(peek)) return 'success';
+      if (lastRunStatus === 'failed') return 'failure';
+      if (lastRunStatus === 'complete') return 'success';
+      return null;
+    };
+
+    const styled = allLines.map((line, idx) => {
       let color = '#f0f0f0';
       let fontWeight = 400;
+
+      if (/^=== ADO .+ Recap ===/.test(line)) {
+        inRecap = true;
+        recapTone = toneForRecapStart(idx);
+      } else if (inRecap && line === '' && idx > 0 && allLines[idx - 1] !== '') {
+        // trailing blank after recap body — keep coloring this blank then exit
+      }
 
       const failedMatch = line.match(/failed=(\d+)/);
       const unreachableMatch = line.match(/unreachable=(\d+)/);
@@ -2023,7 +2270,19 @@ function App() {
         failedCount > 0 ||
         unreachableCount > 0;
 
-      if (isRecapLine) {
+      if (inRecap) {
+        if (recapTone === 'failure') {
+          color = '#ff6b6b';
+          fontWeight = /^===|^Result:/i.test(line) ? 700 : 600;
+        } else if (recapTone === 'success') {
+          color = '#8bc34a';
+          fontWeight = /^===|^Result:/i.test(line) ? 700 : 600;
+        }
+        if (line === '' && idx > 0 && allLines[idx - 1] !== '') {
+          inRecap = false;
+          recapTone = null;
+        }
+      } else if (isRecapLine) {
         if (failedCount > 0 || unreachableCount > 0) {
           color = '#ff6b6b';
           fontWeight = 700;
@@ -2054,20 +2313,43 @@ function App() {
       } else if (/^TASK \[/.test(line)) {
         color = '#b2b0ea';
         fontWeight = 700;
+      } else if (/"status":\s*"failed"/.test(line) || /^Result:\s*FAILURE/i.test(line)) {
+        color = '#ff6b6b';
+        fontWeight = 700;
+      } else if (/"status":\s*"complete"/.test(line) || /^Result:\s*SUCCESS/i.test(line)) {
+        color = '#8bc34a';
+        fontWeight = 700;
       }
 
-      return (
-        <div key={idx} style={{ color, fontWeight }}>
-          {line || ' '}
-        </div>
-      );
+      return { idx, line, color, fontWeight };
     });
+
+    const q = consoleSearch.trim();
+    const visible = q
+      ? styled.filter(({ line }) => line.toLowerCase().includes(q.toLowerCase()))
+      : styled;
+
+    if (!visible.length) {
+      return <div style={{ color: '#b8bbbe' }}>No lines match “{q}”.</div>;
+    }
+
+    return visible.map(({ idx, line, color, fontWeight }) => (
+      <div key={idx} style={{ color, fontWeight }}>
+        {highlightSearchText(line || ' ', q)}
+      </div>
+    ));
   };
 
   const renderEvents = () => {
-    return (events || 'No events yet.').split('\n').map((line, idx) => {
-      const isError = /failed|error|exitCode=[1-9]|exit code [1-9]/i.test(line);
-      const isSuccess = /complete|finished exitCode=0|exit code 0/i.test(line);
+    const allLines = (events || 'No events yet.').split('\n');
+    const filtered = filterConsoleLines(allLines);
+    if (!filtered.length) {
+      return <div style={{ color: '#b8bbbe' }}>No lines match “{consoleSearch.trim()}”.</div>;
+    }
+
+    return filtered.map(({ line, idx }) => {
+      const isError = /failed|error|exitCode=[1-9]|exit code [1-9]|Result:\s*FAILURE/i.test(line);
+      const isSuccess = /complete|finished exitCode=0|exit code 0|Result:\s*SUCCESS/i.test(line);
 
       let color = '#f0f0f0';
       let fontWeight = 400;
@@ -2082,7 +2364,7 @@ function App() {
 
       return (
         <div key={idx} style={{ color, fontWeight }}>
-          {line || ' '}
+          {highlightSearchText(line || ' ', consoleSearch.trim())}
         </div>
       );
     });
@@ -2090,15 +2372,20 @@ function App() {
 
   const renderDebugOutput = () => {
     const content = debugLoading ? `Loading ${debugTabLabel(debugTab)}...` : debugContent;
+    const allLines = (content || `No ${debugTabLabel(debugTab)} data yet.`).split('\n');
+    const filtered = filterConsoleLines(allLines);
+    if (!filtered.length) {
+      return <div style={{ color: '#b8bbbe' }}>No lines match “{consoleSearch.trim()}”.</div>;
+    }
 
-    return (content || `No ${debugTabLabel(debugTab)} data yet.`).split('\n').map((line, idx) => {
+    return filtered.map(({ line, idx }) => {
       let color = '#f0f0f0';
       let fontWeight = 400;
 
-      if (/failed|error|fatal|unreachable/i.test(line)) {
+      if (/failed|error|fatal|unreachable|Result:\s*FAILURE/i.test(line)) {
         color = '#ff6b6b';
         fontWeight = 700;
-      } else if (/complete|success|exitCode=0|exit code 0/i.test(line)) {
+      } else if (/complete|success|exitCode=0|exit code 0|Result:\s*SUCCESS/i.test(line)) {
         color = '#8bc34a';
         fontWeight = 600;
       } else if (/^=====|^Repository:|^Useful|^OpenShift|^Podman|^Embedded shell/i.test(line)) {
@@ -2108,7 +2395,7 @@ function App() {
 
       return (
         <div key={idx} style={{ color, fontWeight }}>
-          {line || ' '}
+          {highlightSearchText(line || ' ', consoleSearch.trim())}
         </div>
       );
     });
@@ -2345,10 +2632,14 @@ function App() {
   };
 
   const openshiftVirtHelp = {
-    apiHost: 'OpenShift API server URL for the virtualization cluster. Example: https://api.ocp.prod.rhlab:6443.',
-    apiToken: 'OpenShift token used to create the VM. Stored in generated vault files.',
-    skipTls: 'Skip OpenShift API certificate validation for self-signed or lab certificates.',
-    sshPublicKey: 'SSH public key (ssh-rsa / ssh-ed25519), not a private key. Attached to the VM job template and added to launch-time cloud-init.'
+    apiHost: 'Optional override for the OpenShift API URL. Leave blank to inherit OpenShift Configuration → API Host.',
+    apiToken: 'Optional override for the OpenShift token. Leave blank to inherit OpenShift Configuration → Token. Stored in generated vault files.',
+    skipTls: 'Inherited from OpenShift Configuration → Skip TLS certificate verification unless you explicitly override it in generated vars.',
+    sshPublicKey: 'SSH public key (ssh-rsa / ssh-ed25519), not a private key. Attached to the VM job template and added to launch-time cloud-init.',
+    ipRange: 'Optional suggested IP range for operators when launching the VM job. Example: 192.168.0.100-192.168.0.150. Shown in the survey help text; static IP is still chosen at launch.',
+    prefixLength: 'CIDR prefix length used with a static IP at launch. Written as the survey default. Default: 24.',
+    gateway: 'Optional default gateway for static networking. Written to generated vars and used as the job survey default.',
+    dnsServers: 'Optional comma-separated DNS servers for static networking. Written to generated vars and used as the job survey default. Example: 8.8.8.8,1.1.1.1.'
   };
 
   const openshiftHelp = {
@@ -2404,6 +2695,230 @@ echo $TOKEN
       {renderTextField('Storage', `component_config.${component}.storage`, 'text', defaultComponentHelp.storage)}
     </Grid>
   );
+
+  const renderAapOcpInstallConfig = () => {
+    const config = data.component_config.aap;
+    const installDuringBootstrap = config.install_during_bootstrap === true;
+    const minimalFootprint = config.minimal_footprint === true;
+
+    const setAapInstallField = (path, value) => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config) copy.component_config = {};
+        if (!copy.component_config.aap) copy.component_config.aap = {};
+        const parts = path.replace(/^component_config\.aap\./, '').split('.');
+        let cursor = copy.component_config.aap;
+        for (let i = 0; i < parts.length - 1; i += 1) {
+          if (!cursor[parts[i]] || typeof cursor[parts[i]] !== 'object') cursor[parts[i]] = {};
+          cursor = cursor[parts[i]];
+        }
+        cursor[parts[parts.length - 1]] = value;
+        if (path === 'component_config.aap.admin_password' && copy.aap) {
+          copy.aap.admin_password = value;
+        }
+        if (path === 'component_config.aap.admin_username' && copy.aap) {
+          copy.aap.admin_username = value;
+        }
+        return copy;
+      });
+    };
+
+    const applyMinimalFootprint = value => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config) copy.component_config = {};
+        if (!copy.component_config.aap) copy.component_config.aap = {};
+        copy.component_config.aap.minimal_footprint = value;
+        if (value) {
+          copy.component_config.aap.install_hub = false;
+          copy.component_config.aap.install_eda = false;
+          copy.component_config.aap.install_lightspeed = false;
+          copy.component_config.aap.install_controller = true;
+        }
+        return copy;
+      });
+    };
+
+    const setComponentInstall = (key, value) => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config) copy.component_config = {};
+        if (!copy.component_config.aap) copy.component_config.aap = {};
+        copy.component_config.aap[key] = value;
+        if (value && (key === 'install_hub' || key === 'install_eda' || key === 'install_lightspeed')) {
+          copy.component_config.aap.minimal_footprint = false;
+        }
+        return copy;
+      });
+    };
+
+    return (
+      <>
+        <p style={{ color: mutedTextColor, marginTop: 0 }}>
+          Installs AAP 2.5 or 2.6 on OpenShift using <code>infra.aap_utilities.aap_ocp_install</code>.
+          The OpenShift API URL/token and TLS setting come from OpenShift Configuration.
+        </p>
+        <Grid hasGutter>
+          <GridItem span={12}>
+            <FormGroup label="Bootstrap install">
+              <Checkbox
+                id="aap-install-during-bootstrap"
+                label="Have bootstrap install AAP on OpenShift"
+                isChecked={installDuringBootstrap}
+                onChange={(_, value) => set('component_config.aap.install_during_bootstrap', value)}
+              />
+              <div style={{ color: mutedTextColor, marginTop: '6px', fontSize: '0.9em' }}>
+                {installDuringBootstrap
+                  ? 'Checked: bootstrap only installs AAP on OpenShift in this pod (no Controller config/apply). Rerun bootstrap after AAP is up to configure it. The Install AAP job template is not created.'
+                  : 'Unchecked: bootstrap configures an existing Controller and creates the Install AAP on OpenShift job template for later use.'}
+              </div>
+            </FormGroup>
+          </GridItem>
+          <GridItem span={12}>
+            <FormGroup label="Cluster footprint">
+              <Checkbox
+                id="aap-minimal-footprint"
+                label="Minimal footprint (Controller + Gateway only)"
+                isChecked={minimalFootprint}
+                onChange={(_, value) => applyMinimalFootprint(value)}
+              />
+              <div style={{ color: mutedTextColor, marginTop: '6px', fontSize: '0.9em' }}>
+                Disables Hub, EDA, and Lightspeed so installs fit CPU-constrained clusters. Uncheck to re-enable components below.
+              </div>
+            </FormGroup>
+          </GridItem>
+          {renderTextField('Admin Username', 'component_config.aap.admin_username', 'text', 'Platform admin user written into the AnsibleAutomationPlatform CR. Default: admin.')}
+          <GridItem span={6}>
+            <FormGroup label="Admin Password">
+              <TextInput
+                type="password"
+                value={config.admin_password || ''}
+                onChange={(_, value) => setAapInstallField('component_config.aap.admin_password', value)}
+              />
+              <div style={{ color: mutedTextColor, marginTop: '6px', fontSize: '0.9em' }}>
+                Stored in vault as <code>aap_admin_password</code>. Bootstrap creates
+                {' '}
+                <code>{(config.instance_name || 'aap')}-admin-password</code>
+                {' '}
+                and sets <code>spec.admin_password_secret</code>. Required for install-during-bootstrap.
+              </div>
+            </FormGroup>
+          </GridItem>
+          <GridItem span={6}>
+            <FormGroup label="AAP Version">
+              <select
+                value={config.deployment_version || '2.6'}
+                onChange={event => set('component_config.aap.deployment_version', event.target.value)}
+                style={{ width: '100%', height: '36px' }}
+              >
+                <option value="2.5">2.5</option>
+                <option value="2.6">2.6</option>
+              </select>
+            </FormGroup>
+          </GridItem>
+          <GridItem span={6}>
+            <FormGroup label="Component Deployment">
+              <select
+                value={config.component_deployment || 'unified'}
+                onChange={event => set('component_config.aap.component_deployment', event.target.value)}
+                style={{ width: '100%', height: '36px' }}
+              >
+                <option value="unified">Unified platform CR</option>
+                <option value="individual">Individual component CRs</option>
+              </select>
+            </FormGroup>
+          </GridItem>
+          {renderTextField('Namespace', 'component_config.aap.namespace', 'text', 'OpenShift namespace for the AAP operator and platform. Default: aap.')}
+          {renderTextField('Platform Instance Name', 'component_config.aap.instance_name', 'text', 'Name of the AnsibleAutomationPlatform custom resource.')}
+          <GridItem span={6}>
+            <FormGroup label="Operator Approval">
+              <select
+                value={config.operator_approval || 'automatic'}
+                onChange={event => set('component_config.aap.operator_approval', event.target.value)}
+                style={{ width: '100%', height: '36px' }}
+              >
+                <option value="automatic">Automatic</option>
+                <option value="manual">Manual</option>
+              </select>
+            </FormGroup>
+          </GridItem>
+          {renderTextField('Controller Replicas', 'component_config.aap.controller_replicas', 'number', 'Controller replica count. Default: 1.')}
+          <GridItem span={12}>
+            <FormGroup label="Installation">
+              <Checkbox
+                id="aap-create-namespace"
+                label="Create namespace"
+                isChecked={config.create_namespace !== false}
+                onChange={(_, value) => set('component_config.aap.create_namespace', value)}
+              />
+              <Checkbox
+                id="aap-install-controller"
+                label="Install Automation Controller"
+                isChecked={config.install_controller !== false}
+                onChange={(_, value) => setComponentInstall('install_controller', value)}
+              />
+              <Checkbox
+                id="aap-install-hub"
+                label="Install Private Automation Hub"
+                isChecked={config.install_hub !== false}
+                isDisabled={minimalFootprint}
+                onChange={(_, value) => setComponentInstall('install_hub', value)}
+              />
+              <Checkbox
+                id="aap-install-eda"
+                label="Install Event-Driven Ansible"
+                isChecked={config.install_eda !== false}
+                isDisabled={minimalFootprint}
+                onChange={(_, value) => setComponentInstall('install_eda', value)}
+              />
+              <Checkbox
+                id="aap-install-lightspeed"
+                label="Install Ansible Lightspeed"
+                isChecked={config.install_lightspeed === true}
+                isDisabled={minimalFootprint}
+                onChange={(_, value) => setComponentInstall('install_lightspeed', value)}
+              />
+            </FormGroup>
+          </GridItem>
+          {config.install_hub !== false && (
+            <>
+              <GridItem span={6}>
+                <FormGroup label="Hub Storage Type">
+                  <select
+                    value={config.hub_storage_type || 'file'}
+                    onChange={event => set('component_config.aap.hub_storage_type', event.target.value)}
+                    style={{ width: '100%', height: '36px' }}
+                  >
+                    <option value="file">File</option>
+                    <option value="S3">S3</option>
+                    <option value="azure">Azure</option>
+                  </select>
+                </FormGroup>
+              </GridItem>
+              {config.hub_storage_type === 'file' && (
+                <>
+                  {renderTextField('Hub Storage Class', 'component_config.aap.hub_storage_class', 'text', 'ReadWriteMany-capable StorageClass for file-backed Hub.')}
+                  {renderTextField('Hub Storage Size', 'component_config.aap.hub_storage_size', 'text', 'Hub persistent volume size. Default: 20Gi.')}
+                </>
+              )}
+              {config.hub_storage_type === 'S3' && renderTextField(
+                'Hub S3 Secret',
+                'component_config.aap.hub_s3_secret',
+                'text',
+                'Existing OpenShift secret containing the S3 object storage configuration.'
+              )}
+              {config.hub_storage_type === 'azure' && renderTextField(
+                'Hub Azure Secret',
+                'component_config.aap.hub_azure_secret',
+                'text',
+                'Existing OpenShift secret containing the Azure object storage configuration.'
+              )}
+            </>
+          )}
+        </Grid>
+      </>
+    );
+  };
 
   const renderGrafanaConfig = () => (
     <>
@@ -2528,6 +3043,186 @@ echo $TOKEN
     </>
   );
 
+  const setAapAuth = (method, field, value) => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      if (!copy.aap.auth) copy.aap.auth = buildDefaultAapAuth(copy.aap.organization || 'ADO');
+      if (!copy.aap.auth[method]) {
+        copy.aap.auth[method] = buildDefaultAapAuth(copy.aap.organization || 'ADO')[method];
+      }
+      copy.aap.auth[method][field] = value;
+      return copy;
+    });
+  };
+
+  const renderAapAuthConfig = () => {
+    const auth = data.aap?.auth || buildDefaultAapAuth(data.aap?.organization || 'ADO');
+    const aapVersion = Number.parseInt(String(data.aap?.version || '26'), 10);
+    const gatewayAuthSupported = aapVersion >= 25;
+    const oidc = auth.keycloak_oidc || {};
+    const ldap = auth.ldap || {};
+    const saml = auth.keycloak_saml || {};
+    const selected = ['keycloak_oidc', 'ldap', 'keycloak_saml'].includes(activeAapAuthTab)
+      ? activeAapAuthTab
+      : 'keycloak_oidc';
+
+    return (
+      <div>
+        <p style={{ color: mutedTextColor, marginTop: 0 }}>
+          Configure Automation Gateway authenticators for AAP 2.5/2.6 via{' '}
+          <code>infra.aap_configuration</code> (<code>gateway_authenticators</code> /{' '}
+          <code>gateway_authenticator_maps</code>). Applies during bootstrap when a method is enabled.
+          Same <code>aap.auth</code> block works from UI or CLI preflight JSON.
+        </p>
+        {!gatewayAuthSupported && (
+          <p style={{ color: '#b35900', marginTop: 0 }}>
+            AAP version is set to 2.4. Gateway authenticators require 2.5+. Switch General → AAP Version to 2.5 or 2.6.
+          </p>
+        )}
+        <Tabs activeKey={selected} onSelect={(_, key) => setActiveAapAuthTab(key)}>
+          <Tab eventKey="keycloak_oidc" title="Keycloak OIDC" />
+          <Tab eventKey="ldap" title="LDAP" />
+          <Tab eventKey="keycloak_saml" title="Keycloak SAML" />
+        </Tabs>
+        <br />
+        {selected === 'keycloak_oidc' && (
+          <Grid hasGutter>
+            <GridItem span={12}>
+              <Checkbox
+                id="aap-auth-oidc-enabled"
+                label="Configure Keycloak OIDC authenticator"
+                isChecked={oidc.enabled === true}
+                onChange={(_, v) => setAapAuth('keycloak_oidc', 'enabled', v === true)}
+              />
+            </GridItem>
+            {renderTextField('Name', 'aap.auth.keycloak_oidc.name', 'text', 'Authenticator display name.')}
+            {renderTextField('Slug', 'aap.auth.keycloak_oidc.slug', 'text', 'Immutable authenticator slug.')}
+            {renderTextField('Access Token URL', 'aap.auth.keycloak_oidc.access_token_url', 'text', 'Keycloak token endpoint.')}
+            {renderTextField('Authorization URL', 'aap.auth.keycloak_oidc.authorization_url', 'text', 'Keycloak auth endpoint.')}
+            {renderTextField('Client ID (KEY)', 'aap.auth.keycloak_oidc.key', 'text', 'OIDC client ID.')}
+            <GridItem span={6}>
+              <FormGroup label="Client Secret">
+                <TextInput
+                  type="password"
+                  value={oidc.secret || ''}
+                  onChange={(_, v) => setAapAuth('keycloak_oidc', 'secret', v)}
+                />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={12}>
+              <FormGroup label="Realm Public Key (RS256)">
+                <textarea
+                  value={oidc.public_key || ''}
+                  onChange={e => setAapAuth('keycloak_oidc', 'public_key', e.target.value)}
+                  rows={4}
+                  style={{ width: '100%', background: fieldBg, color: fieldColor, border: `1px solid ${borderColor}`, borderRadius: '4px', padding: '8px', fontFamily: 'monospace' }}
+                />
+              </FormGroup>
+            </GridItem>
+            {renderTextField('Groups Claim', 'aap.auth.keycloak_oidc.groups_claim', 'text', 'Token claim for groups. Default: Group.')}
+            {renderTextField('Superuser groups', 'aap.auth.keycloak_oidc.superuser_groups', 'text', 'Comma-separated groups mapped to is_superuser.')}
+            {renderTextField('Organization groups', 'aap.auth.keycloak_oidc.organization_groups', 'text', 'Comma-separated groups mapped to organization role.')}
+            {renderTextField('Organization', 'aap.auth.keycloak_oidc.organization', 'text', 'Target organization for maps.')}
+            {renderTextField('Organization role', 'aap.auth.keycloak_oidc.organization_role', 'text', 'Example: Organization Member or Organization Admin.')}
+          </Grid>
+        )}
+        {selected === 'ldap' && (
+          <Grid hasGutter>
+            <GridItem span={12}>
+              <Checkbox
+                id="aap-auth-ldap-enabled"
+                label="Configure LDAP authenticator"
+                isChecked={ldap.enabled === true}
+                onChange={(_, v) => setAapAuth('ldap', 'enabled', v === true)}
+              />
+            </GridItem>
+            {renderTextField('Name', 'aap.auth.ldap.name', 'text', 'Authenticator display name.')}
+            {renderTextField('Slug', 'aap.auth.ldap.slug', 'text', 'Immutable authenticator slug.')}
+            {renderTextField('Server URI', 'aap.auth.ldap.server_uri', 'text', 'Example: ldap://idm.example.com or ldaps://idm.example.com:636')}
+            {renderTextField('Bind DN', 'aap.auth.ldap.bind_dn', 'text', 'Service account bind DN.')}
+            <GridItem span={6}>
+              <FormGroup label="Bind Password">
+                <TextInput
+                  type="password"
+                  value={ldap.bind_password || ''}
+                  onChange={(_, v) => setAapAuth('ldap', 'bind_password', v)}
+                />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={6}>
+              <Checkbox
+                id="aap-auth-ldap-start-tls"
+                label="Start TLS"
+                isChecked={ldap.start_tls === true}
+                onChange={(_, v) => setAapAuth('ldap', 'start_tls', v === true)}
+              />
+            </GridItem>
+            {renderTextField('User search', 'aap.auth.ldap.user_search', 'text', 'base_dn, SCOPE_SUBTREE, (uid=%(user)s) — comma-separated.')}
+            {renderTextField('Group search', 'aap.auth.ldap.group_search', 'text', 'base_dn, SCOPE_SUBTREE, (objectClass=groupOfNames) — comma-separated.')}
+            {renderTextField('Group type', 'aap.auth.ldap.group_type', 'text', 'Default: MemberDNGroupType.')}
+            {renderTextField('Superuser groups', 'aap.auth.ldap.superuser_groups', 'text', 'LDAP group DNs mapped to is_superuser.')}
+            {renderTextField('Organization groups', 'aap.auth.ldap.organization_groups', 'text', 'LDAP group DNs mapped to organization role.')}
+            {renderTextField('Organization', 'aap.auth.ldap.organization', 'text', 'Target organization for maps.')}
+            {renderTextField('Organization role', 'aap.auth.ldap.organization_role', 'text', 'Example: Organization Member or Organization Admin.')}
+          </Grid>
+        )}
+        {selected === 'keycloak_saml' && (
+          <Grid hasGutter>
+            <GridItem span={12}>
+              <Checkbox
+                id="aap-auth-saml-enabled"
+                label="Configure Keycloak SAML authenticator"
+                isChecked={saml.enabled === true}
+                onChange={(_, v) => setAapAuth('keycloak_saml', 'enabled', v === true)}
+              />
+            </GridItem>
+            {renderTextField('Name', 'aap.auth.keycloak_saml.name', 'text', 'Authenticator display name.')}
+            {renderTextField('Slug', 'aap.auth.keycloak_saml.slug', 'text', 'Immutable authenticator slug.')}
+            {renderTextField('SP Entity ID', 'aap.auth.keycloak_saml.sp_entity_id', 'text', 'SAML service provider entity ID.')}
+            {renderTextField('IdP Login URL', 'aap.auth.keycloak_saml.idp_url', 'text', 'Keycloak SAML SSO URL.')}
+            {renderTextField('IdP Entity ID', 'aap.auth.keycloak_saml.idp_entity_id', 'text', 'Keycloak realm entity ID.')}
+            {renderTextField('Callback / ACS URL', 'aap.auth.keycloak_saml.callback_url', 'text', 'Optional ACS callback URL.')}
+            <GridItem span={12}>
+              <FormGroup label="SP Public Certificate">
+                <textarea
+                  value={saml.sp_public_cert || ''}
+                  onChange={e => setAapAuth('keycloak_saml', 'sp_public_cert', e.target.value)}
+                  rows={3}
+                  style={{ width: '100%', background: fieldBg, color: fieldColor, border: `1px solid ${borderColor}`, borderRadius: '4px', padding: '8px', fontFamily: 'monospace' }}
+                />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={12}>
+              <FormGroup label="SP Private Key">
+                <textarea
+                  value={saml.sp_private_key || ''}
+                  onChange={e => setAapAuth('keycloak_saml', 'sp_private_key', e.target.value)}
+                  rows={3}
+                  style={{ width: '100%', background: fieldBg, color: fieldColor, border: `1px solid ${borderColor}`, borderRadius: '4px', padding: '8px', fontFamily: 'monospace' }}
+                />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={12}>
+              <FormGroup label="IdP X509 Certificate">
+                <textarea
+                  value={saml.idp_x509_cert || ''}
+                  onChange={e => setAapAuth('keycloak_saml', 'idp_x509_cert', e.target.value)}
+                  rows={3}
+                  style={{ width: '100%', background: fieldBg, color: fieldColor, border: `1px solid ${borderColor}`, borderRadius: '4px', padding: '8px', fontFamily: 'monospace' }}
+                />
+              </FormGroup>
+            </GridItem>
+            {renderTextField('IdP groups attribute', 'aap.auth.keycloak_saml.idp_groups', 'text', 'Assertion attribute for groups.')}
+            {renderTextField('Superuser groups', 'aap.auth.keycloak_saml.superuser_groups', 'text', 'Groups mapped to is_superuser.')}
+            {renderTextField('Organization groups', 'aap.auth.keycloak_saml.organization_groups', 'text', 'Groups mapped to organization role.')}
+            {renderTextField('Organization', 'aap.auth.keycloak_saml.organization', 'text', 'Target organization for maps.')}
+            {renderTextField('Organization role', 'aap.auth.keycloak_saml.organization_role', 'text', 'Example: Organization Member or Organization Admin.')}
+          </Grid>
+        )}
+      </div>
+    );
+  };
 
   const renderMachineCredentialConfig = () => {
     const credential = data.aap.machine_credential || defaults.aap.machine_credential;
@@ -2876,9 +3571,14 @@ echo $TOKEN
     location: 'Logical location where the Satellite server is installed. Example: AWS, datacenter1, or lab.',
     rhnOrgId: 'Red Hat account organization ID from Hybrid Cloud Console. Example: 12345678.',
     rhnActivationKey: 'RHN activation key from Hybrid Cloud Console for registering the Satellite host. Stored in generated vault files.',
-    manifestFile: 'Upload the Red Hat Satellite manifest ZIP from Hybrid Cloud Console. Bootstrap writes it to the generated repo files/ directory and passes that path to the Satellite install role.',
+    rhnConnected: 'When true, configure Satellite as connected to Red Hat CDN/proxy. When false, configure disconnected CDN sync from an upstream Satellite. Maps to satellite_config_rhn_connected (default true).',
+    manifestFile: 'Upload the Red Hat Satellite manifest ZIP from Hybrid Cloud Console. Bootstrap writes it to the generated repo files/ directory as satellite_config_manifest_file for the Satellite configure playbook.',
     sizeProfile: 'Sizing profile used for Satellite tuning and pre-check CPU/RAM values.',
     reqDirs: 'Logical volumes to create for Satellite data. Each row needs mount_point, lv_name, and lv_size.',
+    vgName: 'LVM volume group name used for Satellite data mounts. Default: satellite.',
+    dataDeviceName: 'Disk device basename for the Satellite volume group (for example sdb or vdb). Leave blank to auto-discover a suitable disk. Maps to satellite_install_data_device_name.',
+    dataDevice: 'Device path prefix combined with the disk basename. Default: /dev.',
+    dataDiskMinSize: 'Minimum size required for an auto-discovered Satellite data disk. Example: 10G.',
     serviceAccountUsername: 'Satellite service account username for API and inventory operations. Example: svc_aap_satellite.',
     serviceAccountPassword: 'Password for the Satellite service account. Stored in generated vault files.',
     adminPassword: 'Optional Satellite admin password for bootstrap tasks that still require admin access. Stored in generated vault files.',
@@ -2993,6 +3693,16 @@ echo $TOKEN
         {renderTextField('Satellite Install Location', 'component_config.satellite.location', 'text', satelliteHelp.location)}
         {renderTextField('RHN Organization ID', 'component_config.satellite.rhn_org_id', 'text', satelliteHelp.rhnOrgId)}
         {renderTextField('RHN Activation Key', 'component_config.satellite.admin_rhn_activation_key', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.rhnActivationKey)}
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('RHN Connected', satelliteHelp.rhnConnected)}>
+            <Checkbox
+              id="satellite-rhn-connected"
+              label="Satellite is connected to Red Hat CDN"
+              isChecked={data.component_config.satellite.rhn_connected !== false}
+              onChange={(_, v) => set('component_config.satellite.rhn_connected', v)}
+            />
+          </FormGroup>
+        </GridItem>
         <GridItem span={12}>
           <FormGroup label={labelWithHelp('Satellite Manifest File', satelliteHelp.manifestFile)}>
             <input
@@ -3007,8 +3717,8 @@ echo $TOKEN
             />
             <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
               {data.component_config.satellite.manifest_file
-                ? `Selected: ${data.component_config.satellite.manifest_file}. Generated repo path: files/${data.component_config.satellite.manifest_file}.`
-                : 'Upload a Red Hat Satellite manifest ZIP. It will be written to the generated repo files/ directory.'}
+                ? `Selected: ${data.component_config.satellite.manifest_file}. Bootstrap emits satellite_config_manifest_file=${data.component_config.satellite.manifest_file} (repo path files/${data.component_config.satellite.manifest_file}).`
+                : 'Upload a Red Hat Satellite manifest ZIP. Bootstrap writes satellite_config_manifest_file for the configure playbook.'}
             </div>
             {data.component_config.satellite.manifest_file && (
               <Button variant="link" onClick={clearSatelliteManifest}>Clear Manifest</Button>
@@ -3033,6 +3743,10 @@ echo $TOKEN
         {renderTextField('Service Account Username', 'component_config.satellite.service_account_username', 'text', satelliteHelp.serviceAccountUsername)}
         {renderTextField('Service Account Password', 'component_config.satellite.service_account_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.serviceAccountPassword)}
         {renderTextField('Admin Password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.adminPassword)}
+        {renderTextField('Volume Group Name', 'component_config.satellite.vg_name', 'text', satelliteHelp.vgName)}
+        {renderTextField('Data Disk Device Name', 'component_config.satellite.data_device_name', 'text', satelliteHelp.dataDeviceName)}
+        {renderTextField('Data Disk Path Prefix', 'component_config.satellite.data_device', 'text', satelliteHelp.dataDevice)}
+        {renderTextField('Data Disk Min Size', 'component_config.satellite.data_disk_min_size', 'text', satelliteHelp.dataDiskMinSize)}
         <GridItem span={12}>
           <FormGroup label={labelWithHelp('Satellite Storage Mounts', satelliteHelp.reqDirs)}>
             {(data.component_config.satellite.req_dirs || []).map((row, index) => (
@@ -3416,13 +4130,7 @@ echo $TOKEN
     </>
   );
 
-  const renderProvisionConfig = () => {
-    const openshiftVirtConfig = {
-      ...defaults.component_config.openshift_virt,
-      ...(data.component_config?.openshift_virt || {})
-    };
-
-    return (
+  const renderProvisionConfig = () => (
       <>
         {renderGroupComponentOptions(
           'provision',
@@ -3451,27 +4159,36 @@ echo $TOKEN
           </div>
           <div style={{ color: mutedTextColor, marginBottom: '14px' }}>
             Creates a standalone VM from an OpenShift Virtualization boot image. This does not install Satellite automatically.
+            API host, token, and TLS verification inherit from OpenShift Configuration unless overridden below.
+            Network defaults (gateway, DNS, prefix, optional IP range) seed the job survey; static IP is chosen at launch.
           </div>
-          <Grid hasGutter>
-            {renderTextField('OpenShift API Host', 'component_config.openshift_virt.api_host', 'text', openshiftVirtHelp.apiHost)}
-            <GridItem span={6}>
-              <FormGroup label={labelWithHelp('TLS Certificate Verification', openshiftVirtHelp.skipTls)}>
-                <Checkbox
-                  id="openshift-virt-skip-tls-verify"
-                  label="Skip TLS certificate verification for self-signed certificates"
-                  isChecked={openshiftVirtConfig.skip_tls_verify}
-                  onChange={(_, v) => set('component_config.openshift_virt.skip_tls_verify', v)}
-                />
-              </FormGroup>
-            </GridItem>
-            {renderTextAreaField('OpenShift API Token', 'component_config.openshift_virt.api_token', openshiftVirtHelp.apiToken, 3)}
-            {renderTextAreaField('SSH Public Key', 'component_config.openshift_virt.ssh_public_key', openshiftVirtHelp.sshPublicKey, 3)}
-          </Grid>
+          <Tabs
+            activeKey={activeOpenshiftVirtTab}
+            onSelect={(_, key) => setActiveOpenshiftVirtTab(key)}
+          >
+            <Tab eventKey="general" title="General" />
+            <Tab eventKey="network" title="Network" />
+          </Tabs>
+          <div style={{ marginTop: '16px' }}>
+            {activeOpenshiftVirtTab === 'network' ? (
+              <Grid hasGutter>
+                {renderTextField('Suggested IP Range (optional)', 'component_config.openshift_virt.ip_range', 'text', openshiftVirtHelp.ipRange)}
+                {renderTextField('Default Prefix Length', 'component_config.openshift_virt.prefix_length', 'number', openshiftVirtHelp.prefixLength)}
+                {renderTextField('Default Gateway (optional)', 'component_config.openshift_virt.gateway', 'text', openshiftVirtHelp.gateway)}
+                {renderTextField('Default DNS Servers (optional)', 'component_config.openshift_virt.dns_servers', 'text', openshiftVirtHelp.dnsServers)}
+              </Grid>
+            ) : (
+              <Grid hasGutter>
+                {renderTextField('OpenShift API Host (optional override)', 'component_config.openshift_virt.api_host', 'text', openshiftVirtHelp.apiHost)}
+                {renderTextAreaField('OpenShift API Token (optional override)', 'component_config.openshift_virt.api_token', openshiftVirtHelp.apiToken, 3)}
+                {renderTextAreaField('SSH Public Key', 'component_config.openshift_virt.ssh_public_key', openshiftVirtHelp.sshPublicKey, 3)}
+              </Grid>
+            )}
+          </div>
         </div>
         )}
       </>
-    );
-  };
+  );
 
   const renderAllConfig = () => (
     <div
@@ -4132,6 +4849,9 @@ echo $TOKEN
         break;
       case 'jira':
         body = renderJiraConfig();
+        break;
+      case 'aap':
+        body = renderAapOcpInstallConfig();
         break;
       case 'grafana':
         body = renderGrafanaConfig();
@@ -5220,7 +5940,13 @@ ${vaultYaml}
                             if (!copy.git) copy.git = {};
                             if (v === 'bitbucket') {
                               copy.git.username = 'x-token-auth';
-                            } else if (!copy.git.username || copy.git.username === 'x-token-auth') {
+                            } else if (v === 'github') {
+                              copy.git.username = 'test';
+                            } else if (
+                              !copy.git.username
+                              || copy.git.username === 'x-token-auth'
+                              || copy.git.username === 'test'
+                            ) {
                               copy.git.username = 'oauth2';
                             }
                             return copy;
@@ -5232,6 +5958,11 @@ ${vaultYaml}
                   {data.scm_tool === 'bitbucket' && (
                     <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
                       Bitbucket uses <code>Authorization: Bearer</code> for bootstrap git clone/push, and Source Control credentials use username <code>x-token-auth</code> with the token as the password.
+                    </p>
+                  )}
+                  {data.scm_tool === 'github' && (
+                    <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
+                      GitHub HTTPS auth uses username <code>test</code> automatically; put the personal access token in the Git token field (password).
                     </p>
                   )}
 
@@ -5317,6 +6048,7 @@ ${vaultYaml}
                   <br />
                   <Tabs activeKey={activeAapConfigTab} onSelect={(_, key) => setActiveAapConfigTab(key)}>
                     <Tab eventKey="general" title="General" />
+                    <Tab eventKey="auth" title="Auth" />
                     <Tab eventKey="hub" title="Hub" />
                     <Tab eventKey="galaxy" title="Galaxy" />
                   </Tabs>
@@ -5366,8 +6098,13 @@ ${vaultYaml}
                         <FormGroup label="Project sync timeout (seconds)">
                           <TextInput
                             type="number"
-                            value={data.aap.project_sync_timeout}
-                            onChange={(_, v) => set('aap.project_sync_timeout', Number(v))}
+                            min={1}
+                            value={data.aap.project_sync_timeout ?? 180}
+                            onChange={(_e, v) => {
+                              const raw = v ?? _e?.currentTarget?.value ?? _e?.target?.value;
+                              const parsed = Number.parseInt(String(raw), 10);
+                              if (!Number.isNaN(parsed)) set('aap.project_sync_timeout', parsed);
+                            }}
                           />
                         </FormGroup>
                       </GridItem>
@@ -5375,14 +6112,47 @@ ${vaultYaml}
                         <FormGroup label="Project sync retries">
                           <TextInput
                             type="number"
-                            value={data.aap.project_sync_retries}
-                            onChange={(_, v) => set('aap.project_sync_retries', Number(v))}
+                            min={1}
+                            value={data.aap.project_sync_retries ?? 40}
+                            onChange={(_e, v) => {
+                              const raw = v ?? _e?.currentTarget?.value ?? _e?.target?.value;
+                              const parsed = Number.parseInt(String(raw), 10);
+                              if (!Number.isNaN(parsed)) set('aap.project_sync_retries', parsed);
+                            }}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={6}>
+                        <FormGroup label="Retry delay (seconds)">
+                          <TextInput
+                            type="number"
+                            min={0}
+                            value={data.aap.project_sync_delay ?? 10}
+                            onChange={(_e, v) => {
+                              const raw = v ?? _e?.currentTarget?.value ?? _e?.target?.value;
+                              const parsed = Number.parseInt(String(raw), 10);
+                              if (!Number.isNaN(parsed)) set('aap.project_sync_delay', parsed);
+                            }}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={6}>
+                        <FormGroup label="Post-sync playbook wait (seconds)">
+                          <TextInput
+                            type="number"
+                            min={0}
+                            value={data.aap.project_playbook_wait_seconds ?? 60}
+                            onChange={(_e, v) => {
+                              const raw = v ?? _e?.currentTarget?.value ?? _e?.target?.value;
+                              const parsed = Number.parseInt(String(raw), 10);
+                              if (!Number.isNaN(parsed)) set('aap.project_playbook_wait_seconds', parsed);
+                            }}
                           />
                         </FormGroup>
                       </GridItem>
                       <GridItem span={12}>
                         <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: 0 }}>
-                          Default wait is 45s per sync attempt with 20 retries (5s between attempts). Increase timeout for slow Git remotes. After a successful sync, bootstrap pauses briefly so playbooks are visible before creating job templates.
+                          Defaults: <strong>180s</strong> wait per sync attempt, <strong>40</strong> retries, <strong>10s</strong> between attempts, then <strong>60s</strong> post-sync pause. Timeout is per attempt — if it is too low, every try fails before retries can help. Confirm under Preview JSON as <code>aap.project_sync_*</code>.
                         </p>
                       </GridItem>
                       <GridItem span={6}>
@@ -5396,6 +6166,7 @@ ${vaultYaml}
                       </GridItem>
                     </Grid>
                   )}
+                  {activeAapConfigTab === 'auth' && renderAapAuthConfig()}
                   {activeAapConfigTab === 'hub' && (
                     <Grid hasGutter>
                       <GridItem span={12}>
@@ -5404,7 +6175,7 @@ ${vaultYaml}
                         </p>
                         <FormGroup label="Collections">
                           <Checkbox
-                            label="Update infra.ado collection in validated AAP Hub content"
+                            label="Publish infra.ado collection to validated AAP Hub content"
                             isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
                             onChange={(_, v) => setAapHubValidated(v)}
                           />
@@ -5420,6 +6191,11 @@ ${vaultYaml}
                             isDisabled={!data.aap.hub_publish_ado_collection}
                             onChange={(_, v) => set('aap.hub_update_collection_only', v)}
                           />
+                          {data.aap.hub_publish_ado_collection && !data.aap.hub_force_ado_collection_update && (
+                            <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
+                              Safe publish mode: if this infra.ado version already exists, bootstrap logs a warning and continues without replacing it. Select <strong>Force update</strong> only when you intend to replace the existing version.
+                            </p>
+                          )}
                         </FormGroup>
                       </GridItem>
                       <GridItem span={12}>
@@ -5843,6 +6619,37 @@ ${vaultYaml}
                     </Tabs>
                   </div>
                 )}
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '8px' }}>
+                  <TextInput
+                    type="search"
+                    aria-label="Search console output"
+                    placeholder="Search logs / JSON / events…"
+                    value={consoleSearch}
+                    onChange={(_e, v) => setConsoleSearch(v ?? _e?.currentTarget?.value ?? '')}
+                    style={{ flex: 1 }}
+                  />
+                  {consoleSearch.trim() && (
+                    <>
+                      <span style={{ color: mutedTextColor, whiteSpace: 'nowrap', fontSize: '12px' }}>
+                        {(() => {
+                          const source = activeTab === 'logs'
+                            ? preview
+                            : (activeTab === 'events' && debugTab !== 'events'
+                              ? debugContent
+                              : events);
+                          const q = consoleSearch.trim().toLowerCase();
+                          const count = String(source || '')
+                            .split('\n')
+                            .filter(line => line.toLowerCase().includes(q)).length;
+                          return `${count} match${count === 1 ? '' : 'es'}`;
+                        })()}
+                      </span>
+                      <Button variant="link" onClick={() => setConsoleSearch('')}>
+                        Clear
+                      </Button>
+                    </>
+                  )}
+                </div>
               </div>
 
               <div
