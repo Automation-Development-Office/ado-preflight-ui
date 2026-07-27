@@ -68,6 +68,8 @@ const simpleComponents = [
 const componentOptionDefaults = {
   openshift: [
     'admin_htpasswd',
+    'nfs_csi',
+    'iscsi_csi',
     'console_banner',
     'agent_installer',
     'ldap_auth',
@@ -96,6 +98,8 @@ const componentOptionDefaults = {
 
 const componentOptionLabels = {
   admin_htpasswd: 'Admin HTPasswd',
+  nfs_csi: 'NFS CSI Storage',
+  iscsi_csi: 'Synology iSCSI CSI',
   console_banner: 'Console Banner',
   agent_installer: 'Agent Installer Config',
   ldap_auth: 'Configure LDAP in OpenShift',
@@ -621,6 +625,29 @@ const defaults = {
     banner_background_color: '#1f7a1f',
     banner_text_color: '#ffffff',
     token: '',
+    use_kubeconfig: false,
+    kubeconfig_file: '',
+    kubeconfig_content: '',
+    install_htpasswd_during_bootstrap: false,
+    install_nfs_during_bootstrap: false,
+    install_iscsi_during_bootstrap: false,
+    iscsi_dsm_host: '',
+    iscsi_dsm_port: 5000,
+    iscsi_dsm_https: false,
+    iscsi_dsm_username: '',
+    iscsi_dsm_password: '',
+    iscsi_storage_class_name: 'synology-iscsi-storage',
+    iscsi_location: '/volume1',
+    iscsi_is_default: true,
+    iscsi_install_snapshotter: true,
+    nfs_server: '',
+    nfs_share: '',
+    nfs_storage_class_name: 'synology-nfs-csi',
+    nfs_driver_version: '4.11.0',
+    nfs_version: '4.1',
+    nfs_create_test_namespace: true,
+    nfs_create_test_pvc: false,
+    nfs_test_namespace: 'synology-nfs-pv',
     agent_installer: agentInstallerDefaults
   },
 
@@ -1589,6 +1616,34 @@ function App() {
         delete payload.openshift.admin_username;
         delete payload.openshift.admin_password;
         delete payload.openshift.admin_role;
+        delete payload.openshift.install_htpasswd_during_bootstrap;
+      }
+      if (!openshiftOptions.includes('nfs_csi')) {
+        delete payload.openshift.nfs_server;
+        delete payload.openshift.nfs_share;
+        delete payload.openshift.nfs_storage_class_name;
+        delete payload.openshift.nfs_driver_version;
+        delete payload.openshift.nfs_version;
+        delete payload.openshift.nfs_create_test_namespace;
+        delete payload.openshift.nfs_create_test_pvc;
+        delete payload.openshift.nfs_test_namespace;
+        delete payload.openshift.install_nfs_during_bootstrap;
+      }
+      if (!openshiftOptions.includes('iscsi_csi')) {
+        delete payload.openshift.iscsi_dsm_host;
+        delete payload.openshift.iscsi_dsm_port;
+        delete payload.openshift.iscsi_dsm_https;
+        delete payload.openshift.iscsi_dsm_username;
+        delete payload.openshift.iscsi_dsm_password;
+        delete payload.openshift.iscsi_storage_class_name;
+        delete payload.openshift.iscsi_location;
+        delete payload.openshift.iscsi_is_default;
+        delete payload.openshift.iscsi_install_snapshotter;
+        delete payload.openshift.install_iscsi_during_bootstrap;
+      }
+      if (!payload.openshift.use_kubeconfig) {
+        delete payload.openshift.kubeconfig_content;
+        delete payload.openshift.kubeconfig_file;
       }
       if (!openshiftOptions.includes('console_banner')) {
         delete payload.openshift.banner_text;
@@ -2646,6 +2701,20 @@ function App() {
     apiHost: 'OpenShift API server URL. Example: https://api.ocp.prod.rhlab:6443.',
     appsDomain: 'OpenShift apps domain used for routes. Example: apps.ocp.prod.rhlab.',
     skipTls: 'Skip OpenShift API certificate validation for self-signed or lab certificates.',
+    kubeconfig: 'Upload a kubeconfig instead of (or in addition to) an API token. Used by bootstrap prep (htpasswd / NFS CSI / AAP install) in the preflight pod.',
+    installHtpasswdDuringBootstrap: 'When checked with Admin HTPasswd selected, bootstrap creates the HTPasswd IdP in this pod before AAP install so you can log in and mint tokens.',
+    installNfsDuringBootstrap: 'When checked with NFS CSI Storage selected, bootstrap installs the CSI driver and StorageClass in this pod before AAP install.',
+    installIscsiDuringBootstrap: 'When checked with Synology iSCSI CSI selected, bootstrap installs Synology CSI manifests and StorageClass in this pod before AAP install.',
+    iscsiDsmHost: 'Synology DSM hostname or IP used by the CSI client-info secret and StorageClass. Example: 192.168.0.6',
+    iscsiDsmPort: 'DSM API port. Default: 5000 (HTTP) or 5001 (HTTPS).',
+    iscsiDsmUser: 'DSM username for the Synology CSI client-info secret. Stored in vault.',
+    iscsiDsmPassword: 'DSM password for the Synology CSI client-info secret. Stored in vault.',
+    iscsiStorageClass: 'StorageClass name. Default: synology-iscsi-storage.',
+    iscsiLocation: 'DSM volume path for LUNs. Example: /volume1.',
+    nfsServer: 'NFS server IP or hostname. Example: 192.168.2.7',
+    nfsShare: 'Exported NFS path. Example: /volume1/OpenShiftDev',
+    nfsStorageClass: 'StorageClass name created for dynamic provisioning. Default: synology-nfs-csi.',
+    nfsDriverVersion: 'csi-driver-nfs Helm chart version. Default: 4.11.0.',
     token: (
       <div>
         <p>Use a cluster-admin service account token for OpenShift automation.</p>
@@ -4358,11 +4427,61 @@ echo $TOKEN
                 type={showOpenShiftToken ? 'text' : 'password'}
                 value={data.openshift.token}
                 onChange={(_, v) => set('openshift.token', v)}
+                isDisabled={data.openshift.use_kubeconfig === true}
               />
               <Button variant="secondary" onClick={() => setShowOpenShiftToken(!showOpenShiftToken)}>
                 {showOpenShiftToken ? 'Hide' : 'Show'}
               </Button>
             </div>
+            <Checkbox
+              id="openshift-use-kubeconfig"
+              label={labelWithHelp('Use kubeconfig instead of API token', openshiftHelp.kubeconfig)}
+              isChecked={data.openshift.use_kubeconfig === true}
+              onChange={(_, v) => {
+                set('openshift.use_kubeconfig', v);
+                if (!v) {
+                  set('openshift.kubeconfig_file', '');
+                  set('openshift.kubeconfig_content', '');
+                }
+              }}
+            />
+            {data.openshift.use_kubeconfig === true && (
+              <div style={{ marginTop: '8px', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <input
+                  type="file"
+                  accept=".kube,.yaml,.yml,text/yaml,application/x-yaml,*/*"
+                  onChange={event => {
+                    const file = event.target.files && event.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      set('openshift.kubeconfig_file', file.name);
+                      set('openshift.kubeconfig_content', String(reader.result || ''));
+                    };
+                    reader.readAsText(file);
+                  }}
+                />
+                {data.openshift.kubeconfig_file ? (
+                  <span style={{ color: mutedTextColor }}>
+                    Loaded: {data.openshift.kubeconfig_file}
+                  </span>
+                ) : (
+                  <span style={{ color: mutedTextColor }}>No kubeconfig uploaded</span>
+                )}
+                {data.openshift.kubeconfig_content ? (
+                  <Button
+                    variant="link"
+                    isInline
+                    onClick={() => {
+                      set('openshift.kubeconfig_file', '');
+                      set('openshift.kubeconfig_content', '');
+                    }}
+                  >
+                    Clear
+                  </Button>
+                ) : null}
+              </div>
+            )}
           </FormGroup>
         </GridItem>
 
@@ -4426,6 +4545,17 @@ echo $TOKEN
 
   const renderOpenShiftAdminHtpasswdConfig = () => (
     <Grid hasGutter>
+      <GridItem span={12}>
+        <FormGroup label={labelWithHelp('Install HTPasswd during bootstrap', openshiftHelp.installHtpasswdDuringBootstrap)}>
+          <Checkbox
+            id="openshift-install-htpasswd-during-bootstrap"
+            label="Create HTPasswd IdP in the preflight pod before AAP install (pre-AAP OpenShift prep)"
+            isChecked={data.openshift.install_htpasswd_during_bootstrap === true}
+            onChange={(_, v) => set('openshift.install_htpasswd_during_bootstrap', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
       <GridItem span={6}>
         <FormGroup label={labelWithHelp('Admin HTPasswd Username', openshiftHelp.adminUsername)}>
           <TextInput
@@ -4452,6 +4582,192 @@ echo $TOKEN
             onChange={(_, v) => set('openshift.admin_role', v)}
           />
         </FormGroup>
+      </GridItem>
+    </Grid>
+  );
+
+
+  const renderOpenShiftNfsCsiConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={12}>
+        <FormGroup label={labelWithHelp('Install NFS CSI during bootstrap', openshiftHelp.installNfsDuringBootstrap)}>
+          <Checkbox
+            id="openshift-install-nfs-during-bootstrap"
+            label="Install NFS CSI driver + StorageClass in the preflight pod before AAP install"
+            isChecked={data.openshift.install_nfs_during_bootstrap === true}
+            onChange={(_, v) => set('openshift.install_nfs_during_bootstrap', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('NFS Server', openshiftHelp.nfsServer)}>
+          <TextInput
+            value={data.openshift.nfs_server || ''}
+            onChange={(_, v) => set('openshift.nfs_server', v)}
+            placeholder="192.168.2.7"
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('NFS Share', openshiftHelp.nfsShare)}>
+          <TextInput
+            value={data.openshift.nfs_share || ''}
+            onChange={(_, v) => set('openshift.nfs_share', v)}
+            placeholder="/volume1/OpenShiftDev"
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('StorageClass Name', openshiftHelp.nfsStorageClass)}>
+          <TextInput
+            value={data.openshift.nfs_storage_class_name || 'synology-nfs-csi'}
+            onChange={(_, v) => set('openshift.nfs_storage_class_name', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={3}>
+        <FormGroup label={labelWithHelp('CSI Driver Version', openshiftHelp.nfsDriverVersion)}>
+          <TextInput
+            value={data.openshift.nfs_driver_version || '4.11.0'}
+            onChange={(_, v) => set('openshift.nfs_driver_version', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={3}>
+        <FormGroup label="NFS Protocol Version">
+          <TextInput
+            value={data.openshift.nfs_version || '4.1'}
+            onChange={(_, v) => set('openshift.nfs_version', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label="Test Namespace">
+          <TextInput
+            value={data.openshift.nfs_test_namespace || 'synology-nfs-pv'}
+            onChange={(_, v) => set('openshift.nfs_test_namespace', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={12}>
+        <Checkbox
+          id="openshift-nfs-create-test-namespace"
+          label="Create test namespace (default: synology-nfs-pv)"
+          isChecked={data.openshift.nfs_create_test_namespace !== false}
+          onChange={(_, v) => set('openshift.nfs_create_test_namespace', v)}
+        />
+        <Checkbox
+          id="openshift-nfs-create-test-pvc"
+          label="Also create a test PVC"
+          isChecked={data.openshift.nfs_create_test_pvc === true}
+          onChange={(_, v) => set('openshift.nfs_create_test_pvc', v)}
+        />
+      </GridItem>
+    </Grid>
+  );
+
+
+  const renderOpenShiftIscsiCsiConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={12}>
+        <FormGroup label={labelWithHelp('Install Synology iSCSI CSI during bootstrap', openshiftHelp.installIscsiDuringBootstrap)}>
+          <Checkbox
+            id="openshift-install-iscsi-during-bootstrap"
+            label="Install Synology CSI manifests + StorageClass in the preflight pod before AAP install"
+            isChecked={data.openshift.install_iscsi_during_bootstrap === true}
+            onChange={(_, v) => set('openshift.install_iscsi_during_bootstrap', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('DSM Host', openshiftHelp.iscsiDsmHost)}>
+          <TextInput
+            value={data.openshift.iscsi_dsm_host || ''}
+            onChange={(_, v) => set('openshift.iscsi_dsm_host', v)}
+            placeholder="192.168.0.6"
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={3}>
+        <FormGroup label={labelWithHelp('DSM Port', openshiftHelp.iscsiDsmPort)}>
+          <TextInput
+            type="number"
+            value={String(data.openshift.iscsi_dsm_port ?? 5000)}
+            onChange={(_, v) => set('openshift.iscsi_dsm_port', v === '' ? 5000 : Number(v))}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={3}>
+        <FormGroup label="DSM HTTPS">
+          <Checkbox
+            id="openshift-iscsi-dsm-https"
+            label="Use HTTPS to DSM"
+            isChecked={data.openshift.iscsi_dsm_https === true}
+            onChange={(_, v) => set('openshift.iscsi_dsm_https', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('DSM Username', openshiftHelp.iscsiDsmUser)}>
+          <TextInput
+            value={data.openshift.iscsi_dsm_username || ''}
+            onChange={(_, v) => set('openshift.iscsi_dsm_username', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('DSM Password', openshiftHelp.iscsiDsmPassword)}>
+          <TextInput
+            type="password"
+            value={data.openshift.iscsi_dsm_password || ''}
+            onChange={(_, v) => set('openshift.iscsi_dsm_password', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('StorageClass Name', openshiftHelp.iscsiStorageClass)}>
+          <TextInput
+            value={data.openshift.iscsi_storage_class_name || 'synology-iscsi-storage'}
+            onChange={(_, v) => set('openshift.iscsi_storage_class_name', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('DSM Volume Location', openshiftHelp.iscsiLocation)}>
+          <TextInput
+            value={data.openshift.iscsi_location || '/volume1'}
+            onChange={(_, v) => set('openshift.iscsi_location', v)}
+          />
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={12}>
+        <Checkbox
+          id="openshift-iscsi-is-default"
+          label="Mark StorageClass as cluster default"
+          isChecked={data.openshift.iscsi_is_default !== false}
+          onChange={(_, v) => set('openshift.iscsi_is_default', v)}
+        />
+        <Checkbox
+          id="openshift-iscsi-install-snapshotter"
+          label="Install volume snapshotter + VolumeSnapshotClass"
+          isChecked={data.openshift.iscsi_install_snapshotter !== false}
+          onChange={(_, v) => set('openshift.iscsi_install_snapshotter', v)}
+        />
       </GridItem>
     </Grid>
   );
@@ -4832,6 +5148,12 @@ echo $TOKEN
       case 'admin_htpasswd':
         body = renderOpenShiftAdminHtpasswdConfig();
         break;
+      case 'nfs_csi':
+        body = renderOpenShiftNfsCsiConfig();
+        break;
+      case 'iscsi_csi':
+        body = renderOpenShiftIscsiCsiConfig();
+        break;
       case 'console_banner':
         body = renderOpenShiftConsoleBannerConfig();
         break;
@@ -5081,7 +5403,7 @@ ${vaultYaml}
     if (selected.includes('openshift')) {
       const tabs = ['openshift'];
       (data.component_options?.openshift || []).forEach(option => {
-        const optionTabs = ['admin_htpasswd', 'console_banner', 'agent_installer'];
+        const optionTabs = ['admin_htpasswd', 'nfs_csi', 'iscsi_csi', 'console_banner', 'agent_installer'];
         if (!optionTabs.includes(option)) {
           return;
         }
@@ -5128,6 +5450,8 @@ ${vaultYaml}
     if (tab === 'all') return 'All';
     if (tab === 'openshift') return 'OpenShift';
     if (tab === 'admin_htpasswd') return 'Admin HTPasswd';
+    if (tab === 'nfs_csi') return 'NFS CSI Storage';
+    if (tab === 'iscsi_csi') return 'Synology iSCSI CSI';
     if (tab === 'console_banner') return 'Console Banner';
     if (tab === 'agent_installer') return 'Agent Installer';
     if (tab === 'rhel') return 'RHEL';

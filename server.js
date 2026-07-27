@@ -23,6 +23,8 @@ const patchingApps = ['patching', 'satellite', 'idm'];
 const provisionApps = ['aws_instance', 'openshift_virt'];
 const openshiftOptionApps = {
   admin_htpasswd: 'admin_htpasswd',
+  nfs_csi: 'nfs_csi',
+  iscsi_csi: 'iscsi_csi',
   console_banner: 'console',
   ldap_auth: 'openshift_ldap_auth',
   oauth_rhbk: 'openshift_oauth_rhbk',
@@ -995,6 +997,45 @@ function normalizePreflightPayload(input) {
   if (!data.openshift) data.openshift = {};
   if (data.openshift.skip_tls_verify === undefined) data.openshift.skip_tls_verify = true;
   if (data.openshift.token === undefined) data.openshift.token = '';
+  if (data.openshift.use_kubeconfig === undefined) data.openshift.use_kubeconfig = false;
+  if (data.openshift.kubeconfig_file === undefined) data.openshift.kubeconfig_file = '';
+  if (data.openshift.kubeconfig_content === undefined) data.openshift.kubeconfig_content = '';
+  if (data.openshift.install_htpasswd_during_bootstrap === undefined) {
+    data.openshift.install_htpasswd_during_bootstrap = false;
+  }
+  if (data.openshift.install_nfs_during_bootstrap === undefined) {
+    data.openshift.install_nfs_during_bootstrap = false;
+  }
+  if (data.openshift.install_iscsi_during_bootstrap === undefined) {
+    data.openshift.install_iscsi_during_bootstrap = false;
+  }
+  if (data.openshift.iscsi_dsm_host === undefined) data.openshift.iscsi_dsm_host = '';
+  if (data.openshift.iscsi_dsm_port === undefined) data.openshift.iscsi_dsm_port = 5000;
+  if (data.openshift.iscsi_dsm_https === undefined) data.openshift.iscsi_dsm_https = false;
+  if (data.openshift.iscsi_dsm_username === undefined) data.openshift.iscsi_dsm_username = '';
+  if (data.openshift.iscsi_dsm_password === undefined) data.openshift.iscsi_dsm_password = '';
+  if (!data.openshift.iscsi_storage_class_name) {
+    data.openshift.iscsi_storage_class_name = 'synology-iscsi-storage';
+  }
+  if (!data.openshift.iscsi_location) data.openshift.iscsi_location = '/volume1';
+  if (data.openshift.iscsi_is_default === undefined) data.openshift.iscsi_is_default = true;
+  if (data.openshift.iscsi_install_snapshotter === undefined) {
+    data.openshift.iscsi_install_snapshotter = true;
+  }
+  if (data.openshift.nfs_server === undefined) data.openshift.nfs_server = '';
+  if (data.openshift.nfs_share === undefined) data.openshift.nfs_share = '';
+  if (!data.openshift.nfs_storage_class_name) {
+    data.openshift.nfs_storage_class_name = 'synology-nfs-csi';
+  }
+  if (!data.openshift.nfs_driver_version) data.openshift.nfs_driver_version = '4.11.0';
+  if (!data.openshift.nfs_version) data.openshift.nfs_version = '4.1';
+  if (data.openshift.nfs_create_test_namespace === undefined) {
+    data.openshift.nfs_create_test_namespace = true;
+  }
+  if (data.openshift.nfs_create_test_pvc === undefined) {
+    data.openshift.nfs_create_test_pvc = false;
+  }
+  if (!data.openshift.nfs_test_namespace) data.openshift.nfs_test_namespace = 'synology-nfs-pv';
   if (data.openshift.admin_username === undefined) data.openshift.admin_username = 'admin';
   if (data.openshift.admin_password === undefined) data.openshift.admin_password = '';
   if (data.openshift.admin_role === undefined) data.openshift.admin_role = 'cluster-admin';

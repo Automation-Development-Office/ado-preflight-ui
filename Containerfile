@@ -9,8 +9,12 @@ FROM registry.access.redhat.com/ubi9/nodejs-20
 
 USER 0
 
-RUN dnf install -y git python3 python3-pip && \
+RUN dnf install -y git python3 python3-pip curl tar gzip && \
     pip3 install ansible-core kubernetes && \
+    curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz \
+      | tar -xz -C /tmp && \
+    install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm && \
+    rm -rf /tmp/linux-amd64 && \
     dnf clean all
 
 WORKDIR /opt/app-root/src
