@@ -9,7 +9,8 @@ FROM registry.access.redhat.com/ubi9/nodejs-20
 
 USER 0
 
-RUN dnf install -y git python3 python3-pip curl tar gzip && \
+# UBI9 already ships curl-minimal; installing curl conflicts with it.
+RUN dnf install -y git python3 python3-pip tar gzip && \
     pip3 install ansible-core kubernetes && \
     curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz \
       | tar -xz -C /tmp && \
