@@ -1,3 +1,4 @@
+---
 name: Release Container
 
 on:
@@ -14,27 +15,88 @@ jobs:
     permissions:
       contents: write
       packages: write
+      pull-requests: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Set GHCR image name
         run: echo "GHCR_IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
-      - name: Generate and update changelog
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api \
-            "repos/${{ github.repository }}/releases/generate-notes" \
-            -f tag_name="${{ github.event.release.tag_name }}" \
-            -f target_commitish="${{ github.event.release.target_commitish }}" \
-            --jq .body > changelog.md
+      - name: Preview changesets (pre-release)
+        if: github.event.release.prerelease
+        id: changelog_preview
+        uses: ./.github/actions/preview-changesets
+        with:
+          tag: ${{ github.event.release.tag_name }}
 
-          gh release edit "${{ github.event.release.tag_name }}" --notes-file changelog.md
+      - name: Apply changesets (official release)
+        if: ${{ !github.event.release.prerelease }}
+        id: changelog
+        uses: ./.github/actions/apply-changesets
+        with:
+          tag: ${{ github.event.release.tag_name }}
+
+      - name: Resolve changelog artifacts
+        id: changelog_artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+            {
+              echo "notes_file=${{ steps.changelog_preview.outputs.notes_file }}"
+              echo "version=${{ steps.changelog_preview.outputs.version }}"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "notes_file=${{ steps.changelog.outputs.notes_file }}"
+              echo "changelog_file=${{ steps.changelog.outputs.changelog_file }}"
+              echo "version=${{ steps.changelog.outputs.version }}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set image tags
+        env:
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          # Always publish the release's own tag to GHCR (e.g. 1.0.1-alpha, v1.2.0-rc.1, 1.2.0).
+          tags="${GHCR_IMAGE}:${RELEASE_TAG}"
+
+          version="${RELEASE_TAG#v}"
+          is_stable_semver=false
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            is_stable_semver=true
+          fi
+
+          # Only move :latest for a non-prerelease stable X.Y.Z tag.
+          # Pre-releases and tags like 1.2.0-rc1 / 1.0.1-alpha keep their own tag only.
+          if [ "${IS_PRERELEASE}" != "true" ] && [ "${is_stable_semver}" = "true" ]; then
+            tags="${tags}"$'\n'"${GHCR_IMAGE}:latest"
+          fi
+
+          {
+            echo "IMAGE_TAGS<<EOF"
+            echo "${tags}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+          echo "GitHub pre-release: ${IS_PRERELEASE}"
+          echo "Release tag: ${RELEASE_TAG}"
+          echo "Stable semver: ${is_stable_semver}"
+          echo "GHCR tags to publish:"
+          printf '%s\n' "${tags}"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -52,9 +114,7 @@ jobs:
           context: .
           file: Containerfile
           platforms: linux/amd64
-          tags: |
-            ${{ env.GHCR_IMAGE }}:${{ github.event.release.tag_name }}
-            ${{ env.GHCR_IMAGE }}:latest
+          tags: ${{ env.IMAGE_TAGS }}
           push: true
           pull: true
           no-cache: true
@@ -80,10 +140,43 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Attach image to GitHub Release
+      - name: Attach image and changelog to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          NOTES_FILE: ${{ steps.changelog_artifacts.outputs.notes_file }}
+          CHANGELOG_FILE: ${{ steps.changelog_artifacts.outputs.changelog_file }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            "${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-amd64.tar.gz" \
+          set -euo pipefail
+          gh release upload "$TAG" \
+            "${{ env.IMAGE_NAME }}-${TAG}-linux-amd64.tar.gz" \
             --clobber
+          if [ -n "${CHANGELOG_FILE:-}" ] && [ -f "${CHANGELOG_FILE}" ]; then
+            gh release upload "$TAG" "$CHANGELOG_FILE" --clobber
+          fi
+          if [ -n "${NOTES_FILE:-}" ] && [ -f "${NOTES_FILE}" ]; then
+            gh release edit "$TAG" --notes-file "$NOTES_FILE"
+          fi
+
+      - name: Open changelog pull request
+        if: ${{ !github.event.release.prerelease && steps.changelog.outcome == 'success' }}
+        id: changelog_pr
+        uses: ./.github/actions/open-changelog-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          version: ${{ steps.changelog.outputs.version }}
+          tag: ${{ github.event.release.tag_name }}
+
+      - name: Changelog PR summary
+        if: ${{ !github.event.release.prerelease && steps.changelog_pr.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          if [ "${{ steps.changelog_pr.outputs.pr_opened }}" = "true" ]; then
+            echo "::notice title=Changelog PR::${{ steps.changelog_pr.outputs.pr_url }}"
+          elif [ "${{ steps.changelog_pr.outcome }}" = "success" ]; then
+            echo "::notice title=Changelog PR::No changelog PR was needed (main already matches the release changelog)."
+          else
+            echo "::error title=Changelog PR::Failed to open changelog PR. Re-run the release workflow or use Actions → Open changelog PR."
+            exit 1
+          fi

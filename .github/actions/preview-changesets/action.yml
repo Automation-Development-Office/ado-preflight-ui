@@ -1,0 +1,84 @@
+---
+name: Preview pending changesets
+description: Build release notes from pending Changesets without consuming them
+
+inputs:
+  tag:
+    description: Git tag name (e.g. v1.2.0-rc1)
+    required: true
+
+outputs:
+  version:
+    description: Release version (tag without v prefix)
+    value: ${{ steps.preview.outputs.version }}
+  notes_file:
+    description: Path to generated release notes preview
+    value: ${{ steps.preview.outputs.notes_file }}
+  has_content:
+    description: Whether pending changesets were found
+    value: ${{ steps.preview.outputs.has_content }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build changesets preview
+      id: preview
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.tag }}"
+        VERSION="${VERSION#v}"
+        NOTES_FILE="${GITHUB_WORKSPACE}/changeset-preview-notes.md"
+
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        {
+          echo "notes_file=$NOTES_FILE"
+          echo "has_content=false"
+        } >> "$GITHUB_OUTPUT"
+
+        npm install --no-fund --no-audit
+
+        mapfile -t files < <(find .changeset -maxdepth 1 -type f \( -name '*.md' ! -name 'README.md' \) | sort)
+        if [ "${#files[@]}" -eq 0 ]; then
+          cat > "$NOTES_FILE" <<EOF
+        # ${VERSION} (pre-release preview)
+
+        No pending changesets were found on this ref.
+        EOF
+          exit 0
+        fi
+
+        {
+          echo "# ${VERSION} (pre-release preview)"
+          echo
+          echo "Pending changesets (not consumed):"
+          echo
+          for file in "${files[@]}"; do
+            echo "## $(basename "$file" .md)"
+            echo
+            # Drop frontmatter between --- markers
+            awk '
+              BEGIN { skip=0; seen=0 }
+              /^---$/ {
+                if (seen == 0) { skip=1; seen=1; next }
+                if (skip == 1) { skip=0; next }
+              }
+              skip == 0 { print }
+            ' "$file"
+            echo
+          done
+        } > "$NOTES_FILE"
+
+        echo "has_content=true" >> "$GITHUB_OUTPUT"
+
+    - name: Add preview summary
+      if: steps.preview.outputs.has_content == 'true'
+      shell: bash
+      run: |
+        {
+          echo "## Changeset Preview (${{ steps.preview.outputs.version }})"
+          echo
+          echo '```markdown'
+          cat "${{ steps.preview.outputs.notes_file }}"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,95 @@
+---
+name: Apply changesets for release
+description: Run changeset version and prepare changelog/package updates for the release tag
+
+inputs:
+  tag:
+    description: Git tag name (e.g. v1.2.0)
+    required: true
+
+outputs:
+  version:
+    description: Version from package.json after changeset version
+    value: ${{ steps.apply.outputs.version }}
+  notes_file:
+    description: Path to generated release notes for this version
+    value: ${{ steps.apply.outputs.notes_file }}
+  changelog_file:
+    description: Path to CHANGELOG.md
+    value: ${{ steps.apply.outputs.changelog_file }}
+  applied:
+    description: Whether changesets were applied
+    value: ${{ steps.apply.outputs.applied }}
+
+runs:
+  using: composite
+  steps:
+    - name: Apply changesets
+      id: apply
+      shell: bash
+      run: |
+        set -euo pipefail
+        TAG="${{ inputs.tag }}"
+        EXPECTED="${TAG#v}"
+        NOTES_FILE="${GITHUB_WORKSPACE}/changeset-release-notes.md"
+        CHANGELOG_FILE="${GITHUB_WORKSPACE}/CHANGELOG.md"
+
+        {
+          echo "notes_file=$NOTES_FILE"
+          echo "changelog_file=$CHANGELOG_FILE"
+          echo "applied=false"
+        } >> "$GITHUB_OUTPUT"
+
+        npm install --no-fund --no-audit
+
+        mapfile -t files < <(find .changeset -maxdepth 1 -type f \( -name '*.md' ! -name 'README.md' \) | sort)
+        if [ "${#files[@]}" -eq 0 ]; then
+          echo "No pending changesets; skipping version apply."
+          CURRENT="$(node -p "require('./package.json').version")"
+          echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          {
+            echo "# ${EXPECTED}"
+            echo
+            echo "No pending changesets were present on this release tag."
+          } > "$NOTES_FILE"
+          exit 0
+        fi
+
+        npm run version-packages
+
+        ACTUAL="$(node -p "require('./package.json').version")"
+        echo "version=$ACTUAL" >> "$GITHUB_OUTPUT"
+
+        if [ "$ACTUAL" != "$EXPECTED" ]; then
+          echo "::error::Release tag version (${EXPECTED}) does not match Changesets bump (${ACTUAL})."
+          echo "Retag to v${ACTUAL}, or adjust changeset bump types so they resolve to ${EXPECTED}."
+          exit 1
+        fi
+
+        python3 - <<PY
+        from pathlib import Path
+        version = "${ACTUAL}"
+        changelog = Path("${CHANGELOG_FILE}")
+        notes_path = Path("${NOTES_FILE}")
+        if not changelog.is_file():
+            notes_path.write_text(f"# {version}\n\nSee CHANGELOG.md for details.\n", encoding="utf-8")
+        else:
+            lines = changelog.read_text(encoding="utf-8").splitlines()
+            start = None
+            for i, line in enumerate(lines):
+                if line.startswith(f"## {version}") or line.startswith(f"## [{version}]"):
+                    start = i
+                    break
+            if start is None:
+                notes = f"# {version}\n\nSee CHANGELOG.md for details.\n"
+            else:
+                end = len(lines)
+                for j in range(start + 1, len(lines)):
+                    if lines[j].startswith("## "):
+                        end = j
+                        break
+                notes = "\n".join(lines[start:end]).strip() + "\n"
+            notes_path.write_text(notes, encoding="utf-8")
+        PY
+
+        echo "applied=true" >> "$GITHUB_OUTPUT"
