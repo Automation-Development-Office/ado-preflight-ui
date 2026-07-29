@@ -28,9 +28,13 @@ Bump types: `patch`, `minor`, or `major`.
 
 ## Release flow
 
+See the full walkthrough: [docs/RELEASING.md](../docs/RELEASING.md).
+
+Short version:
+
 1. Merge PRs that include changeset files.
 2. Publish a GitHub Release (tag).
 3. The release workflow compiles changesets into `CHANGELOG.md`, bumps `package.json`, and opens a PR to `main` that removes the consumed `.changeset/*.md` files.
 4. Merge that changelog PR.
 
-Pre-releases preview pending changesets without consuming them.
+Pre-releases preview pending changesets without consuming them, and do not move GHCR `:latest`.

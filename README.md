@@ -6,6 +6,8 @@ The ADO Pre-Flight UI is a containerized questionnaire that turns a set of envir
 
 This README assumes you have never used ADO or this UI before.
 
+For maintainers: see [docs/RELEASING.md](docs/RELEASING.md) for creating GitHub Releases, GHCR image tags, and Changesets.
+
 ---
 
 ## 🧩 What This UI Does
