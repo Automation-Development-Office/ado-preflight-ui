@@ -53,12 +53,16 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event.release.prerelease }}" = "true" ]; then
-            echo "notes_file=${{ steps.changelog_preview.outputs.notes_file }}" >> "$GITHUB_OUTPUT"
-            echo "version=${{ steps.changelog_preview.outputs.version }}" >> "$GITHUB_OUTPUT"
+            {
+              echo "notes_file=${{ steps.changelog_preview.outputs.notes_file }}"
+              echo "version=${{ steps.changelog_preview.outputs.version }}"
+            } >> "$GITHUB_OUTPUT"
           else
-            echo "notes_file=${{ steps.changelog.outputs.notes_file }}" >> "$GITHUB_OUTPUT"
-            echo "changelog_file=${{ steps.changelog.outputs.changelog_file }}" >> "$GITHUB_OUTPUT"
-            echo "version=${{ steps.changelog.outputs.version }}" >> "$GITHUB_OUTPUT"
+            {
+              echo "notes_file=${{ steps.changelog.outputs.notes_file }}"
+              echo "changelog_file=${{ steps.changelog.outputs.changelog_file }}"
+              echo "version=${{ steps.changelog.outputs.version }}"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Set image tags

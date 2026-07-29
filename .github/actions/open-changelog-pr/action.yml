@@ -74,8 +74,10 @@ runs:
             --jq '.[0].url' 2>/dev/null || true)"
           if [ -n "${EXISTING_PR}" ]; then
             echo "Changelog PR already exists: ${EXISTING_PR}"
-            echo "pr_url=${EXISTING_PR}" >> "$GITHUB_OUTPUT"
-            echo "pr_opened=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "pr_url=${EXISTING_PR}"
+              echo "pr_opened=true"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then
@@ -96,5 +98,7 @@ runs:
           --title "Changelog for release ${VERSION}" \
           --body "${PR_BODY}")"
         echo "Opened changelog PR: ${PR_URL}"
-        echo "pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
-        echo "pr_opened=true" >> "$GITHUB_OUTPUT"
+        {
+          echo "pr_url=${PR_URL}"
+          echo "pr_opened=true"
+        } >> "$GITHUB_OUTPUT"

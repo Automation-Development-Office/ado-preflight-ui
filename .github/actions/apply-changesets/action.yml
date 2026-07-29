@@ -34,9 +34,11 @@ runs:
         NOTES_FILE="${GITHUB_WORKSPACE}/changeset-release-notes.md"
         CHANGELOG_FILE="${GITHUB_WORKSPACE}/CHANGELOG.md"
 
-        echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
-        echo "changelog_file=$CHANGELOG_FILE" >> "$GITHUB_OUTPUT"
-        echo "applied=false" >> "$GITHUB_OUTPUT"
+        {
+          echo "notes_file=$NOTES_FILE"
+          echo "changelog_file=$CHANGELOG_FILE"
+          echo "applied=false"
+        } >> "$GITHUB_OUTPUT"
 
         npm install --no-fund --no-audit
 

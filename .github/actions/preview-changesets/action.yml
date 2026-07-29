@@ -31,8 +31,10 @@ runs:
         NOTES_FILE="${GITHUB_WORKSPACE}/changeset-preview-notes.md"
 
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-        echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
-        echo "has_content=false" >> "$GITHUB_OUTPUT"
+        {
+          echo "notes_file=$NOTES_FILE"
+          echo "has_content=false"
+        } >> "$GITHUB_OUTPUT"
 
         npm install --no-fund --no-audit
 
