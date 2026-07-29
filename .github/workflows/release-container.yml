@@ -1,3 +1,4 @@
+---
 name: Release Container
 
 on:
@@ -14,27 +15,63 @@ jobs:
     permissions:
       contents: write
       packages: write
+      pull-requests: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Set GHCR image name
         run: echo "GHCR_IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
-      - name: Generate and update changelog
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api \
-            "repos/${{ github.repository }}/releases/generate-notes" \
-            -f tag_name="${{ github.event.release.tag_name }}" \
-            -f target_commitish="${{ github.event.release.target_commitish }}" \
-            --jq .body > changelog.md
+      - name: Preview changesets (pre-release)
+        if: github.event.release.prerelease
+        id: changelog_preview
+        uses: ./.github/actions/preview-changesets
+        with:
+          tag: ${{ github.event.release.tag_name }}
 
-          gh release edit "${{ github.event.release.tag_name }}" --notes-file changelog.md
+      - name: Apply changesets (official release)
+        if: ${{ !github.event.release.prerelease }}
+        id: changelog
+        uses: ./.github/actions/apply-changesets
+        with:
+          tag: ${{ github.event.release.tag_name }}
+
+      - name: Resolve changelog artifacts
+        id: changelog_artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+            echo "notes_file=${{ steps.changelog_preview.outputs.notes_file }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ steps.changelog_preview.outputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "notes_file=${{ steps.changelog.outputs.notes_file }}" >> "$GITHUB_OUTPUT"
+            echo "changelog_file=${{ steps.changelog.outputs.changelog_file }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ steps.changelog.outputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set image tags
+        run: |
+          tags="${GHCR_IMAGE}:${{ github.event.release.tag_name }}"
+          if [ "${{ github.event.release.prerelease }}" != "true" ]; then
+            tags="${tags}"$'\n'"${GHCR_IMAGE}:latest"
+          fi
+          {
+            echo "IMAGE_TAGS<<EOF"
+            echo "${tags}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -52,9 +89,7 @@ jobs:
           context: .
           file: Containerfile
           platforms: linux/amd64
-          tags: |
-            ${{ env.GHCR_IMAGE }}:${{ github.event.release.tag_name }}
-            ${{ env.GHCR_IMAGE }}:latest
+          tags: ${{ env.IMAGE_TAGS }}
           push: true
           pull: true
           no-cache: true
@@ -80,10 +115,43 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Attach image to GitHub Release
+      - name: Attach image and changelog to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          NOTES_FILE: ${{ steps.changelog_artifacts.outputs.notes_file }}
+          CHANGELOG_FILE: ${{ steps.changelog_artifacts.outputs.changelog_file }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            "${{ env.IMAGE_NAME }}-${{ github.event.release.tag_name }}-linux-amd64.tar.gz" \
+          set -euo pipefail
+          gh release upload "$TAG" \
+            "${{ env.IMAGE_NAME }}-${TAG}-linux-amd64.tar.gz" \
             --clobber
+          if [ -n "${CHANGELOG_FILE:-}" ] && [ -f "${CHANGELOG_FILE}" ]; then
+            gh release upload "$TAG" "$CHANGELOG_FILE" --clobber
+          fi
+          if [ -n "${NOTES_FILE:-}" ] && [ -f "${NOTES_FILE}" ]; then
+            gh release edit "$TAG" --notes-file "$NOTES_FILE"
+          fi
+
+      - name: Open changelog pull request
+        if: ${{ !github.event.release.prerelease && steps.changelog.outcome == 'success' }}
+        id: changelog_pr
+        uses: ./.github/actions/open-changelog-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          version: ${{ steps.changelog.outputs.version }}
+          tag: ${{ github.event.release.tag_name }}
+
+      - name: Changelog PR summary
+        if: ${{ !github.event.release.prerelease && steps.changelog_pr.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          if [ "${{ steps.changelog_pr.outputs.pr_opened }}" = "true" ]; then
+            echo "::notice title=Changelog PR::${{ steps.changelog_pr.outputs.pr_url }}"
+          elif [ "${{ steps.changelog_pr.outcome }}" = "success" ]; then
+            echo "::notice title=Changelog PR::No changelog PR was needed (main already matches the release changelog)."
+          else
+            echo "::error title=Changelog PR::Failed to open changelog PR. Re-run the release workflow or use Actions → Open changelog PR."
+            exit 1
+          fi

@@ -1,8 +1,12 @@
 {
+  "name": "ado-preflight-ui",
   "version": "1.0.1",
+  "private": true,
   "scripts": {
     "build": "vite build",
-    "start": "node server.js"
+    "start": "node server.js",
+    "changeset": "changeset",
+    "version-packages": "changeset version"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -13,5 +17,7 @@
     "@patternfly/react-icons": "latest",
     "express": "latest"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@changesets/cli": "^2.29.5"
+  }
 }
