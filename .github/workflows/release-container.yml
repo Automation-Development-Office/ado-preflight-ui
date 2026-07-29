@@ -62,16 +62,37 @@ jobs:
           fi
 
       - name: Set image tags
+        env:
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          tags="${GHCR_IMAGE}:${{ github.event.release.tag_name }}"
-          if [ "${{ github.event.release.prerelease }}" != "true" ]; then
+          set -euo pipefail
+          # Always publish the release's own tag to GHCR (e.g. 1.0.1-alpha, v1.2.0-rc.1, 1.2.0).
+          tags="${GHCR_IMAGE}:${RELEASE_TAG}"
+
+          version="${RELEASE_TAG#v}"
+          is_stable_semver=false
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            is_stable_semver=true
+          fi
+
+          # Only move :latest for a non-prerelease stable X.Y.Z tag.
+          # Pre-releases and tags like 1.2.0-rc1 / 1.0.1-alpha keep their own tag only.
+          if [ "${IS_PRERELEASE}" != "true" ] && [ "${is_stable_semver}" = "true" ]; then
             tags="${tags}"$'\n'"${GHCR_IMAGE}:latest"
           fi
+
           {
             echo "IMAGE_TAGS<<EOF"
             echo "${tags}"
             echo "EOF"
           } >> "$GITHUB_ENV"
+
+          echo "GitHub pre-release: ${IS_PRERELEASE}"
+          echo "Release tag: ${RELEASE_TAG}"
+          echo "Stable semver: ${is_stable_semver}"
+          echo "GHCR tags to publish:"
+          printf '%s\n' "${tags}"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
