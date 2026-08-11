@@ -34,7 +34,10 @@ const rhbkOptionApps = {
   realm: 'rhbk_realm',
   client: 'rhbk_client',
   idp: 'rhbk_idp',
-  federation: 'rhbk_federation'
+  federation: 'rhbk_federation',
+  group_mapper: 'rhbk_mapper',
+  client_scopes: 'rhbk_client_scopes',
+  client_mappers: 'rhbk_client_mappers'
 };
 
 app.use(express.json({ limit: '100mb' }));
@@ -329,6 +332,32 @@ function verbosityFlag(level) {
   return `-${'v'.repeat(normalized)}`;
 }
 
+function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+// Split freeform ansible-playbook options into argv tokens (supports simple quotes).
+function tokenizeAnsibleExtraArgs(input) {
+  const tokens = [];
+  const re = /"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|[^\s]+/g;
+  let match;
+  while ((match = re.exec(String(input || ''))) !== null) {
+    let token = match[0];
+    if (
+      (token.startsWith('"') && token.endsWith('"'))
+      || (token.startsWith("'") && token.endsWith("'"))
+    ) {
+      token = token.slice(1, -1);
+    }
+    if (token) tokens.push(token);
+  }
+  return tokens;
+}
+
+function formatAnsibleExtraArgsForShell(input) {
+  return tokenizeAnsibleExtraArgs(input).map(shellSingleQuote).join(' ');
+}
+
 function buildAnsibleEnv(skipTlsVerify = false, gitSkipTlsVerify = true) {
   const ansibleEnv = {
     ...process.env,
@@ -482,7 +511,7 @@ function defaultComponentConfig(component) {
       service_account_password: '',
       admin_password: '',
       validate_certs: false,
-      dynamic_inventory_enabled: true,
+      dynamic_inventory_enabled: false,
       credential_name: 'ADO Satellite Service Account',
       inventory_source_name: 'ADO Satellite Dynamic Inventory',
       inventory_overwrite: true,
@@ -510,7 +539,89 @@ function defaultComponentConfig(component) {
       custom_cert_key_file: '',
       custom_cert_chain_file: '',
       admin_password: '',
-      directory_manager_password: ''
+      directory_manager_password: '',
+      ad_domain: 'ad.lab',
+      ad_dc_hostname: 'adwindows.ad.lab',
+      ad_dc_ip: '192.168.0.61',
+      ad_admin: 'Administrator',
+      ad_admin_password: '',
+      ad_two_way: true,
+      ad_configure_groups: true,
+      ad_map_group: '',
+      ad_map_admins_group: ''
+    });
+  }
+
+  if (component === 'grafana') {
+    Object.assign(config, {
+      folders: [
+        { name: 'Openshift', source_type: 'path', source: '', dashboards_path: 'dashboards', alerts_path: 'alerts' }
+      ],
+      email: {
+        enabled: false,
+        host: '',
+        port: '587',
+        user: '',
+        password: '',
+        from_address: '',
+        from_name: 'Grafana'
+      },
+      oidc: {
+        enabled: false,
+        client_id: 'grafana-client',
+        client_secret: '',
+        issuer: ''
+      },
+      alerts_enabled: false
+    });
+  }
+
+  if (component === 'acm') {
+    Object.assign(config, {
+      namespace: 'open-cluster-management',
+      channel: 'release-2.14'
+    });
+  }
+
+  if (component === 'acs') {
+    Object.assign(config, {
+      namespace: 'stackrox',
+      policies_source_type: 'git',
+      policies_source: '',
+      reports_source_type: 'git',
+      reports_source: ''
+    });
+  }
+
+  if (component === 'aap') {
+    Object.assign(config, {
+      license_mode: 'none',
+      subscription_manifest_file: '',
+      subscription_manifest_content_base64: '',
+      rhn_username: '',
+      rhn_password: ''
+    });
+  }
+
+  if (component === 'devspaces') {
+    Object.assign(config, {
+      namespace: 'openshift-devspaces',
+      disable_default_samples: true,
+      customize_workspace: false,
+      default_devfile_url: '',
+      default_workspace_image: '',
+      che_image_tag: '',
+      dashboard_image: ''
+    });
+  }
+
+  if (component === 'rhbk') {
+    Object.assign(config, {
+      clients: [{ id: '', name: '', redirect_uris: '', web_origins: '' }],
+      group_mapper_name: '',
+      group_mapper_claim: 'groups',
+      group_mapper_group_path: '',
+      group_mapper_sync_mode: 'IMPORT'
     });
   }
 
@@ -546,6 +657,18 @@ function hydrateSelectedComponentConfigs(data) {
   );
 
   return data;
+}
+
+function normalizeAdditionalEnvironments(value) {
+  const noneTokens = new Set(['none', 'non', 'n/a', '-', 'null', 'undefined']);
+  const raw = Array.isArray(value)
+    ? value.join(' ')
+    : String(value || '');
+  return raw
+    .split(/[\s,]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+    .filter(item => !noneTokens.has(item.toLowerCase()));
 }
 
 
@@ -594,7 +717,11 @@ function normalizePreflightPayload(input) {
   if (!data.git) data.git = {};
   if (data.git.auto_push === undefined) data.git.auto_push = true;
   if (data.git.skip_tls_verify === undefined) data.git.skip_tls_verify = true;
+  if (data.git.overwrite_generated === undefined) data.git.overwrite_generated = false;
   if (data.git.token === undefined) data.git.token = '';
+
+  // Normalize additional environments for survey choices (never create group_vars dirs).
+  data.additional_environments = normalizeAdditionalEnvironments(data.additional_environments);
 
   if (!data.vault) data.vault = {};
   if (data.vault.encrypt === undefined) data.vault.encrypt = true;
@@ -737,7 +864,7 @@ function normalizePreflightPayload(input) {
       data.component_config.satellite.validate_certs = false;
     }
     if (data.component_config.satellite.dynamic_inventory_enabled === undefined) {
-      data.component_config.satellite.dynamic_inventory_enabled = true;
+      data.component_config.satellite.dynamic_inventory_enabled = false;
     }
     if (!data.component_config.satellite.credential_name) {
       data.component_config.satellite.credential_name = 'ADO Satellite Service Account';
@@ -764,6 +891,14 @@ function normalizePreflightPayload(input) {
     if (data.component_config.satellite.inventory_host_filter === undefined) {
       data.component_config.satellite.inventory_host_filter = '';
     }
+    const satOptions = data.component_options?.satellite || [];
+    if (satOptions.includes('satellite_dynamic_inventory')) {
+      if (data.component_config.satellite.dynamic_inventory_enabled === undefined) {
+        data.component_config.satellite.dynamic_inventory_enabled = true;
+      }
+    } else if (data.component_config.satellite.dynamic_inventory_enabled === undefined) {
+      data.component_config.satellite.dynamic_inventory_enabled = false;
+    }
   }
 
   if (selectedComponentApps.includes('idm')) {
@@ -776,6 +911,15 @@ function normalizePreflightPayload(input) {
     if (data.component_config.idm.custom_cert_file === undefined) data.component_config.idm.custom_cert_file = '';
     if (data.component_config.idm.custom_cert_key_file === undefined) data.component_config.idm.custom_cert_key_file = '';
     if (data.component_config.idm.custom_cert_chain_file === undefined) data.component_config.idm.custom_cert_chain_file = '';
+    if (data.component_config.idm.ad_domain === undefined) data.component_config.idm.ad_domain = 'ad.lab';
+    if (data.component_config.idm.ad_dc_hostname === undefined) data.component_config.idm.ad_dc_hostname = 'adwindows.ad.lab';
+    if (data.component_config.idm.ad_dc_ip === undefined) data.component_config.idm.ad_dc_ip = '192.168.0.61';
+    if (data.component_config.idm.ad_admin === undefined) data.component_config.idm.ad_admin = 'Administrator';
+    if (data.component_config.idm.ad_admin_password === undefined) data.component_config.idm.ad_admin_password = '';
+    if (data.component_config.idm.ad_two_way === undefined) data.component_config.idm.ad_two_way = true;
+    if (data.component_config.idm.ad_configure_groups === undefined) data.component_config.idm.ad_configure_groups = true;
+    if (data.component_config.idm.ad_map_group === undefined) data.component_config.idm.ad_map_group = '';
+    if (data.component_config.idm.ad_map_admins_group === undefined) data.component_config.idm.ad_map_admins_group = '';
   }
 
   if (!data.openshift) data.openshift = {};
@@ -803,6 +947,162 @@ function normalizePreflightPayload(input) {
   if (data.component_config.cert_manager.awspca_pca_arn === undefined) data.component_config.cert_manager.awspca_pca_arn = '';
   if (data.component_config.cert_manager.awspca_access_key_id === undefined) data.component_config.cert_manager.awspca_access_key_id = '';
   if (data.component_config.cert_manager.awspca_secret_access_key === undefined) data.component_config.cert_manager.awspca_secret_access_key = '';
+
+  if (!data.pre_installs) data.pre_installs = {};
+  if (data.pre_installs.install_aap === undefined) data.pre_installs.install_aap = false;
+  // Support legacy boolean openshift_agent + new object shape
+  if (typeof data.pre_installs.openshift_agent === 'boolean') {
+    data.pre_installs.openshift_agent_enabled = data.pre_installs.openshift_agent;
+    data.pre_installs.openshift_agent = {
+      api_host: '',
+      pull_secret: '',
+      ssh_public_key: ''
+    };
+  }
+  if (data.pre_installs.openshift_agent_enabled === undefined) {
+    data.pre_installs.openshift_agent_enabled = false;
+  }
+  if (!data.pre_installs.aap || typeof data.pre_installs.aap !== 'object') {
+    data.pre_installs.aap = {
+      license_mode: 'none',
+      subscription_manifest_file: '',
+      subscription_manifest_content_base64: '',
+      subscription_manifest_encoding: 'base64',
+      rhn_username: '',
+      rhn_password: ''
+    };
+  }
+  if (!data.pre_installs.openshift_agent || typeof data.pre_installs.openshift_agent !== 'object') {
+    data.pre_installs.openshift_agent = {
+      api_host: '',
+      pull_secret: '',
+      ssh_public_key: ''
+    };
+  }
+  if (!data.component_config.aap) data.component_config.aap = {};
+  if (data.component_config.aap.replicas === undefined || data.component_config.aap.replicas === null || data.component_config.aap.replicas === '') {
+    data.component_config.aap.replicas = 1;
+  }
+  const preAap = data.pre_installs.aap;
+  if (data.pre_installs.install_aap === true) {
+    data.component_config.aap.install_during_bootstrap = true;
+  }
+  if (preAap.license_mode && preAap.license_mode !== 'none') {
+    data.component_config.aap.license_mode = preAap.license_mode;
+  }
+  if (preAap.subscription_manifest_file) {
+    data.component_config.aap.subscription_manifest_file = preAap.subscription_manifest_file;
+  }
+  if (preAap.subscription_manifest_content_base64) {
+    data.component_config.aap.subscription_manifest_content_base64 = preAap.subscription_manifest_content_base64;
+  }
+  if (preAap.subscription_manifest_encoding) {
+    data.component_config.aap.subscription_manifest_encoding = preAap.subscription_manifest_encoding;
+  }
+  if (preAap.rhn_username) data.component_config.aap.rhn_username = preAap.rhn_username;
+  if (preAap.rhn_password) data.component_config.aap.rhn_password = preAap.rhn_password;
+
+  // Mirror agent summary into agent_installer when enabled
+  if (data.pre_installs.openshift_agent_enabled) {
+    if (!data.openshift) data.openshift = {};
+    if (!data.openshift.agent_installer || typeof data.openshift.agent_installer !== 'object') {
+      data.openshift.agent_installer = {};
+    }
+    const summary = data.pre_installs.openshift_agent;
+    if (summary.pull_secret && !data.openshift.agent_installer.pull_secret) {
+      data.openshift.agent_installer.pull_secret = summary.pull_secret;
+    }
+    if (summary.ssh_public_key && !data.openshift.agent_installer.ssh_public_key) {
+      data.openshift.agent_installer.ssh_public_key = summary.ssh_public_key;
+    }
+    if (summary.api_host && !data.openshift.api_host) {
+      data.openshift.api_host = summary.api_host;
+    }
+    // Keep summary in sync with agent installer
+    data.pre_installs.openshift_agent = {
+      api_host: summary.api_host || data.openshift.api_host || '',
+      pull_secret: summary.pull_secret || data.openshift.agent_installer.pull_secret || '',
+      ssh_public_key: summary.ssh_public_key || data.openshift.agent_installer.ssh_public_key || ''
+    };
+  }
+
+  // Ensure selected component configs keep a replicas default for form/CLI builds.
+  const replicaSkip = new Set(['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching']);
+  Object.keys(data.component_config || {}).forEach(name => {
+    if (replicaSkip.has(name)) return;
+    const cfg = data.component_config[name];
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return;
+    if (cfg.replicas === undefined || cfg.replicas === null || cfg.replicas === '') {
+      cfg.replicas = 1;
+    }
+  });
+
+  if (data.openshift.htpasswd_action === undefined) data.openshift.htpasswd_action = 'add';
+  if (!Array.isArray(data.openshift.htpasswd_users) || data.openshift.htpasswd_users.length === 0) {
+    data.openshift.htpasswd_users = [{
+      name: data.openshift.admin_username || 'admin',
+      password: data.openshift.admin_password || '',
+      role: data.openshift.admin_role || 'cluster-admin'
+    }];
+  } else {
+    // Keep legacy single-admin fields synced from first user
+    const first = data.openshift.htpasswd_users[0] || {};
+    if (first.name) data.openshift.admin_username = first.name;
+    if (first.password !== undefined) data.openshift.admin_password = first.password;
+    if (first.role) data.openshift.admin_role = first.role;
+  }
+
+  if (data.component_config.grafana) {
+    if (!Array.isArray(data.component_config.grafana.folders)) {
+      data.component_config.grafana.folders = [];
+    }
+    // Expand first folder into legacy single-folder fields for older playbooks
+    if (data.component_config.grafana.folders.length > 0) {
+      const firstFolder = data.component_config.grafana.folders[0] || {};
+      if (!data.component_config.grafana.folder_name && firstFolder.name) {
+        data.component_config.grafana.folder_name = firstFolder.name;
+      }
+      if (!data.component_config.grafana.dashboards_source && firstFolder.source) {
+        data.component_config.grafana.dashboards_source = firstFolder.source;
+      }
+    }
+    if (!data.component_config.grafana.email || typeof data.component_config.grafana.email !== 'object') {
+      data.component_config.grafana.email = { enabled: false };
+    } else {
+      const email = data.component_config.grafana.email;
+      // Accept either smtp_* or legacy short keys
+      if (email.smtp_host === undefined && email.host !== undefined) email.smtp_host = email.host;
+      if (email.smtp_port === undefined && email.port !== undefined) email.smtp_port = email.port;
+      if (email.smtp_user === undefined && email.user !== undefined) email.smtp_user = email.user;
+      if (email.smtp_password === undefined && email.password !== undefined) email.smtp_password = email.password;
+    }
+    if (!data.component_config.grafana.oidc || typeof data.component_config.grafana.oidc !== 'object') {
+      data.component_config.grafana.oidc = { enabled: false };
+    }
+  }
+
+  if (data.component_config.rhbk) {
+    if (!Array.isArray(data.component_config.rhbk.clients)) {
+      data.component_config.rhbk.clients = [];
+    }
+    // Sync first client into legacy single-client fields
+    if (data.component_config.rhbk.clients.length > 0) {
+      const firstClient = data.component_config.rhbk.clients[0] || {};
+      const clientId = firstClient.id || firstClient.client_id || '';
+      if (clientId && !data.component_config.rhbk.client) {
+        data.component_config.rhbk.client = clientId;
+      }
+      if ((firstClient.name || firstClient.client_name) && !data.component_config.rhbk.client_name) {
+        data.component_config.rhbk.client_name = firstClient.name || firstClient.client_name;
+      }
+      if (firstClient.redirect_uris && !data.component_config.rhbk.client_redirect_uris) {
+        data.component_config.rhbk.client_redirect_uris = firstClient.redirect_uris;
+      }
+      if (firstClient.web_origins && !data.component_config.rhbk.client_web_origins) {
+        data.component_config.rhbk.client_web_origins = firstClient.web_origins;
+      }
+    }
+  }
 
   return data;
 }
@@ -845,8 +1145,47 @@ function ipInCidr(ip, cidr) {
   return ((value & parsed.mask) >>> 0) === (parsed.network >>> 0);
 }
 
+function normalizeMac(mac) {
+  const raw = String(mac || '').trim().toLowerCase();
+  if (!raw) return '';
+
+  if (/[:|-]/.test(raw)) {
+    const parts = raw.split(/[:|-]/).filter(Boolean);
+    if (parts.length === 6 && parts.every(part => /^[0-9a-f]{1,2}$/i.test(part))) {
+      return parts.map(part => part.padStart(2, '0')).join(':');
+    }
+    return raw;
+  }
+
+  const hex = raw.replace(/[^0-9a-f]/gi, '');
+  if (hex.length === 12) {
+    return hex.match(/.{1,2}/g).join(':');
+  }
+  return raw;
+}
+
 function isValidMac(mac) {
-  return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(String(mac || '').trim());
+  return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(normalizeMac(mac));
+}
+
+function parseKernelArguments(value) {
+  return String(value || '')
+    .split(/\n/)
+    .map(line => line.replace(/^\s*-\s*/, '').trim())
+    .filter(Boolean)
+    .map(line => {
+      const match = line.match(
+        /^(?:operation:\s*)?(append|replace|delete)\s+(?:value:\s*)?(.+)$/i
+      );
+      if (match) {
+        return {
+          operation: match[1].toLowerCase(),
+          value: match[2].trim()
+        };
+      }
+      return { operation: 'append', value: line };
+    })
+    .filter(item => item.value);
 }
 
 function isValidSshKey(key) {
@@ -933,7 +1272,17 @@ function normalizeAgentInstaller(input) {
   data.cluster_network_cidr = data.cluster_network_cidr || '10.128.0.0/14';
   data.cluster_network_host_prefix = normalizeNonNegativeInt(data.cluster_network_host_prefix, 24);
   data.service_network_cidr = data.service_network_cidr || '172.30.0.0/16';
-  data.nodes = Array.isArray(data.nodes) ? data.nodes : [];
+  data.kernel_arguments = String(data.kernel_arguments || '');
+  data.nodes = (Array.isArray(data.nodes) ? data.nodes : []).map(node => {
+    const next = { ...node };
+    next.macAddress = normalizeMac(next.macAddress);
+    next.secondaryMacAddress = normalizeMac(next.secondaryMacAddress);
+    next.bondEnabled = next.bondEnabled === true;
+    next.bondName = String(next.bondName || 'bond0').trim() || 'bond0';
+    next.bondMode = String(next.bondMode || 'active-backup').trim() || 'active-backup';
+    next.secondaryInterfaceName = String(next.secondaryInterfaceName || 'eno2').trim() || 'eno2';
+    return next;
+  });
   return data;
 }
 
@@ -1007,14 +1356,44 @@ function validateAgentInstaller(input) {
 
     if (!['master', 'worker'].includes(node.role)) errors.push(`${label} role must be master or worker.`);
     if (!node.macAddress) errors.push(`${label} MAC address is required.`);
-    if (node.macAddress && !isValidMac(node.macAddress)) errors.push(`${label} MAC address is invalid.`);
-    const normalizedMac = String(node.macAddress || '').toLowerCase();
+    if (node.macAddress && !isValidMac(node.macAddress)) {
+      errors.push(
+        `${label} MAC address is invalid. Use 12 hex digits (112233445566) or colon-separated form (11:22:33:44:55:66).`
+      );
+    }
+    const normalizedMac = normalizeMac(node.macAddress);
     if (normalizedMac && macs.has(normalizedMac)) errors.push(`Duplicate MAC address: ${node.macAddress}.`);
     if (normalizedMac) macs.add(normalizedMac);
 
     if (!node.interfaceName) errors.push(`${label} interface name is required.`);
-    if (data.require_root_device && !node.diskDevice) errors.push(`${label} root disk device is required.`);
-    if (!node.diskDevice) warnings.push(`${label} has no root device hint; installer will choose a disk.`);
+    // Root disk hints are optional (single-disk hosts can omit them).
+    if (data.require_root_device && !node.diskDevice) {
+      warnings.push(`${label} has no root device hint; enable only if you want a reminder to set one.`);
+    }
+
+    if (node.bondEnabled) {
+      if (!node.secondaryInterfaceName) {
+        errors.push(`${label} secondary interface name is required when bonding is enabled.`);
+      }
+      if (node.secondaryInterfaceName && node.secondaryInterfaceName === node.interfaceName) {
+        errors.push(`${label} secondary interface must differ from the primary interface.`);
+      }
+      if (!node.secondaryMacAddress) {
+        errors.push(`${label} secondary MAC address is required when bonding is enabled.`);
+      }
+      if (node.secondaryMacAddress && !isValidMac(node.secondaryMacAddress)) {
+        errors.push(
+          `${label} secondary MAC address is invalid. Use 12 hex digits or colon-separated form.`
+        );
+      }
+      const secondaryMac = normalizeMac(node.secondaryMacAddress);
+      if (secondaryMac && macs.has(secondaryMac)) {
+        errors.push(`Duplicate MAC address: ${node.secondaryMacAddress}.`);
+      }
+      if (secondaryMac) macs.add(secondaryMac);
+      if (!node.bondName) errors.push(`${label} bond name is required when bonding is enabled.`);
+      if (!node.bondMode) errors.push(`${label} bond mode is required when bonding is enabled.`);
+    }
 
     if (node.networkMode === 'static') {
       if (!node.ipAddress) errors.push(`${label} static IP is required.`);
@@ -1029,6 +1408,13 @@ function validateAgentInstaller(input) {
       }
     }
   });
+
+  const kernelArgs = parseKernelArguments(data.kernel_arguments);
+  for (const item of kernelArgs) {
+    if (!['append', 'replace', 'delete'].includes(item.operation)) {
+      errors.push(`Unsupported kernel argument operation: ${item.operation}.`);
+    }
+  }
 
   return { valid: errors.length === 0, errors, warnings, config: data };
 }
@@ -1094,6 +1480,165 @@ function buildInstallConfig(config) {
   return `---\n${toYaml(doc)}\n`;
 }
 
+function buildHostNetworkConfig(node) {
+  const primaryMac = normalizeMac(node.macAddress);
+  const secondaryMac = normalizeMac(node.secondaryMacAddress);
+  const bondEnabled = node.bondEnabled === true;
+  const bondName = String(node.bondName || 'bond0').trim() || 'bond0';
+  const bondMode = String(node.bondMode || 'active-backup').trim() || 'active-backup';
+  const isStatic = node.networkMode === 'static';
+
+  if (!bondEnabled && !isStatic) {
+    return null;
+  }
+
+  if (!bondEnabled) {
+    return {
+      interfaces: [
+        {
+          name: node.interfaceName,
+          type: 'ethernet',
+          state: 'up',
+          'mac-address': primaryMac,
+          ipv4: {
+            enabled: true,
+            dhcp: false,
+            address: [
+              {
+                ip: node.ipAddress,
+                'prefix-length': Number(node.prefixLength || 24)
+              }
+            ]
+          }
+        }
+      ],
+      'dns-resolver': {
+        config: {
+          server: splitList(node.dnsServers)
+        }
+      },
+      routes: {
+        config: [
+          {
+            destination: '0.0.0.0/0',
+            'next-hop-address': node.gateway,
+            'next-hop-interface': node.interfaceName,
+            'table-id': 254
+          }
+        ]
+      }
+    };
+  }
+
+  const slaveInterfaces = [
+    {
+      name: node.interfaceName,
+      type: 'ethernet',
+      state: 'up',
+      'mac-address': primaryMac,
+      ipv4: { enabled: false },
+      ipv6: { enabled: false }
+    },
+    {
+      name: node.secondaryInterfaceName,
+      type: 'ethernet',
+      state: 'up',
+      'mac-address': secondaryMac,
+      ipv4: { enabled: false },
+      ipv6: { enabled: false }
+    }
+  ];
+
+  const bondInterface = {
+    name: bondName,
+    type: 'bond',
+    state: 'up',
+    'mac-address': primaryMac,
+    'link-aggregation': {
+      mode: bondMode,
+      options: {
+        miimon: '100'
+      },
+      port: [node.interfaceName, node.secondaryInterfaceName]
+    },
+    ipv4: isStatic
+      ? {
+          enabled: true,
+          dhcp: false,
+          address: [
+            {
+              ip: node.ipAddress,
+              'prefix-length': Number(node.prefixLength || 24)
+            }
+          ]
+        }
+      : {
+          enabled: true,
+          dhcp: true
+        }
+  };
+
+  const networkConfig = {
+    interfaces: [...slaveInterfaces, bondInterface]
+  };
+
+  if (isStatic) {
+    networkConfig['dns-resolver'] = {
+      config: {
+        server: splitList(node.dnsServers)
+      }
+    };
+    networkConfig.routes = {
+      config: [
+        {
+          destination: '0.0.0.0/0',
+          'next-hop-address': node.gateway,
+          'next-hop-interface': bondName,
+          'table-id': 254
+        }
+      ]
+    };
+  }
+
+  return networkConfig;
+}
+
+function buildKernelArgumentManifests(config) {
+  const args = parseKernelArguments(config.kernel_arguments);
+  if (args.length === 0) return {};
+
+  const values = args.map(item => item.value);
+  const assistedStyle = {
+    kernelArguments: args.map(item => ({
+      operation: item.operation,
+      value: item.value
+    }))
+  };
+
+  const files = {
+    'openshift/99-assisted-kernel-arguments.yaml': `---\n${toYaml(assistedStyle)}\n`
+  };
+
+  for (const role of ['master', 'worker']) {
+    const doc = {
+      apiVersion: 'machineconfiguration.openshift.io/v1',
+      kind: 'MachineConfig',
+      metadata: {
+        name: `99-${role}-kernel-arguments`,
+        labels: {
+          'machineconfiguration.openshift.io/role': role
+        }
+      },
+      spec: {
+        kernelArguments: values
+      }
+    };
+    files[`openshift/99-${role}-kernel-arguments.yaml`] = `---\n${toYaml(doc)}\n`;
+  }
+
+  return files;
+}
+
 function buildAgentConfig(config) {
   const doc = {
     apiVersion: 'v1alpha1',
@@ -1107,58 +1652,33 @@ function buildAgentConfig(config) {
   if (ntp.length > 0) doc.additionalNTPSources = ntp;
 
   doc.hosts = config.nodes.map(node => {
+    const primaryMac = normalizeMac(node.macAddress);
+    const interfaces = [
+      {
+        name: node.interfaceName,
+        macAddress: primaryMac
+      }
+    ];
+
+    if (node.bondEnabled) {
+      interfaces.push({
+        name: node.secondaryInterfaceName,
+        macAddress: normalizeMac(node.secondaryMacAddress)
+      });
+    }
+
     const host = {
       hostname: node.hostname,
       role: node.role,
-      interfaces: [
-        {
-          name: node.interfaceName,
-          macAddress: node.macAddress
-        }
-      ]
+      interfaces
     };
 
     if (node.diskDevice) {
       host.rootDeviceHints = { deviceName: node.diskDevice };
     }
 
-    if (node.networkMode === 'static') {
-      host.networkConfig = {
-        interfaces: [
-          {
-            name: node.interfaceName,
-            type: 'ethernet',
-            state: 'up',
-            'mac-address': node.macAddress,
-            ipv4: {
-              enabled: true,
-              dhcp: false,
-              address: [
-                {
-                  ip: node.ipAddress,
-                  'prefix-length': Number(node.prefixLength || 24)
-                }
-              ]
-            }
-          }
-        ],
-        'dns-resolver': {
-          config: {
-            server: splitList(node.dnsServers)
-          }
-        },
-        routes: {
-          config: [
-            {
-              destination: '0.0.0.0/0',
-              'next-hop-address': node.gateway,
-              'next-hop-interface': node.interfaceName,
-              'table-id': 254
-            }
-          ]
-        }
-      };
-    }
+    const networkConfig = buildHostNetworkConfig(node);
+    if (networkConfig) host.networkConfig = networkConfig;
 
     const labels = splitList(node.labels);
     if (labels.length > 0) host.labels = Object.fromEntries(labels.map(item => {
@@ -1179,12 +1699,213 @@ function generateAgentInstallerFiles(input) {
   const validation = validateAgentInstaller(input);
   if (!validation.valid) return validation;
   const config = validation.config;
+  const additionalManifests = buildKernelArgumentManifests(config);
   return {
     valid: true,
     errors: [],
     warnings: validation.warnings,
     installConfig: buildInstallConfig(config),
-    agentConfig: buildAgentConfig(config)
+    agentConfig: buildAgentConfig(config),
+    additionalManifests,
+    kernelArgumentsPreview: additionalManifests['openshift/99-assisted-kernel-arguments.yaml'] || ''
+  };
+}
+
+function intToIp(value) {
+  return [
+    (value >>> 24) & 255,
+    (value >>> 16) & 255,
+    (value >>> 8) & 255,
+    value & 255
+  ].join('.');
+}
+
+function remapIpToExample(ip, sourceCidr, exampleNetworkBase = '192.0.2.0', examplePrefix = 24) {
+  const value = ipToInt(ip);
+  const source = parseCidr(sourceCidr);
+  if (value === null || !source) return null;
+  const offset = (value - source.network) >>> 0;
+  const exampleBase = ipToInt(exampleNetworkBase);
+  if (exampleBase === null) return null;
+  const hostBits = 32 - examplePrefix;
+  const maxHosts = hostBits >= 32 ? 0xffffffff : ((1 << hostBits) >>> 0) - 1;
+  const safeOffset = Math.min(offset, maxHosts);
+  return intToIp((exampleBase + safeOffset) >>> 0);
+}
+
+function exampleMac(index) {
+  const n = Number(index) + 1;
+  const hex = n.toString(16).padStart(8, '0');
+  return `02:00:${hex.slice(0, 2)}:${hex.slice(2, 4)}:${hex.slice(4, 6)}:${hex.slice(6, 8)}`;
+}
+
+function sanitizeProxyUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  try {
+    const url = new URL(text);
+    return `${url.protocol}//proxy.example.com${url.port ? `:${url.port}` : ''}`;
+  } catch {
+    return 'http://proxy.example.com:8080';
+  }
+}
+
+function sanitizeAgentInstallerConfig(config) {
+  const source = JSON.parse(JSON.stringify(config || {}));
+  const exampleMachineCidr = '192.0.2.0/24';
+  const examplePrefix = 24;
+  const exampleBase = '192.0.2.0';
+  const roleCounts = { master: 0, worker: 0 };
+
+  const sanitized = {
+    ...source,
+    cluster_name: 'example-cluster',
+    base_domain: 'example.com',
+    machine_network_cidr: exampleMachineCidr,
+    cluster_network_cidr: source.cluster_network_cidr || '10.128.0.0/14',
+    service_network_cidr: source.service_network_cidr || '172.30.0.0/16',
+    boot_artifacts_base_url: source.boot_artifacts_base_url ? 'http://boot-artifacts.example.com/' : '',
+    ntp_sources: source.ntp_sources ? 'ntp.example.com' : '',
+    pull_secret: JSON.stringify({
+      auths: {
+        'cloud.openshift.com': {
+          auth: 'REDACTED',
+          email: 'redacted@example.com'
+        },
+        'registry.redhat.io': {
+          auth: 'REDACTED',
+          email: 'redacted@example.com'
+        }
+      }
+    }, null, 2),
+    ssh_public_key: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA redacted@example.com',
+    proxy_http: sanitizeProxyUrl(source.proxy_http),
+    proxy_https: sanitizeProxyUrl(source.proxy_https),
+    proxy_no_proxy: source.proxy_no_proxy
+      ? '.example.com,192.0.2.0/24,10.0.0.0/16'
+      : '',
+    additional_trust_bundle: source.additional_trust_bundle
+      ? '-----BEGIN CERTIFICATE-----\nREDACTED_CUSTOMER_CA_BUNDLE\n-----END CERTIFICATE-----\n'
+      : '',
+    disconnected_registry: source.disconnected_registry
+      ? '- source: quay.io/openshift\n  mirrors: registry.example.com/openshift'
+      : '',
+    kernel_arguments: source.kernel_arguments || '',
+    nodes: []
+  };
+
+  const usedIps = new Set();
+  let nextHostOctet = 30;
+  const uniqueExampleIp = preferred => {
+    if (preferred && !usedIps.has(preferred)) {
+      usedIps.add(preferred);
+      return preferred;
+    }
+    while (nextHostOctet < 250) {
+      const candidate = `192.0.2.${nextHostOctet}`;
+      nextHostOctet += 1;
+      if (!usedIps.has(candidate)) {
+        usedIps.add(candidate);
+        return candidate;
+      }
+    }
+    return '192.0.2.250';
+  };
+
+  sanitized.api_vip = uniqueExampleIp(
+    remapIpToExample(source.api_vip, source.machine_network_cidr, exampleBase, examplePrefix) || '192.0.2.20'
+  );
+  sanitized.ingress_vip = uniqueExampleIp(
+    remapIpToExample(source.ingress_vip, source.machine_network_cidr, exampleBase, examplePrefix) || '192.0.2.21'
+  );
+  sanitized.rendezvous_ip = uniqueExampleIp(
+    remapIpToExample(source.rendezvous_ip, source.machine_network_cidr, exampleBase, examplePrefix) || '192.0.2.10'
+  );
+
+  sanitized.nodes = (source.nodes || []).map((node, index) => {
+    const role = node.role === 'worker' ? 'worker' : 'master';
+    roleCounts[role] += 1;
+    const hostname = `${role}-${roleCounts[role]}`;
+    const remappedIp = node.networkMode === 'static'
+      ? uniqueExampleIp(
+        remapIpToExample(node.ipAddress, source.machine_network_cidr, exampleBase, examplePrefix)
+      )
+      : '';
+
+    return {
+      ...node,
+      hostname,
+      macAddress: exampleMac(index * 2),
+      secondaryMacAddress: node.bondEnabled ? exampleMac(index * 2 + 1) : '',
+      ipAddress: remappedIp,
+      gateway: node.networkMode === 'static' ? '192.0.2.1' : '',
+      dnsServers: node.networkMode === 'static' ? '192.0.2.53' : '',
+      labels: '',
+      taints: '',
+      interfaceName: node.interfaceName || 'eno1',
+      secondaryInterfaceName: node.secondaryInterfaceName || 'eno2',
+      bondName: node.bondName || 'bond0',
+      bondMode: node.bondMode || 'active-backup'
+    };
+  });
+
+  return sanitized;
+}
+
+function buildSanitizedAgentReadme() {
+  return [
+    'OpenShift agent installer configs (SANITIZED)',
+    '',
+    'This ZIP is safe to share for troubleshooting. Customer-identifying values were replaced:',
+    '- cluster name / base domain',
+    '- hostnames',
+    '- MAC addresses',
+    '- machine-network IPs / VIPs / gateways / DNS',
+    '- pull secret, SSH public key, proxy URLs, CA trust bundle',
+    '- disconnected registry mirrors / NTP / boot artifact URLs',
+    '- node labels and taints',
+    '',
+    'Preserved (structure only): topology, roles, interface names, bond settings,',
+    'network mode (dhcp/static), disk device hints, kernel arguments, and CIDR shapes',
+    'for cluster/service networks when they use default OpenShift ranges.',
+    '',
+    'Do NOT use these files to install a real cluster. Re-download the normal ZIP',
+    'for site deployment.',
+    ''
+  ].join('\n');
+}
+
+function generateSanitizedAgentInstallerFiles(input) {
+  const validation = validateAgentInstaller(input);
+  if (!validation.valid) return validation;
+  const sanitized = sanitizeAgentInstallerConfig(validation.config);
+  // Sanitized config uses placeholder secrets that still pass schema checks.
+  const sanitizedValidation = validateAgentInstaller(sanitized);
+  if (!sanitizedValidation.valid) {
+    return {
+      valid: false,
+      errors: [
+        'Failed to build sanitized configs.',
+        ...sanitizedValidation.errors
+      ],
+      warnings: validation.warnings
+    };
+  }
+  const config = sanitizedValidation.config;
+  const additionalManifests = buildKernelArgumentManifests(config);
+  return {
+    valid: true,
+    errors: [],
+    warnings: [
+      ...validation.warnings,
+      'Sanitized download redacts customer hostnames, IPs, MACs, secrets, certs, and tokens.'
+    ],
+    sanitized: true,
+    installConfig: buildInstallConfig(config),
+    agentConfig: buildAgentConfig(config),
+    additionalManifests,
+    kernelArgumentsPreview: additionalManifests['openshift/99-assisted-kernel-arguments.yaml'] || '',
+    readme: buildSanitizedAgentReadme()
   };
 }
 
@@ -1442,7 +2163,7 @@ host_key_checking = False
 retry_files_enabled = False
 stdout_callback = default
 interpreter_python = auto_silent
-collections_paths = ./collections:/workspace/collections:/usr/share/ansible/collections
+collections_paths = /workspace/collections:./collections:/usr/share/ansible/collections
 `);
 }
 
@@ -1692,8 +2413,28 @@ function expectedRecapObjects(data, selectedComponentApps) {
 
   add(inventories, aap.inventory || orgScopedName('', org, 'inventory'));
 
-  if (selected.has('rhel') || config.satellite?.dynamic_inventory_enabled) {
-    add(inventories, `${org}-RHEL-Inventory`);
+  const useExistingRhelInventory =
+    config.patching?.inventory_mode === 'existing'
+    || config.rhel?.inventory_mode === 'existing'
+    || config.patching?.use_existing_inventory === true
+    || config.rhel?.use_existing_inventory === true;
+  const existingRhelInventoryName = cleanYamlName(
+    config.patching?.inventory_name
+    || config.rhel?.inventory_name
+    || config.rhel?.existing_inventory_name
+    || ''
+  );
+
+  if (
+    selected.has('rhel')
+    || selected.has('patching')
+    || config.satellite?.dynamic_inventory_enabled
+  ) {
+    if (useExistingRhelInventory && existingRhelInventoryName) {
+      add(inventories, existingRhelInventoryName);
+    } else if (!useExistingRhelInventory) {
+      add(inventories, `${org}-RHEL-Inventory`);
+    }
   }
 
   if (selected.has('idm')) {
@@ -1709,7 +2450,13 @@ function expectedRecapObjects(data, selectedComponentApps) {
     add(inventorySources, config.satellite.inventory_source_name || `${org} Satellite Dynamic Inventory`);
   }
 
-  const rhelHosts = [config.rhel?.hostname, ...(Array.isArray(config.rhel?.hosts) ? config.rhel.hosts : [])];
+  const rhelHosts = [
+    config.rhel?.hostname,
+    ...(Array.isArray(config.rhel?.hosts) ? config.rhel.hosts : []),
+    ...((!useExistingRhelInventory && selected.has('patching'))
+      ? [config.patching?.hostname, ...(Array.isArray(config.patching?.hosts) ? config.patching.hosts : [])]
+      : [])
+  ];
   rhelHosts.forEach(host => add(hosts, host));
   add(hosts, config.satellite?.hostname);
   add(hosts, config.idm?.hostname);
@@ -1940,12 +2687,67 @@ app.post('/api/openshift-agent/download', (req, res) => {
 
   const zip = createZip({
     'install-config.yaml': result.installConfig,
-    'agent-config.yaml': result.agentConfig
+    'agent-config.yaml': result.agentConfig,
+    ...(result.additionalManifests || {})
   });
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', 'attachment; filename="openshift-agent-configs.zip"');
   res.send(zip);
+});
+
+app.post('/api/openshift-agent/download-sanitized', (req, res) => {
+  const result = generateSanitizedAgentInstallerFiles(req.body);
+  if (!result.valid) {
+    res.status(400).json(result);
+    return;
+  }
+
+  const zip = createZip({
+    'README-SANITIZED.txt': result.readme,
+    'install-config.yaml': result.installConfig,
+    'agent-config.yaml': result.agentConfig,
+    ...(result.additionalManifests || {})
+  });
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader(
+    'Content-Disposition',
+    'attachment; filename="openshift-agent-configs-sanitized.zip"'
+  );
+  res.send(zip);
+});
+
+app.post('/api/openshift-agent/sanitize-profile', (req, res) => {
+  const validation = validateAgentInstaller(req.body || {});
+  if (!validation.valid) {
+    res.status(400).json(validation);
+    return;
+  }
+
+  const sanitized = sanitizeAgentInstallerConfig(validation.config);
+  const name = String(
+    sanitized.profile_name || sanitized.cluster_name || 'example-cluster'
+  ).trim() || 'example-cluster';
+
+  res.json({
+    valid: true,
+    errors: [],
+    warnings: [
+      'Sanitized profile redacts customer hostnames, IPs, MACs, secrets, certs, and tokens.'
+    ],
+    profile: {
+      kind: 'ado-agent-installer-profile',
+      version: 1,
+      sanitized: true,
+      name: `${name}-sanitized`,
+      exported_at: new Date().toISOString(),
+      config: {
+        ...sanitized,
+        profile_name: `${name}-sanitized`
+      }
+    }
+  });
 });
 
 app.post('/api/bootstrap', async (req, res) => {
@@ -1973,10 +2775,11 @@ app.post('/api/bootstrap', async (req, res) => {
   }
 
   const gitToken = data?.git?.token || '';
+  const aapEnabled = data?.aap?.enabled !== false;
 
   const hubUpdateCollectionOnly = data?.aap?.hub_update_collection_only === true;
-  const hubPublishRequested = data?.aap?.hub_publish_ado_collection === true || hubUpdateCollectionOnly;
-  const hubPushEeRequested = data?.aap?.hub_push_ee === true;
+  const hubPublishRequested = aapEnabled && (data?.aap?.hub_publish_ado_collection === true || hubUpdateCollectionOnly);
+  const hubPushEeRequested = aapEnabled && data?.aap?.hub_push_ee === true;
   const hasAapOAuthToken = Boolean(String(data?.aap?.oauth_token || '').trim());
   const hasAapPasswordAuth = Boolean(
     String(data?.aap?.admin_username || '').trim()
@@ -2026,8 +2829,11 @@ app.post('/api/bootstrap', async (req, res) => {
   latestDebug.selectedComponentApps = selectedComponentApps;
 
   const autoGitPush = data?.git?.auto_push !== false;
+  const overwriteGenerated = data?.git?.overwrite_generated === true;
   const ansibleVerbosity = normalizeVerbosity(data?.ansible?.verbosity ?? data?.verbosity ?? 0);
   const ansibleVerbosityFlag = verbosityFlag(ansibleVerbosity);
+  const ansibleExtraArgsRaw = String(data?.ansible?.extra_args || '').trim();
+  const ansibleExtraArgsShell = formatAnsibleExtraArgsForShell(ansibleExtraArgsRaw);
   const skipTlsVerify = data?.aap?.skip_tls_verify === true;
   const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
   const encryptVaultFiles = data?.vault?.encrypt !== false;
@@ -2036,17 +2842,25 @@ app.post('/api/bootstrap', async (req, res) => {
   append(`\nSelected Components: ${selectedComponents}\n`);
   append(`Selected Component Apps: ${selectedComponentApps.join(',')}\n`);
   append(`Auto Git Push: ${autoGitPush}\n`);
+  append(`Overwrite Generated Content: ${overwriteGenerated}\n`);
+  append(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}\n`);
   append(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}\n`);
+  append(`Ansible Extra Args: ${ansibleExtraArgsRaw || '(none)'}\n`);
   append(`Skip TLS Verification: ${skipTlsVerify}\n`);
   append(`Git Skip TLS/SSL Verification: ${gitSkipTlsVerify}\n`);
+  append(`AAP Enabled: ${aapEnabled}\n`);
   append(`Encrypt Vault Files: ${encryptVaultFiles}\n`);
 
   event(`Selected components: ${selectedComponents}`);
   event(`Selected component apps: ${selectedComponentApps.join(',')}`);
   event(`Auto Git Push: ${autoGitPush}`);
+  event(`Overwrite Generated Content: ${overwriteGenerated}`);
+  event(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}`);
   event(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}`);
+  event(`Ansible Extra Args: ${ansibleExtraArgsRaw || '(none)'}`);
   event(`Skip TLS Verification: ${skipTlsVerify}`);
   event(`Git Skip TLS/SSL Verification: ${gitSkipTlsVerify}`);
+  event(`AAP Enabled: ${aapEnabled}`);
   event(`Encrypt vault files: ${encryptVaultFiles}`);
 
   const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
@@ -2273,6 +3087,14 @@ ansible-galaxy collection list
 
   ensureStarterFiles(repoDir, envName);
 
+  // Playbook-adjacent collections/ wins over ANSIBLE_COLLECTIONS_PATH in Ansible
+  // 2.15+, so a vendored infra.ado from git would shadow the bootstrap tarball.
+  const vendoredAdo = path.join(repoDir, 'collections', 'ansible_collections', 'infra', 'ado');
+  if (fs.existsSync(vendoredAdo)) {
+    event(`Removing vendored infra.ado that shadows bootstrap collection: ${vendoredAdo}`);
+    fs.rmSync(vendoredAdo, { recursive: true, force: true });
+  }
+
   event(`Writing preflight JSON ${preflightFile}`);
   fs.writeFileSync(preflightPath, JSON.stringify(data, null, 2));
 
@@ -2293,13 +3115,16 @@ ansible-galaxy collection list
     component_options: data.component_options || {},
     machine_credential: data.aap.machine_credential || {},
     git_auto_push: autoGitPush,
+    git_overwrite_generated: overwriteGenerated,
     git_skip_tls_verify: gitSkipTlsVerify,
     scm_tool: scmTool,
     git_auth_mode: gitUsesBearerAuth ? 'bearer' : 'basic',
+    aap_enabled: aapEnabled,
     skip_tls_verify: skipTlsVerify,
     ansible_tls_verify: skipTlsVerify ? 'false' : 'true',
     ansible_verbosity: ansibleVerbosity,
     ansible_verbosity_flag: ansibleVerbosityFlag,
+    ansible_extra_args: ansibleExtraArgsRaw,
     encrypt_vault_files: encryptVaultFiles,
     bootstrap_hub_update_collection_only: hubUpdateCollectionOnly
   }, null, 2));
@@ -2333,8 +3158,18 @@ ${gitUsesBearerAuth && gitToken
   : ''}
 
 echo ""
-echo "=== Remove old generated bootstrap content ==="
-rm -rf group_vars playbooks configs
+echo "=== Remove playbook-adjacent vendored infra.ado (shadows /workspace/collections) ==="
+rm -rf collections/ansible_collections/infra/ado
+
+echo ""
+echo "=== Prepare generated bootstrap content ==="
+${overwriteGenerated
+  ? `echo "Overwrite enabled: removing all group_vars, playbooks, and configs"
+rm -rf group_vars playbooks configs`
+  : `echo "Overwrite disabled: refreshing only group_vars/all/${envName} (sibling envs preserved)"
+rm -rf "group_vars/all/${envName}"
+# Shared playbooks/configs are regenerated with force; do not wipe sibling env dirs.
+mkdir -p group_vars/all`}
 
 echo ""
 echo "=== Effective preflight JSON ==="
@@ -2362,10 +3197,11 @@ ansible-playbook \\
   -e ansible_tls_verify=${skipTlsVerify ? 'false' : 'true'} \\
   -e bootstrap_hub_update_collection_only=${hubUpdateCollectionOnly ? 'true' : 'false'} \\
   -e generate_playbooks=${hubUpdateCollectionOnly ? 'false' : 'true'} \\
-  -e generate_aap_configs=${hubUpdateCollectionOnly ? 'false' : 'true'} \\
-  -e apply_aap_configs=true \\
-  -e bootstrap_apply_aap_configs=true \\
-  -e bootstrap_controller_apply_aap_configs=true \\
+  -e generate_aap_configs=${aapEnabled && !hubUpdateCollectionOnly ? 'true' : 'false'} \\
+  -e apply_aap_configs=${aapEnabled ? 'true' : 'false'} \\
+  -e bootstrap_apply_aap_configs=${aapEnabled && !hubUpdateCollectionOnly ? 'true' : 'false'} \\
+  -e bootstrap_controller_apply_aap_configs=${aapEnabled && !hubUpdateCollectionOnly ? 'true' : 'false'} \\
+  -e generate_env_vars_use_aap=${aapEnabled ? 'true' : 'false'} \\
   -e generate_playbook_repo_pause_for_push=false \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_commit=${autoGitPush ? 'true' : 'false'} \\
@@ -2382,6 +3218,7 @@ ansible-playbook \\
   -e generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
   -e bootstrap_generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
   -e bootstrap_generate_env_vars_vault_password_file=.vault_pass \\
+  ${ansibleExtraArgsShell ? `${ansibleExtraArgsShell} \\` : ''}
   --vault-password-file .vault_pass
 `], workRoot, 'Running ansible-playbook', bootstrapEnv);
 
@@ -2400,8 +3237,10 @@ ansible-playbook \\
     selectedComponents,
     selectedComponentApps,
     autoGitPush,
+    overwriteGenerated,
     ansibleVerbosity,
     ansibleVerbosityFlag,
+    ansibleExtraArgs: ansibleExtraArgsRaw,
     skipTlsVerify,
     gitSkipTlsVerify,
     encryptVaultFiles,
