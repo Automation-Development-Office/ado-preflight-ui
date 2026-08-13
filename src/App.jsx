@@ -283,6 +283,69 @@ const buildDefaultContainerRegistryCredential = (org = 'ADO', hostname = '') => 
   };
 };
 
+const normalizeAapHostname = hostname => String(hostname || '').trim().replace(/\/+$/, '');
+
+const HUB_GALAXY_CONTENT_IDS = {
+  validated: 'validated',
+  published: 'published',
+  community: 'community',
+  certified: 'rh-certified'
+};
+
+const applyHostnameToGalaxyCredentials = (credentials, hostname, previousHostname = '') => {
+  const base = normalizeAapHostname(hostname);
+  const previousBase = normalizeAapHostname(previousHostname);
+
+  return (credentials || []).map(credential => {
+    if (!credential || credential.id === 'galaxy' || credential.name === 'Ansible Galaxy') {
+      return credential;
+    }
+
+    const contentPath = HUB_GALAXY_CONTENT_IDS[credential.id];
+    const url = String(credential.url || '');
+    const isStandardHubCred = Boolean(contentPath);
+    const looksLikeHubContentUrl = /\/api\/galaxy\/content\//.test(url) && !/galaxy\.ansible\.com/i.test(url);
+    if (!isStandardHubCred && !looksLikeHubContentUrl) {
+      return credential;
+    }
+
+    const pathSuffix = contentPath
+      || (url.match(/\/api\/galaxy\/content\/([^/]+)\/?/) || [])[1];
+    if (!pathSuffix) {
+      return credential;
+    }
+
+    const previousUrl = previousBase ? `${previousBase}/api/galaxy/content/${pathSuffix}/` : '';
+    const shouldRewrite =
+      isStandardHubCred
+      || !url
+      || (previousBase && (url === previousUrl || url.startsWith(`${previousBase}/api/galaxy/content/`)));
+
+    if (!shouldRewrite) {
+      return credential;
+    }
+
+    return {
+      ...credential,
+      url: base ? `${base}/api/galaxy/content/${pathSuffix}/` : ''
+    };
+  });
+};
+
+const applyHostnameToContainerRegistryCredential = (registry, hostname, previousHostname = '') => {
+  if (!registry || typeof registry !== 'object') {
+    return registry;
+  }
+
+  const next = { ...registry };
+  const previousHost = normalizeAapHostname(previousHostname);
+  const currentHost = String(next.host || '').replace(/\/+$/, '');
+  if (!currentHost || currentHost === previousHost) {
+    next.host = normalizeAapHostname(hostname);
+  }
+  return next;
+};
+
 const defaults = {
   scm_tool: 'gitlab',
   environment: 'prod',
@@ -1012,6 +1075,30 @@ function App() {
     return String(aap?.hub_ee_name || 'ado-ee').trim() || 'ado-ee';
   };
 
+  const setAapHostname = value => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      const previousHostname = copy.aap.hostname || '';
+      copy.aap.hostname = value;
+      if (Array.isArray(copy.aap.galaxy_credentials) && copy.aap.galaxy_credentials.length > 0) {
+        copy.aap.galaxy_credentials = applyHostnameToGalaxyCredentials(
+          copy.aap.galaxy_credentials,
+          value,
+          previousHostname
+        );
+      }
+      if (copy.aap.container_registry_credential) {
+        copy.aap.container_registry_credential = applyHostnameToContainerRegistryCredential(
+          copy.aap.container_registry_credential,
+          value,
+          previousHostname
+        );
+      }
+      return copy;
+    });
+  };
+
   const setAapHubValidated = value => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
@@ -1385,7 +1472,6 @@ function App() {
     if (merged.aap.hub_ee_tag === undefined) merged.aap.hub_ee_tag = defaults.aap.hub_ee_tag;
     if (merged.aap.hub_ee_registry === undefined) merged.aap.hub_ee_registry = '';
     if (merged.aap.hub_ee_pull === undefined) merged.aap.hub_ee_pull = false;
-    merged.aap.hub_ee_pull = false;
     if (merged.aap.hub_ee_create_execution_environment === undefined) {
       merged.aap.hub_ee_create_execution_environment = true;
     }
@@ -1504,7 +1590,8 @@ function App() {
       if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = false;
       if (payload.aap.hub_update_collection_only === undefined) payload.aap.hub_update_collection_only = false;
       if (payload.aap.hub_push_ee === undefined) payload.aap.hub_push_ee = false;
-      payload.aap.hub_ee_pull = false;
+      if (payload.aap.hub_ee_pull === undefined) payload.aap.hub_ee_pull = false;
+      payload.aap.hub_ee_pull = payload.aap.hub_ee_pull === true;
       if (payload.aap.hub_update_collection_only === true) {
         payload.aap.hub_publish_ado_collection = true;
         payload.aap.hub_mark_ado_validated = true;
@@ -6489,7 +6576,11 @@ ${vaultYaml}
                   <br />
                   {activeAapConfigTab === 'general' && (
                     <Grid hasGutter>
-                      <GridItem span={6}><FormGroup label="AAP Hostname URL"><TextInput value={data.aap.hostname} onChange={(_, v) => set('aap.hostname', v)} /></FormGroup></GridItem>
+                      <GridItem span={6}>
+                        <FormGroup label="AAP Hostname URL">
+                          <TextInput value={data.aap.hostname} onChange={(_, v) => setAapHostname(v)} />
+                        </FormGroup>
+                      </GridItem>
                       <GridItem span={6}><FormGroup label="AAP Version"><select value={data.aap.version} onChange={e => set('aap.version', e.target.value)} style={{ width: '100%', padding: '8px' }}><option value="24">2.4</option><option value="25">2.5</option><option value="26">2.6</option></select></FormGroup></GridItem>
                       <GridItem span={6}><FormGroup label="Organization Name"><TextInput value={data.aap.organization} onChange={(_, v) => setAapOrganization(v)} /></FormGroup></GridItem>
                       <GridItem span={6}><FormGroup label="Inventory Name"><TextInput value={data.aap.inventory} onChange={(_, v) => set('aap.inventory', v)} /></FormGroup></GridItem>
@@ -6582,11 +6673,11 @@ ${vaultYaml}
                       <GridItem span={12}>
                         <FormGroup label="Execution environment (optional)">
                           <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
-                            Requires the source image already present locally (for example via <code>podman images</code>). Never pulls from the internet — only tags and pushes the local image to Private Automation Hub.
+                            Tags and pushes <code>ado-ee</code> to Private Automation Hub. Use a local image by default, or enable remote pull to download from GitHub Container Registry (<code>ghcr.io</code>) first.
                           </p>
                           <Checkbox
                             id="aap-hub-push-ee"
-                            label="Push local ado-ee image to AAP Hub (optional)"
+                            label="Push ado-ee image to AAP Hub (optional)"
                             isChecked={data.aap.hub_push_ee === true}
                             onChange={(_, v) => setAapHubPushEe(v)}
                           />
@@ -6594,11 +6685,42 @@ ${vaultYaml}
                       </GridItem>
                       {data.aap.hub_push_ee && (
                         <>
+                          <GridItem span={12}>
+                            <Checkbox
+                              id="aap-hub-ee-pull"
+                              label="Pull source image from GitHub (ghcr.io) before push"
+                              isChecked={data.aap.hub_ee_pull === true}
+                              onChange={(_, v) => {
+                                setData(prev => {
+                                  const copy = JSON.parse(JSON.stringify(prev));
+                                  if (!copy.aap) copy.aap = {};
+                                  copy.aap.hub_ee_pull = v === true;
+                                  if (
+                                    v
+                                    && !String(copy.aap.hub_ee_source_image || '').trim()
+                                  ) {
+                                    copy.aap.hub_ee_source_image = defaults.aap.hub_ee_source_image;
+                                  }
+                                  return copy;
+                                });
+                              }}
+                            />
+                            <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
+                              When enabled, pulls the source image from the remote registry (default <code>ghcr.io/automation-development-office/ado-ee:latest</code>) instead of requiring it already present locally.
+                            </p>
+                          </GridItem>
                           <GridItem span={8}>
-                            <FormGroup label="Source image (must exist locally)">
+                            <FormGroup
+                              label={
+                                data.aap.hub_ee_pull
+                                  ? 'Source image (pulled from remote)'
+                                  : 'Source image (must exist locally)'
+                              }
+                            >
                               <TextInput
                                 value={data.aap.hub_ee_source_image}
                                 onChange={(_, v) => set('aap.hub_ee_source_image', v)}
+                                placeholder="ghcr.io/automation-development-office/ado-ee:latest"
                               />
                             </FormGroup>
                           </GridItem>
@@ -6680,7 +6802,7 @@ ${vaultYaml}
                       <GridItem span={12}>
                         <FormGroup label="Galaxy / Hub credentials">
                           <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
-                            Optional for disconnected sites. Creates Galaxy API Token credentials, an optional Container Registry credential, attaches Galaxy creds to the organization, and can create a Controller user account.
+                            Optional for disconnected sites. Creates Galaxy API Token credentials, an optional Container Registry credential, attaches Galaxy creds to the organization, and can create a Controller user account. Hub Galaxy Server URLs follow the AAP Hostname URL from the General tab.
                           </p>
                           <Checkbox
                             id="aap-galaxy-setup-enabled"

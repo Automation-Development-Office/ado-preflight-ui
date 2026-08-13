@@ -736,7 +736,7 @@ function normalizePreflightPayload(input) {
   if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = true;
   if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = false;
   data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
-  // Optional Hub EE push — local image only (never pulls from the internet)
+  // Optional Hub EE push — local image by default; hub_ee_pull enables remote ghcr pull first
   if (data.aap.hub_push_ee === undefined) data.aap.hub_push_ee = false;
   if (data.aap.hub_ee_source_image === undefined) {
     data.aap.hub_ee_source_image = 'ghcr.io/automation-development-office/ado-ee:latest';
@@ -744,7 +744,8 @@ function normalizePreflightPayload(input) {
   if (data.aap.hub_ee_name === undefined) data.aap.hub_ee_name = 'ado-ee';
   if (data.aap.hub_ee_tag === undefined) data.aap.hub_ee_tag = 'latest';
   if (data.aap.hub_ee_registry === undefined) data.aap.hub_ee_registry = '';
-  data.aap.hub_ee_pull = false;
+  if (data.aap.hub_ee_pull === undefined) data.aap.hub_ee_pull = false;
+  data.aap.hub_ee_pull = data.aap.hub_ee_pull === true;
   if (data.aap.hub_ee_create_execution_environment === undefined) {
     data.aap.hub_ee_create_execution_environment = true;
   }
@@ -2490,6 +2491,9 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
     `AAP Hub update only: ${data?.aap?.hub_update_collection_only ? 'yes' : 'no'}`,
     `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`,
     `AAP Hub EE push: ${data?.aap?.hub_push_ee ? 'yes' : 'no (optional; default off)'}`,
+    ...(data?.aap?.hub_push_ee
+      ? [`AAP Hub EE pull from remote: ${data?.aap?.hub_ee_pull ? 'yes (ghcr/remote)' : 'no (local image only)'}`]
+      : []),
     `AAP Galaxy credentials setup: ${data?.aap?.galaxy_setup_enabled ? 'yes' : 'no (optional; default off)'}`,
     `Git SSL verify: ${data?.git?.skip_tls_verify === false ? 'enabled' : 'disabled (default)'}`
   ];
