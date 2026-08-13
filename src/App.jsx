@@ -49,7 +49,7 @@ const provisionApps = ['aws_instance','openshift_virt'];
 
 const simpleComponents = [
   'grafana','rhbk','satellite','idm','kafka',
-  'gitlab','pega','elastic','aap','jira',
+  'gitlab','pega','elastic','jira',
   'compliance','stig'
 ];
 
@@ -346,11 +346,30 @@ const applyHostnameToContainerRegistryCredential = (registry, hostname, previous
   return next;
 };
 
+const ADDITIONAL_ENV_PRESETS = ['prod', 'dev', 'preprod', 'pilot', 'infra'];
+
+const parseAdditionalEnvironmentsList = value => {
+  const noneTokens = new Set(['none', 'non', 'n/a', '-', 'null', 'undefined']);
+  const raw = Array.isArray(value) ? value : String(value || '').split(/[\s,]+/);
+  const seen = new Set();
+  const result = [];
+  raw.forEach(item => {
+    const name = String(item || '').trim();
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (noneTokens.has(key) || seen.has(key)) return;
+    seen.add(key);
+    result.push(name);
+  });
+  return result;
+};
+
 const defaults = {
   scm_tool: 'gitlab',
   environment: 'prod',
-  // Extra survey-only environment names (space/comma separated). Empty / "none" = no extras.
-  additional_environments: '',
+  // Extra survey-only environment names. Primary Environment Type is always
+  // included; prod is selected by default for Contoller JT surveys.
+  additional_environments: ['prod'],
   domain: 'prod.rhlab',
 
   ansible: {
@@ -816,6 +835,8 @@ function App() {
   const [showIdmSecrets, setShowIdmSecrets] = useState(false);
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
+  const [additionalEnvOtherEnabled, setAdditionalEnvOtherEnabled] = useState(false);
+  const [additionalEnvOtherDraft, setAdditionalEnvOtherDraft] = useState('');
   const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
   const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
@@ -1061,6 +1082,50 @@ function App() {
       obj[keys[keys.length - 1]] = value;
       return copy;
     });
+  };
+
+  const additionalEnvironmentsList = parseAdditionalEnvironmentsList(data.additional_environments);
+  const additionalEnvCustom = additionalEnvironmentsList.filter(
+    name => !ADDITIONAL_ENV_PRESETS.includes(name.toLowerCase())
+  );
+
+  const setAdditionalEnvironments = next => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      // Keep checked presets (including prod) even when they match primary so
+      // checkbox state survives Environment Type changes; surveys unique later.
+      copy.additional_environments = parseAdditionalEnvironmentsList(next);
+      return copy;
+    });
+  };
+
+  const toggleAdditionalEnvPreset = name => {
+    const current = additionalEnvironmentsList;
+    const exists = current.some(item => item.toLowerCase() === name.toLowerCase());
+    setAdditionalEnvironments(
+      exists
+        ? current.filter(item => item.toLowerCase() !== name.toLowerCase())
+        : [...current, name]
+    );
+  };
+
+  const addAdditionalEnvOther = () => {
+    const draft = String(additionalEnvOtherDraft || '').trim();
+    if (!draft) return;
+    const primary = String(data.environment || '').trim().toLowerCase();
+    if (draft.toLowerCase() === primary) {
+      setAdditionalEnvOtherDraft('');
+      return;
+    }
+    setAdditionalEnvironments([...additionalEnvironmentsList, draft]);
+    setAdditionalEnvOtherDraft('');
+    setAdditionalEnvOtherEnabled(true);
+  };
+
+  const removeAdditionalEnvCustom = name => {
+    setAdditionalEnvironments(
+      additionalEnvironmentsList.filter(item => item.toLowerCase() !== name.toLowerCase())
+    );
   };
 
   const newCredentialId = () => `cred-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1461,8 +1526,9 @@ function App() {
       ...credential,
       id: credential.id || `imported-credential-${index + 1}`
     }));
-    merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
+    if (merged.aap.hub_publish_ado_collection === undefined) merged.aap.hub_publish_ado_collection = true;
+    merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
     if (merged.aap.hub_push_ee === undefined) merged.aap.hub_push_ee = false;
     if (merged.aap.hub_ee_source_image === undefined) {
@@ -1501,7 +1567,8 @@ function App() {
     if (!merged.git) merged.git = { ...defaults.git };
     if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
     if (merged.git.overwrite_generated === undefined) merged.git.overwrite_generated = false;
-    if (merged.additional_environments === undefined) merged.additional_environments = '';
+    if (merged.additional_environments === undefined) merged.additional_environments = ['prod'];
+    merged.additional_environments = parseAdditionalEnvironmentsList(merged.additional_environments);
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
     if (merged.ansible.extra_args === undefined) merged.ansible.extra_args = '';
     if (!merged.collections) merged.collections = { ...defaults.collections };
@@ -1609,11 +1676,33 @@ function App() {
       });
     }
 
-    if (!allowedConfig.has('openshift')) {
+    const installAapRequested = payload.pre_installs?.install_aap === true;
+    if (!installAapRequested) {
+      // Using AAP / Contoller config must not keep a leftover `aap` component that
+      // only exists to emit the Install AAP on OpenShift job template.
+      const apps = payload.component_apps || {};
+      const aapInGroup = ['openshift', 'rhel'].some(
+        group => Array.isArray(apps[group]) && apps[group].includes('aap')
+      );
+      if (!aapInGroup) {
+        payload.components = (payload.components || []).filter(c => c !== 'aap');
+        payload.selected_component_apps = (payload.selected_component_apps || []).filter(c => c !== 'aap');
+        if (payload.component_config) delete payload.component_config.aap;
+      }
+    }
+    const agentEnabled = !!(
+      payload.pre_installs?.openshift_agent_enabled
+      || payload.pre_installs?.openshift_agent === true
+      || (payload.pre_installs?.openshift_agent && typeof payload.pre_installs.openshift_agent === 'object'
+        && (payload.pre_installs.openshift_agent.pull_secret || payload.pre_installs.openshift_agent.ssh_public_key))
+    );
+    const needsOpenshiftAuth = installAapRequested || agentEnabled || allowedConfig.has('openshift');
+
+    if (!needsOpenshiftAuth) {
       delete payload.openshift;
     } else if (payload.openshift) {
       const openshiftOptions = payload.component_options?.openshift || [];
-      if (!openshiftOptions.includes('admin_htpasswd')) {
+      if (!allowedConfig.has('openshift') || !openshiftOptions.includes('admin_htpasswd')) {
         delete payload.openshift.admin_username;
         delete payload.openshift.admin_password;
         delete payload.openshift.admin_role;
@@ -1632,20 +1721,26 @@ function App() {
           payload.openshift.admin_role = users[0].role || 'cluster-admin';
         }
       }
-      if (!openshiftOptions.includes('console_banner')) {
+      if (!allowedConfig.has('openshift') || !openshiftOptions.includes('console_banner')) {
         delete payload.openshift.banner_text;
         delete payload.openshift.banner_location;
         delete payload.openshift.banner_background_color;
         delete payload.openshift.banner_text_color;
       }
-      const agentEnabled = !!(
-        payload.pre_installs?.openshift_agent_enabled
-        || payload.pre_installs?.openshift_agent === true
-        || (payload.pre_installs?.openshift_agent && typeof payload.pre_installs.openshift_agent === 'object'
-          && (payload.pre_installs.openshift_agent.pull_secret || payload.pre_installs.openshift_agent.ssh_public_key))
-      );
       if (!agentEnabled && !(payload.component_options?.openshift || []).includes('agent_installer')) {
         delete payload.openshift.agent_installer;
+      }
+      // Auth-only path (Install AAP / agent without OpenShift component): keep API fields only.
+      if (!allowedConfig.has('openshift')) {
+        payload.openshift = {
+          api_host: payload.openshift.api_host || '',
+          token: payload.openshift.token || '',
+          skip_tls_verify: payload.openshift.skip_tls_verify !== false,
+          kubeconfig_content: payload.openshift.kubeconfig_content || '',
+          ...(payload.openshift.agent_installer
+            ? { agent_installer: payload.openshift.agent_installer }
+            : {})
+        };
       }
     }
 
@@ -1659,9 +1754,11 @@ function App() {
         pull_secret: payload.pre_installs.openshift_agent.pull_secret || agentCfg.pull_secret || '',
         ssh_public_key: payload.pre_installs.openshift_agent.ssh_public_key || agentCfg.ssh_public_key || ''
       };
+      if (!payload.component_config) payload.component_config = {};
+      if (!payload.component_config.aap) payload.component_config.aap = {};
+      // Never leave a sticky install flag when Install AAP is unchecked.
+      payload.component_config.aap.install_during_bootstrap = installAapRequested;
       if (payload.pre_installs.aap) {
-        if (!payload.component_config) payload.component_config = {};
-        if (!payload.component_config.aap) payload.component_config.aap = {};
         const preAap = payload.pre_installs.aap;
         if (preAap.license_mode) payload.component_config.aap.license_mode = preAap.license_mode;
         if (preAap.subscription_manifest_file) {
@@ -3427,6 +3524,7 @@ echo $TOKEN
   };
 
   const renderSatelliteConfig = () => {
+    const sat = data.component_config?.satellite || defaultComponentConfig('satellite');
     const selected = data.component_options?.satellite || [];
     const showClient = selected.includes('satellite_client_tools');
     const showServer = selected.includes('satellite_server_install')
@@ -3461,7 +3559,7 @@ echo $TOKEN
                 <Checkbox
                   id="satellite-skip-tls-verify-client"
                   label="Skip TLS certificate verification for self-signed certificates"
-                  isChecked={!data.component_config.satellite.validate_certs}
+                  isChecked={!sat.validate_certs}
                   onChange={(_, v) => set('component_config.satellite.validate_certs', !v)}
                 />
               </FormGroup>
@@ -3481,7 +3579,7 @@ echo $TOKEN
             <GridItem span={6}>
               <FormGroup label={labelWithHelp('Satellite Deployment Version', satelliteHelp.deploymentVersion)}>
                 <select
-                  value={data.component_config.satellite.deployment_version || '6.19'}
+                  value={sat.deployment_version || '6.19'}
                   onChange={e => set('component_config.satellite.deployment_version', e.target.value)}
                   style={{ width: '100%', height: '36px' }}
                 >
@@ -3507,11 +3605,11 @@ echo $TOKEN
                   style={{ display: 'block', marginBottom: '8px' }}
                 />
                 <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
-                  {data.component_config.satellite.manifest_file
-                    ? `Selected: ${data.component_config.satellite.manifest_file}. Generated repo path: files/${data.component_config.satellite.manifest_file}.`
+                  {sat.manifest_file
+                    ? `Selected: ${sat.manifest_file}. Generated repo path: files/${sat.manifest_file}.`
                     : 'Upload a Red Hat Satellite manifest ZIP. It will be written to the generated repo files/ directory.'}
                 </div>
-                {data.component_config.satellite.manifest_file && (
+                {sat.manifest_file && (
                   <Button variant="link" onClick={clearSatelliteManifest}>Clear Manifest</Button>
                 )}
               </FormGroup>
@@ -3519,11 +3617,11 @@ echo $TOKEN
             <GridItem span={6}>
               <FormGroup label={labelWithHelp('Satellite Size Profile', satelliteHelp.sizeProfile)}>
                 <select
-                  value={data.component_config.satellite.size_profile || 'default'}
+                  value={sat.size_profile || 'default'}
                   onChange={e => set('component_config.satellite.size_profile', e.target.value)}
                   style={{ width: '100%', height: '36px' }}
                 >
-                  {(data.component_config.satellite.size || []).map(profile => (
+                  {(sat.size || []).map(profile => (
                     <option key={profile.name} value={profile.name}>
                       {profile.name} ({profile.min_hosts}-{profile.max_hosts} hosts, {profile.min_ram}GB RAM, {profile.min_cpu} CPU)
                     </option>
@@ -3534,7 +3632,7 @@ echo $TOKEN
             {renderTextField('Admin Password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.adminPassword)}
             <GridItem span={12}>
               <FormGroup label={labelWithHelp('Satellite Storage Mounts', satelliteHelp.reqDirs)}>
-                {(data.component_config.satellite.req_dirs || []).map((row, index) => (
+                {(sat.req_dirs || []).map((row, index) => (
                   <Grid hasGutter key={`satellite-req-dir-${index}`} style={{ marginBottom: '8px' }}>
                     <GridItem span={4}>
                       <TextInput
@@ -3574,7 +3672,7 @@ echo $TOKEN
                   <Checkbox
                     id="satellite-skip-tls-verify-server"
                     label="Skip TLS certificate verification for self-signed certificates"
-                    isChecked={!data.component_config.satellite.validate_certs}
+                    isChecked={!sat.validate_certs}
                     onChange={(_, v) => set('component_config.satellite.validate_certs', !v)}
                   />
                 </FormGroup>
@@ -3593,7 +3691,7 @@ echo $TOKEN
                 <Checkbox
                   id="satellite-dynamic-inventory"
                   label="Create AAP Satellite inventory source"
-                  isChecked={!!data.component_config.satellite.dynamic_inventory_enabled}
+                  isChecked={!!sat.dynamic_inventory_enabled}
                   onChange={(_, v) => set('component_config.satellite.dynamic_inventory_enabled', v)}
                 />
                 <div style={{ color: '#6a6e73', fontSize: '13px', marginTop: '6px' }}>
@@ -3601,7 +3699,7 @@ echo $TOKEN
                 </div>
               </FormGroup>
             </GridItem>
-            {!!data.component_config.satellite.dynamic_inventory_enabled && (
+            {!!sat.dynamic_inventory_enabled && (
               <>
                 {renderTextField('Satellite Credential Name', 'component_config.satellite.credential_name', 'text', satelliteHelp.credentialName)}
                 {renderTextField('Inventory Source Name', 'component_config.satellite.inventory_source_name', 'text', satelliteHelp.inventorySourceName)}
@@ -3613,7 +3711,7 @@ echo $TOKEN
                     <Checkbox
                       id="satellite-inventory-overwrite"
                       label="Overwrite"
-                      isChecked={data.component_config.satellite.inventory_overwrite}
+                      isChecked={sat.inventory_overwrite}
                       onChange={(_, v) => set('component_config.satellite.inventory_overwrite', v)}
                     />
                   </FormGroup>
@@ -3623,7 +3721,7 @@ echo $TOKEN
                     <Checkbox
                       id="satellite-inventory-overwrite-vars"
                       label="Overwrite variables"
-                      isChecked={data.component_config.satellite.inventory_overwrite_vars}
+                      isChecked={sat.inventory_overwrite_vars}
                       onChange={(_, v) => set('component_config.satellite.inventory_overwrite_vars', v)}
                     />
                   </FormGroup>
@@ -3633,7 +3731,7 @@ echo $TOKEN
                     <Checkbox
                       id="satellite-inventory-update-on-launch"
                       label="Update on launch"
-                      isChecked={data.component_config.satellite.inventory_update_on_launch}
+                      isChecked={sat.inventory_update_on_launch}
                       onChange={(_, v) => set('component_config.satellite.inventory_update_on_launch', v)}
                     />
                   </FormGroup>
@@ -3648,6 +3746,7 @@ echo $TOKEN
   };
 
   const renderIdmConfig = () => {
+    const idm = data.component_config?.idm || defaultComponentConfig('idm');
     const selected = data.component_options?.idm || [];
     const showClient = selected.includes('idm_client_tools');
     const showServer = selected.includes('idm_server_install') || selected.includes('idm_replica_install');
@@ -3688,7 +3787,7 @@ echo $TOKEN
                   <Checkbox
                     id="idm-replica-install-dns"
                     label="Install DNS on replica"
-                    isChecked={data.component_config.idm.replica_install_dns}
+                    isChecked={idm.replica_install_dns}
                     onChange={(_, v) => set('component_config.idm.replica_install_dns', v)}
                   />
                 </FormGroup>
@@ -3698,7 +3797,7 @@ echo $TOKEN
                   <Checkbox
                     id="idm-replica-install-ca"
                     label="Install certificate services on replica"
-                    isChecked={data.component_config.idm.replica_install_ca}
+                    isChecked={idm.replica_install_ca}
                     onChange={(_, v) => set('component_config.idm.replica_install_ca', v)}
                   />
                 </FormGroup>
@@ -3711,7 +3810,7 @@ echo $TOKEN
                 <Checkbox
                   id="idm-auto-forwarders"
                   label="Configure auto forwarders"
-                  isChecked={data.component_config.idm.auto_forwarders}
+                  isChecked={idm.auto_forwarders}
                   onChange={(_, v) => set('component_config.idm.auto_forwarders', v)}
                 />
               </FormGroup>
@@ -3743,7 +3842,7 @@ echo $TOKEN
                   <Checkbox
                     id="idm-ad-two-way"
                     label="Establish two-way trust"
-                    isChecked={data.component_config.idm.ad_two_way !== false}
+                    isChecked={idm.ad_two_way !== false}
                     onChange={(_, v) => set('component_config.idm.ad_two_way', v)}
                   />
                 </FormGroup>
@@ -3753,7 +3852,7 @@ echo $TOKEN
                   <Checkbox
                     id="idm-ad-configure-groups"
                     label="Configure POSIX/external groups and sudo"
-                    isChecked={data.component_config.idm.ad_configure_groups !== false}
+                    isChecked={idm.ad_configure_groups !== false}
                     onChange={(_, v) => set('component_config.idm.ad_configure_groups', v)}
                   />
                 </FormGroup>
@@ -3780,8 +3879,14 @@ echo $TOKEN
         ...(copy.component_options || {}),
         [component]: next
       };
+      if (!copy.component_config) copy.component_config = {};
+      if (['satellite', 'idm', 'grafana', 'rhbk'].includes(component)) {
+        copy.component_config[component] = deepMerge(
+          defaultComponentConfig(component),
+          copy.component_config[component] || {}
+        );
+      }
       if (component === 'satellite' && option === 'satellite_dynamic_inventory') {
-        if (!copy.component_config.satellite) copy.component_config.satellite = {};
         copy.component_config.satellite.dynamic_inventory_enabled = next.includes('satellite_dynamic_inventory');
       }
       return copy;
@@ -3794,6 +3899,22 @@ echo $TOKEN
       const copy = JSON.parse(JSON.stringify(prev));
       if (!copy.component_options) copy.component_options = {};
       copy.component_options[component] = enabled ? [...(componentOptionDefaults[component] || [])] : [];
+      if (enabled && ['satellite', 'idm', 'grafana', 'rhbk'].includes(component)) {
+        if (!copy.component_config) copy.component_config = {};
+        copy.component_config[component] = deepMerge(
+          defaultComponentConfig(component),
+          copy.component_config[component] || {}
+        );
+      }
+      if (component === 'satellite') {
+        copy.component_config = copy.component_config || {};
+        copy.component_config.satellite = deepMerge(
+          defaultComponentConfig('satellite'),
+          copy.component_config.satellite || {}
+        );
+        copy.component_config.satellite.dynamic_inventory_enabled =
+          copy.component_options.satellite.includes('satellite_dynamic_inventory');
+      }
       return copy;
     });
   };
@@ -5056,9 +5177,9 @@ echo $TOKEN
         copy.component_config.aap || {}
       );
       copy.component_config.aap.install_during_bootstrap = !!checked;
+      if (!copy.component_apps) copy.component_apps = {};
       if (checked) {
         const comps = Array.isArray(copy.components) ? copy.components : [];
-        if (!copy.component_apps) copy.component_apps = {};
         if (comps.includes('openshift')) {
           const apps = Array.isArray(copy.component_apps.openshift) ? copy.component_apps.openshift : [];
           if (!apps.includes('aap')) copy.component_apps.openshift = [...apps, 'aap'];
@@ -5071,6 +5192,15 @@ echo $TOKEN
         if (copy.pre_installs.aap?.license_mode) {
           copy.component_config.aap.license_mode = copy.pre_installs.aap.license_mode;
         }
+      } else {
+        // Unchecking Install AAP must not leave a leftover `aap` component that
+        // still generates the Install AAP on OpenShift job template.
+        copy.components = (copy.components || []).filter(c => c !== 'aap');
+        ['openshift', 'rhel'].forEach(group => {
+          if (Array.isArray(copy.component_apps[group])) {
+            copy.component_apps[group] = copy.component_apps[group].filter(app => app !== 'aap');
+          }
+        });
       }
       return copy;
     });
@@ -5108,6 +5238,44 @@ echo $TOKEN
     const mode = aapLicense.license_mode || aapCfg.license_mode || 'none';
     return (
       <Grid hasGutter>
+        <GridItem span={12}>
+          <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
+            Installs AAP onto an OpenShift cluster during bootstrap. This is not required for patching,
+            Satellite, or IdM against an existing Contoller — use <strong>Using AAP</strong> instead and leave this unchecked.
+          </div>
+        </GridItem>
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('OpenShift API Host', openshiftHelp.apiHost)}>
+            <TextInput
+              value={data.openshift?.api_host || ''}
+              onChange={(_, v) => set('openshift.api_host', v)}
+            />
+          </FormGroup>
+        </GridItem>
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('OpenShift TLS Certificate Verification', openshiftHelp.skipTls)}>
+            <Checkbox
+              id="install-aap-openshift-skip-tls"
+              label="Skip TLS certificate verification"
+              isChecked={data.openshift?.skip_tls_verify !== false}
+              onChange={(_, v) => set('openshift.skip_tls_verify', v)}
+            />
+          </FormGroup>
+        </GridItem>
+        <GridItem span={12}>
+          <FormGroup label={labelWithHelp('OpenShift API Token', openshiftHelp.token)}>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <TextInput
+                type={showOpenShiftToken ? 'text' : 'password'}
+                value={data.openshift?.token || ''}
+                onChange={(_, v) => set('openshift.token', v)}
+              />
+              <Button variant="secondary" onClick={() => setShowOpenShiftToken(!showOpenShiftToken)}>
+                {showOpenShiftToken ? 'Hide' : 'Show'}
+              </Button>
+            </div>
+          </FormGroup>
+        </GridItem>
         {renderTextField('Hostname / Route host', 'component_config.aap.hostname')}
         {renderTextField('Storage Class', 'component_config.aap.storage')}
         {renderTextField('Replicas', 'component_config.aap.replicas', 'number', 'Controller replicas (default 1).')}
@@ -5230,13 +5398,18 @@ echo $TOKEN
               <CardBody>
                 <Checkbox
                   id="install-aap-toggle"
-                  label="Install AAP"
+                  label="Install AAP on OpenShift"
                   isChecked={installAap}
                   onChange={(_, v) => setInstallAap(v)}
                 />
                 <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '8px' }}>
-                  When checked, show AAP install options and install during bootstrap.
+                  Only for greenfield AAP operator install on a cluster (needs OpenShift token). Leave off for Contoller config / patching / Satellite / IdM on an existing AAP.
                 </div>
+                {installAap && data.aap?.enabled && (
+                  <div style={{ color: '#8a6d3b', fontSize: '13px', marginTop: '8px' }}>
+                    Using AAP is also on — Install AAP will talk to OpenShift instead of only configuring Contoller.
+                  </div>
+                )}
               </CardBody>
             </Card>
           </GridItem>
@@ -5632,6 +5805,9 @@ ${vaultYaml}
               <Tabs
                 activeKey={selectedTab}
                 onSelect={(_, key) => {
+                  if (key && key !== 'all') {
+                    ensureComponentConfig(key);
+                  }
                   setActiveConfigTab(key);
                   setActiveConfigPanel(key);
                   setConfigTab('form');
@@ -6332,31 +6508,113 @@ ${vaultYaml}
               </div>
 
               <Grid hasGutter>
-                <GridItem span={4}>
+                <GridItem span={6}>
                   <FormGroup label="Environment Type" isRequired>
                     <TextInput value={data.environment} onChange={(_, v) => set('environment', v)} />
                   </FormGroup>
                 </GridItem>
 
-                <GridItem span={4}>
-                  <FormGroup label="Additional Environments">
-                    <TextInput
-                      value={Array.isArray(data.additional_environments)
-                        ? data.additional_environments.join(' ')
-                        : (data.additional_environments || '')}
-                      onChange={(_, v) => set('additional_environments', v)}
-                      placeholder="none"
-                    />
-                    <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0, fontSize: '13px' }}>
-                      Optional survey choices only (for example: <code>dev pilot preprod</code>).
-                      Does not create <code>group_vars</code> directories. Default is none.
-                    </p>
+                <GridItem span={6}>
+                  <FormGroup label="Base Infrastructure Domain" isRequired>
+                    <TextInput value={data.domain} onChange={(_, v) => set('domain', v)} />
                   </FormGroup>
                 </GridItem>
 
-                <GridItem span={4}>
-                  <FormGroup label="Base Infrastructure Domain" isRequired>
-                    <TextInput value={data.domain} onChange={(_, v) => set('domain', v)} />
+                <GridItem span={12}>
+                  <FormGroup
+                    label={labelWithHelp(
+                      <>
+                        Additional Environments
+                        <span style={{ color: mutedTextColor, fontWeight: 400 }}> (optional)</span>
+                      </>,
+                      <>
+                        <p style={{ marginTop: 0 }}>
+                          Survey choices for Contoller job templates (for example <code>prod</code>, <code>dev</code>, <code>pilot</code>).
+                          <code>prod</code> is selected by default.
+                        </p>
+                        <p style={{ marginBottom: 0 }}>
+                          Does not create <code>group_vars</code> directories. The primary Environment Type above is always included.
+                        </p>
+                      </>
+                    )}
+                  >
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px 20px', marginBottom: '8px' }}>
+                      {ADDITIONAL_ENV_PRESETS.map(name => {
+                        const primary = String(data.environment || '').trim().toLowerCase();
+                        const isPrimary = primary === name;
+                        const isChecked = isPrimary
+                          || additionalEnvironmentsList.some(item => item.toLowerCase() === name);
+                        return (
+                        <Checkbox
+                          key={`additional-env-${name}`}
+                          id={`additional-env-${name}`}
+                          label={name}
+                          isChecked={isChecked}
+                          isDisabled={isPrimary}
+                          onChange={() => toggleAdditionalEnvPreset(name)}
+                        />
+                        );
+                      })}
+                      <Checkbox
+                        id="additional-env-other"
+                        label="Other"
+                        isChecked={additionalEnvOtherEnabled || additionalEnvCustom.length > 0}
+                        onChange={(_, checked) => {
+                          setAdditionalEnvOtherEnabled(checked);
+                          if (!checked) {
+                            setAdditionalEnvOtherDraft('');
+                            setAdditionalEnvironments(
+                              additionalEnvironmentsList.filter(name =>
+                                ADDITIONAL_ENV_PRESETS.includes(name.toLowerCase())
+                              )
+                            );
+                          }
+                        }}
+                      />
+                    </div>
+                    {(additionalEnvOtherEnabled || additionalEnvCustom.length > 0) && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '520px' }}>
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          <TextInput
+                            value={additionalEnvOtherDraft}
+                            onChange={(_, v) => setAdditionalEnvOtherDraft(v)}
+                            placeholder="custom-env"
+                            onKeyDown={event => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault();
+                                addAdditionalEnvOther();
+                              }
+                            }}
+                          />
+                          <Button variant="secondary" onClick={addAdditionalEnvOther}>
+                            Add
+                          </Button>
+                        </div>
+                        {additionalEnvCustom.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                            {additionalEnvCustom.map(name => (
+                              <span
+                                key={`custom-env-${name}`}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
+                                  border: `1px solid ${borderColor}`,
+                                  borderRadius: '4px',
+                                  padding: '2px 8px',
+                                  fontSize: '13px'
+                                }}
+                              >
+                                {name}
+                                <Button variant="plain" onClick={() => removeAdditionalEnvCustom(name)} aria-label={`Remove ${name}`}>
+                                  ×
+                                </Button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </FormGroup>
                 </GridItem>
 
@@ -6653,7 +6911,7 @@ ${vaultYaml}
                         <FormGroup label="Collections">
                           <Checkbox
                             label="Update infra.ado collection in validated AAP Hub content"
-                            isChecked={data.aap.hub_publish_ado_collection && data.aap.hub_mark_ado_validated}
+                            isChecked={data.aap.hub_publish_ado_collection !== false}
                             onChange={(_, v) => setAapHubValidated(v)}
                           />
                           <Checkbox

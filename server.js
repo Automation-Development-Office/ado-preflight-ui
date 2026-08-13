@@ -985,9 +985,9 @@ function normalizePreflightPayload(input) {
     data.component_config.aap.replicas = 1;
   }
   const preAap = data.pre_installs.aap;
-  if (data.pre_installs.install_aap === true) {
-    data.component_config.aap.install_during_bootstrap = true;
-  }
+  // Contoller/patching against an existing AAP must not inherit a sticky
+  // install_during_bootstrap from older payloads. Only Install AAP opts in.
+  data.component_config.aap.install_during_bootstrap = data.pre_installs.install_aap === true;
   if (preAap.license_mode && preAap.license_mode !== 'none') {
     data.component_config.aap.license_mode = preAap.license_mode;
   }
@@ -2053,7 +2053,17 @@ function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
       event(eventLabel);
     }
 
-    append(`\n\n$ ${cmd} ${redactGitArgsForLog(args).join(' ')}\n`);
+    const displayArgs = redactGitArgsForLog(args).map(arg => {
+      const text = String(arg || '');
+      // Avoid dumping multi-hundred-line bash -lc scripts (and their ERROR! strings)
+      // into the bootstrap log; keep a short preview for debugging.
+      if (text.length > 240 || text.includes('\n')) {
+        const preview = text.replace(/\s+/g, ' ').slice(0, 160);
+        return `${preview}…[script ${text.length} chars]`;
+      }
+      return text;
+    });
+    append(`\n\n$ ${cmd} ${displayArgs.join(' ')}\n`);
 
     const child = spawn(cmd, args, {
       cwd,
@@ -2487,6 +2497,7 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
     `Organization: ${data?.aap?.organization || 'not configured'}`,
     `Project Name: ${projectName}`,
     `AAP Hub collection update: ${data?.aap?.hub_publish_ado_collection ? 'yes' : 'no'}`,
+    'AAP Hub infra.ado requirements: latest (no version pin)',
     `AAP Hub force update: ${data?.aap?.hub_force_ado_collection_update ? 'yes' : 'no'}`,
     `AAP Hub update only: ${data?.aap?.hub_update_collection_only ? 'yes' : 'no'}`,
     `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`,
@@ -2799,6 +2810,10 @@ app.post('/api/bootstrap', async (req, res) => {
     });
   }
 
+  if (aapEnabled && !hubPublishRequested) {
+    event('Warning: AAP Hub collection update is off. Contoller project sync may fail if infra.ado is missing from Hub.');
+  }
+
   if (hubPushEeRequested && !hasAapOAuthToken && !hasAapPasswordAuth) {
     event('Bootstrap failed: AAP Hub EE push needs AAP OAuth token or admin username/password');
     return res.status(400).json({
@@ -2815,6 +2830,22 @@ app.post('/api/bootstrap', async (req, res) => {
       exitCode: 2,
       error: 'AAP Hub EE push requires a source image (aap.hub_ee_source_image).'
     });
+  }
+
+  const installAapDuringBootstrap = data?.pre_installs?.install_aap === true
+    || data?.component_config?.aap?.install_during_bootstrap === true;
+  if (installAapDuringBootstrap) {
+    const hasOcToken = Boolean(String(data?.openshift?.token || '').trim());
+    const hasOcKubeconfig = Boolean(String(data?.openshift?.kubeconfig_content || '').trim());
+    const hasOcApiHost = Boolean(String(data?.openshift?.api_host || '').trim());
+    if (!hasOcKubeconfig && !(hasOcToken && hasOcApiHost)) {
+      event('Bootstrap failed: Install AAP needs OpenShift API host + token (or kubeconfig)');
+      return res.status(400).json({
+        status: 'failed',
+        exitCode: 2,
+        error: 'Install AAP is enabled, so OpenShift API host and token (or kubeconfig) are required. Uncheck Install AAP on the Install / Run tab if you only want to configure an existing Contoller (patching / Satellite / IdM).'
+      });
+    }
   }
 
   const selectedComponents = hubUpdateCollectionOnly
@@ -2885,30 +2916,114 @@ app.post('/api/bootstrap', async (req, res) => {
   fs.rmSync(repoDir, { recursive: true, force: true });
   fs.mkdirSync(workRoot, { recursive: true });
 
-  const collectionInstallCode = await runStream('bash', ['-lc', `
-set -e
+  const collectionInstallScript = path.join(workRoot, 'install-collections.sh');
+  const stageAdoSourceScript = path.join(workRoot, 'stage-ado-source.py');
+  const collectionInstallBody = `#!/bin/bash
+set -euo pipefail
+
+COLLECTION_DIR="${collectionDir}"
+HUB_PUBLISH="${hubPublishRequested ? 'true' : 'false'}"
 
 rm -rf /workspace/collections
 mkdir -p /workspace/collections
 
 echo ""
 echo "=== Available Collection Tarballs ==="
-ls -l ${collectionDir} || true
+ls -l "$COLLECTION_DIR" || true
 
 echo ""
 echo "=== Installing ADO Collection ==="
-ado_archive="$(find ${collectionDir} -maxdepth 1 -name 'infra-ado-*.tar.gz' | sort -V | tail -n 1)"
-if [ -n "$ado_archive" ]; then
+ado_archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name 'infra-ado-*.tar.gz' | sort -V | tail -n 1)"
+if [ -z "$ado_archive" ]; then
+  legacy_archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name 'ado-*.tar.gz' | sort -V | tail -n 1)"
+  if [ -z "$legacy_archive" ]; then
+    echo "ERROR: No infra-ado or legacy ado collection tarball found in $COLLECTION_DIR."
+    exit 1
+  fi
+  echo "Installing $legacy_archive"
+  ansible-galaxy collection install "$legacy_archive" -p /workspace/collections --force --no-deps
+else
   echo "Installing $ado_archive"
   ansible-galaxy collection install "$ado_archive" -p /workspace/collections --force --no-deps
+  if [ "$HUB_PUBLISH" = "true" ]; then
+    echo ""
+    echo "=== Staging ADO collection source for Hub publishing ==="
+    rm -rf /workspace/ado-source
+    mkdir -p /workspace/ado-source
+    tar -xzf "$ado_archive" -C /workspace/ado-source
+    python3 "${stageAdoSourceScript}"
+  else
+    echo "Skipping ADO source staging (Hub collection update not requested)."
+    rm -rf /workspace/ado-source
+  fi
+fi
 
-  echo ""
-  echo "=== Staging ADO collection source for Hub publishing ==="
-  rm -rf /workspace/ado-source
-  mkdir -p /workspace/ado-source
-  tar -xzf "$ado_archive" -C /workspace/ado-source
-  python3 - <<'PYCODE'
-import json
+echo ""
+echo "=== Installing ansible.controller Collection ==="
+ansible-galaxy collection install "$COLLECTION_DIR"/ansible-controller-*.tar.gz -p /workspace/collections --force
+
+echo ""
+echo "=== Installing awx.awx Collection ==="
+if ls "$COLLECTION_DIR"/awx-awx-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install "$COLLECTION_DIR"/awx-awx-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  echo "awx-awx tarball not found; skipping"
+fi
+
+echo ""
+echo "=== Installing infra.controller_configuration Collection ==="
+ansible-galaxy collection install "$COLLECTION_DIR"/infra-controller_configuration-*.tar.gz -p /workspace/collections --force --no-deps
+
+echo ""
+echo "=== Installing infra.aap_configuration Collection ==="
+ansible-galaxy collection install "$COLLECTION_DIR"/infra-aap_configuration-*.tar.gz -p /workspace/collections --force --no-deps
+
+echo ""
+echo "=== Installing ansible.hub Collection ==="
+if ls "$COLLECTION_DIR"/ansible-hub-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install "$COLLECTION_DIR"/ansible-hub-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  echo "ansible-hub tarball not found; skipping"
+fi
+
+echo ""
+echo "=== Installing kubernetes.core Collection ==="
+if ls "$COLLECTION_DIR"/kubernetes-core-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install "$COLLECTION_DIR"/kubernetes-core-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  echo "kubernetes-core tarball not found; skipping"
+fi
+
+echo ""
+echo "=== Installing redhat.openshift Collection ==="
+if ls "$COLLECTION_DIR"/redhat-openshift-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install "$COLLECTION_DIR"/redhat-openshift-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  echo "redhat-openshift tarball not found; skipping"
+fi
+
+echo ""
+echo "=== Installing community.general Collection ==="
+if ls "$COLLECTION_DIR"/community-general-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install "$COLLECTION_DIR"/community-general-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  echo "community-general tarball not found; skipping"
+fi
+
+echo ""
+echo "=== Installing containers.podman Collection ==="
+if ls "$COLLECTION_DIR"/containers-podman-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install "$COLLECTION_DIR"/containers-podman-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  echo "containers-podman tarball not found; skipping"
+fi
+
+echo ""
+echo "=== Collection install complete ==="
+ansible-galaxy collection list
+`;
+
+  const stageAdoSourceBody = `import json
 from pathlib import Path
 
 source = Path('/workspace/ado-source')
@@ -2916,7 +3031,7 @@ manifest = json.loads((source / 'MANIFEST.json').read_text())
 info = manifest.get('collection_info', {})
 
 def q(value):
-    return '"' + str(value).replace('"', '\\"') + '"'
+    return '"' + str(value).replace('"', '\\\\"') + '"'
 
 lines = [
     '---',
@@ -2954,58 +3069,19 @@ for key in ('repository', 'documentation', 'homepage', 'issues'):
         lines.append(f"{key}: {info[key]}")
 (source / 'galaxy.yml').write_text('\\n'.join(lines) + '\\n')
 for generated_file in ('MANIFEST.json', 'FILES.json'):
-    path = source / generated_file
-    if path.exists():
-        path.unlink()
-PYCODE
-else
-  legacy_archive="$(find ${collectionDir} -maxdepth 1 -name 'ado-*.tar.gz' | sort -V | tail -n 1)"
-  if [ -z "$legacy_archive" ]; then
-    echo "ERROR! No infra-ado or legacy ado collection tarball found in ${collectionDir}."
-    exit 1
-  fi
-  echo "Installing $legacy_archive"
-  ansible-galaxy collection install "$legacy_archive" -p /workspace/collections --force --no-deps
-fi
+    generated_path = source / generated_file
+    if generated_path.exists():
+        generated_path.unlink()
+`;
 
-echo ""
-echo "=== Installing ansible.controller Collection ==="
-ansible-galaxy collection install ${collectionDir}/ansible-controller-*.tar.gz -p /workspace/collections --force
-
-echo ""
-echo "=== Installing awx.awx Collection ==="
-if ls ${collectionDir}/awx-awx-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install ${collectionDir}/awx-awx-*.tar.gz -p /workspace/collections --force --no-deps
-else
-  echo "awx-awx tarball not found; skipping"
-fi
-
-echo ""
-echo "=== Installing infra.controller_configuration Collection ==="
-ansible-galaxy collection install ${collectionDir}/infra-controller_configuration-*.tar.gz -p /workspace/collections --force --no-deps
-
-echo ""
-echo "=== Installing infra.aap_configuration Collection ==="
-ansible-galaxy collection install ${collectionDir}/infra-aap_configuration-*.tar.gz -p /workspace/collections --force --no-deps
-
-echo ""
-echo "=== Installing ansible.hub Collection ==="
-if ls ${collectionDir}/ansible-hub-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install ${collectionDir}/ansible-hub-*.tar.gz -p /workspace/collections --force --no-deps
-else
-  echo "ansible-hub tarball not found; AAP Hub collection publishing may be unavailable"
-fi
-
-echo ""
-echo "=== Installing community.general Collection ==="
-ansible-galaxy collection install ${collectionDir}/community-general-*.tar.gz -p /workspace/collections --force --no-deps
-
-echo ""
-echo "=== Installed Collections ==="
-ANSIBLE_COLLECTIONS_PATH=/workspace/collections:/usr/share/ansible/collections \\
-ANSIBLE_COLLECTIONS_PATHS=/workspace/collections:/usr/share/ansible/collections \\
-ansible-galaxy collection list
-`], workRoot, 'Installing collections');
+  fs.writeFileSync(collectionInstallScript, collectionInstallBody, { mode: 0o755 });
+  fs.writeFileSync(stageAdoSourceScript, stageAdoSourceBody);
+  const collectionInstallCode = await runStream(
+    'bash',
+    [collectionInstallScript],
+    workRoot,
+    'Installing collections'
+  );
 
   if (collectionInstallCode !== 0) {
     event(`Bootstrap failed during collection install exitCode=${collectionInstallCode}`);
@@ -3222,8 +3298,7 @@ ansible-playbook \\
   -e generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
   -e bootstrap_generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
   -e bootstrap_generate_env_vars_vault_password_file=.vault_pass \\
-  ${ansibleExtraArgsShell ? `${ansibleExtraArgsShell} \\` : ''}
-  --vault-password-file .vault_pass
+  --vault-password-file .vault_pass${ansibleExtraArgsShell ? ` \\\n  ${ansibleExtraArgsShell}` : ''}
 `], workRoot, 'Running ansible-playbook', bootstrapEnv);
 
   const bootstrapRecap = buildBootstrapRecap(
