@@ -3,3 +3,7 @@ ado-preflight-ui-latest.tar
 changeset-preview-notes.md
 changeset-release-notes.md
 node_modules/
+
+# Baked EE for disconnected Hub push (prepared locally; not committed)
+vendor/ado-ee.docker.tar
+vendor/*.tar

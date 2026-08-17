@@ -1,0 +1,82 @@
+{
+  "environment": "prod",
+  "domain": "prod.rhlab",
+  "additional_environments": "",
+  "components": ["openshift"],
+  "component_apps": {
+    "openshift": ["openshift", "aap", "grafana", "acs"],
+    "rhel": [],
+    "patching": [],
+    "provision": []
+  },
+  "selected_component_apps": ["openshift", "aap", "grafana", "acs"],
+  "component_options": {
+    "openshift": [
+      "admin_htpasswd",
+      "console_banner",
+      "discover_routes_print"
+    ],
+    "grafana": ["datasources", "folders", "dashboards"],
+    "acs": ["acs_report"]
+  },
+  "component_config": {
+    "aap": {
+      "namespace": "aap",
+      "instance_name": "aap",
+      "admin_password": "CHANGE_ME",
+      "minimal_footprint": false,
+      "operator_scope": "all_namespaces",
+      "install_during_bootstrap": false
+    },
+    "grafana": {
+      "hostname": "grafana.apps.prod.rhlab",
+      "storage": "gp3-csi",
+      "replicas": 1
+    },
+    "acs": {
+      "hostname": "",
+      "storage": "gp3-csi"
+    }
+  },
+  "openshift": {
+    "api_host": "https://api.prod.rhlab:6443",
+    "apps_domain": "apps.prod.rhlab",
+    "token": "CHANGE_ME_OPENSHIFT_TOKEN",
+    "skip_tls_verify": true
+  },
+  "aap": {
+    "enabled": true,
+    "hostname": "https://aap.apps.prod.rhlab",
+    "version": "27",
+    "organization": "ADO",
+    "inventory": "ADO-inventory",
+    "project": "ADO-project",
+    "execution_environment": "ADO-ee",
+    "vault_credential_name": "ADO-vault",
+    "admin_username": "admin",
+    "admin_password": "CHANGE_ME",
+    "skip_tls_verify": true,
+    "vault_password": "CHANGE_ME"
+  },
+  "git": {
+    "scm_tool": "github",
+    "url": "https://github.com/example/ado-bootstrap.git",
+    "branch": "main",
+    "token": "",
+    "auto_push": false
+  },
+  "pre_installs": {
+    "install_aap": false,
+    "attach_aap_license": false,
+    "aap": {
+      "license_mode": "none"
+    }
+  },
+  "vault": {
+    "encrypt": true
+  },
+  "overwrite_generated": true,
+  "ansible": {
+    "extra_args": ""
+  }
+}

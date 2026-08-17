@@ -193,6 +193,65 @@ You can select groups such as:
 
 Selecting a top-level group opens component-specific choices.
 
+### Install vs configure (OpenShift / RHEL)
+
+Bootstrap generates install and/or configure playbooks (and AAP job templates)
+per component. ✅ = supported today. ❌ = not in the generated bootstrap path.
+
+**Install** (deploy / stand up the product):
+
+| Component | OpenShift | RHEL / Linux |
+|-----------|:---------:|:------------:|
+| AAP | ✅ | ❌ |
+| ACS (RHACS) | ✅ | ❌ |
+| ACM | ✅ | ❌ |
+| Cert Manager | ✅ | ❌ |
+| Dev Spaces | ✅ | ❌ |
+| Directory Server (389) | ✅ | ❌ |
+| ECK / Elastic | ✅ | ❌ |
+| GitOps | ✅ | ❌ |
+| GitLab | ✅ | ❌ |
+| Grafana | ✅ | ❌ |
+| Kafka | ✅ | ❌ |
+| OADP | ✅ | ❌ |
+| OpenShift (base cluster) | ❌¹ | ❌ |
+| PEGA | ✅ | ❌ |
+| Quay | ✅ | ❌ |
+| RHBK | ✅ | ❌ |
+| Satellite | ❌ | ✅ |
+| IdM | ❌ | ✅ |
+| RHEL / patching / compliance / STIG | ❌ | ❌² |
+| OpenShift Virtualization (VM) | ✅ | ❌ |
+
+**Configure** (day-0/day-2 after or instead of a full install):
+
+| Component | OpenShift | RHEL / Linux |
+|-----------|:---------:|:------------:|
+| AAP (Controller / gateway objects) | ✅³ | ✅ |
+| ACS (deploy+configure, reports, policies) | ✅ | ❌ |
+| ACM | ✅ | ❌ |
+| Cert Manager (issuers, AWS PCA) | ✅ | ❌ |
+| Console banner / LDAP / OAuth / routes / pull secret / CSI | ✅ | ❌ |
+| Dev Spaces | ✅ | ❌ |
+| Directory Server | ✅ | ✅ |
+| ECK / Elastic | ✅ | ✅ |
+| GitOps | ✅ | ❌ |
+| GitLab | ✅ | ✅ |
+| Grafana (OIDC, dashboards, folders) | ✅ | ✅ |
+| Kafka | ✅ | ✅ |
+| OADP | ✅ | ❌ |
+| Quay | ✅ | ❌ |
+| RHBK (realm, client, IdP, federation) | ✅ | ✅ |
+| Satellite (configure, content view, client reg) | ❌ | ✅ |
+| IdM (client, DNS, AD trust, settings, sudo) | ❌ | ✅ |
+| RHEL patch / compliance / STIG | ❌ | ✅ |
+
+¹ Cluster is assumed to exist; agent-based install-config is a separate Install / Run path, not a generated OpenShift “install cluster” JT.  
+² Patching/compliance/STIG harden existing hosts; they do not install RHEL.  
+³ AAP install is on OpenShift; “Using AAP” configures Controller objects against that AAP URL (not a RHEL host install).
+
+> Some apps (AAP, Grafana, RHBK, …) appear under the RHEL group in the UI for convenience, but their generated playbooks target **OpenShift** only.
+
 ### RHEL Components
 
 RHEL includes components such as:
@@ -375,6 +434,15 @@ Actions on the tab:
 - **Generate YAML Preview** renders `install-config.yaml` and
   `agent-config.yaml` in the browser.
 - **Download ZIP** downloads both generated YAML files together.
+- **Map to Airgap Architect** / **Download Architect handoff JSON** call
+  `POST /api/airgap-architect/map`. This is a thin adapter (not an embedded
+  Architect UI): it maps the Agent Installer form to OpenShift Airgap Architect
+  Bare Metal Agent-Based wizard state, regenerates install/agent YAML via the
+  existing generator, and returns an oc-mirror ImageSetConfiguration stub
+  (platform baremetal/agent, empty operators, OCP version from the form).
+  When the server env `AIRGAP_ARCHITECT_URL` is set, the adapter also POSTs the
+  mapped state to `${AIRGAP_ARCHITECT_URL}/api/generate` and includes the remote
+  response / diff summary. When unset, mapping is local-only.
 
 This generator is intentionally separate from the normal bootstrap run. It is
 used to prepare OpenShift installer input files. Future work can add ISO
@@ -384,10 +452,26 @@ generation, PXE export, hardware inventory import, and GitOps export.
 
 Grafana configuration includes:
 
-- Hostname / URL
+- Hostname / URL (lab default `grafana-ado.server.lab`)
 - Storage class
-- Folder name
-- Dashboard source folder or Git repository
+- Standalone RHEL option (inventory note `192.168.0.66`, admin password
+  `redhat123`, optional airgap RPM path/URL) — similar to RHBK standalone
+- Dashboard folders, email/SMTP, and OIDC
+
+### GitLab
+
+GitLab configuration includes:
+
+- Hostname / URL (lab default `gitlab-ado.server.lab`)
+- Storage class / replicas for OpenShift operator installs
+- Standalone RHEL Omnibus option (inventory note `192.168.0.65`, root password
+  `redhat123`, CE/EE edition, optional airgap RPM path/URL)
+
+### Hub EE image name
+
+Hub registry image name defaults to lowercase `ado-ee` (registry-safe). The UI
+label remains **ADO EE**. The Contoller execution environment object name can
+remain org-scoped (`ADO-ee` / `ORG-ee`) as a separate field.
 
 ### IDM
 
@@ -962,7 +1046,20 @@ Enable skip TLS for the relevant system:
 
 ## 🧾 Quick Example
 
-For a RHEL + Satellite environment:
+Start from a downloadable preflight JSON (replace `CHANGE_ME` values, then
+**Import** / paste into the UI or save as your working answers):
+
+| Scenario | Download |
+|----------|----------|
+| RHEL + Satellite (steps below) | [examples/preflight-rhel-satellite.example.json](examples/preflight-rhel-satellite.example.json) |
+| OpenShift + AAP / Grafana / ACS | [examples/preflight-openshift.example.json](examples/preflight-openshift.example.json) |
+
+When the UI container is running, the same files are also at:
+
+- `http://127.0.0.1:8080/examples/preflight-rhel-satellite.example.json`
+- `http://127.0.0.1:8080/examples/preflight-openshift.example.json`
+
+For a RHEL + Satellite environment by hand:
 
 1. Set environment to `prod`.
 2. Set domain to `prod.rhlab`.
