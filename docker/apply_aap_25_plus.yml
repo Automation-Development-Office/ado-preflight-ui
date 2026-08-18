@@ -893,8 +893,42 @@
     - aap_auth_configure_gateway | default(false) | bool
     - not (bootstrap_controller_hub_update_collection_only | default(false) | bool)
 
-# Create/update credentials and EEs first
-- name: AAP 2.5+ | Apply credentials and execution environments
+# Create/update credentials first. Skip EE PATCH when the name already exists
+# (global / other-org EEs 403 org tokens; JTs still reference the name).
+- name: AAP 2.5+ | Drop global Ansible Galaxy from credential create list
+  ansible.builtin.set_fact:
+    controller_credentials: >-
+      {{
+        controller_credentials
+        | default([])
+        | rejectattr('name', 'defined')
+        | list
+        +
+        (
+          controller_credentials
+          | default([])
+          | selectattr('name', 'defined')
+          | rejectattr('name', 'equalto', 'Ansible Galaxy')
+          | list
+        )
+      }}
+    bootstrap_controller_controller_credentials: >-
+      {{
+        bootstrap_controller_controller_credentials
+        | default([])
+        | rejectattr('name', 'defined')
+        | list
+        +
+        (
+          bootstrap_controller_controller_credentials
+          | default([])
+          | selectattr('name', 'defined')
+          | rejectattr('name', 'equalto', 'Ansible Galaxy')
+          | list
+        )
+      }}
+
+- name: AAP 2.5+ | Apply credentials
   ansible.builtin.include_role:
     name: infra.aap_configuration.dispatch
   vars:
@@ -905,9 +939,24 @@
       - role: controller_credentials
         var: controller_credentials
         tags: credentials
+  when: controller_credentials | default([]) | length > 0
+
+- name: AAP 2.5+ | Skip existing execution environments
+  ansible.builtin.include_tasks: skip_existing_execution_environments.yml
+  when: controller_execution_environments | default([]) | length > 0
+
+- name: AAP 2.5+ | Apply execution environments
+  ansible.builtin.include_role:
+    name: infra.aap_configuration.dispatch
+  vars:
+    gateway_configuration_dispatcher_roles: []
+    hub_configuration_dispatcher_roles: []
+    eda_configuration_dispatcher_roles: []
+    controller_configuration_dispatcher_roles:
       - role: controller_execution_environments
         var: controller_execution_environments
         tags: execution_environments
+  when: controller_execution_environments | default([]) | length > 0
 
 - name: AAP 2.5+ | Apply inventory sources directly
   ansible.controller.inventory_source:

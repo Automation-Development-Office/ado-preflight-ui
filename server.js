@@ -791,7 +791,11 @@ function defaultComponentConfig(component) {
       standalone_http_port: 3000,
       standalone_ip_note: '192.168.0.66',
       standalone_rpm_path: '',
-      standalone_rpm_url: ''
+      standalone_rpm_url: '',
+      standalone_tls_crt: '',
+      standalone_tls_key: '',
+      standalone_rhn_org_id: '',
+      standalone_rhn_activation_key: ''
     });
   }
 
@@ -806,7 +810,11 @@ function defaultComponentConfig(component) {
       standalone_https_port: 443,
       standalone_ip_note: '192.168.0.65',
       standalone_rpm_path: '',
-      standalone_rpm_url: ''
+      standalone_rpm_url: '',
+      standalone_tls_crt: '',
+      standalone_tls_key: '',
+      standalone_rhn_org_id: '',
+      standalone_rhn_activation_key: ''
     });
   }
 
@@ -855,7 +863,18 @@ function defaultComponentConfig(component) {
       group_mapper_name: '',
       group_mapper_claim: 'groups',
       group_mapper_group_path: '',
-      group_mapper_sync_mode: 'IMPORT'
+      group_mapper_sync_mode: 'IMPORT',
+      standalone_hostname: 'keycloak-ado.server.lab',
+      standalone_zip: '',
+      standalone_zip_file: '',
+      standalone_zip_upload_path: '',
+      standalone_zip_url: '',
+      standalone_admin_user: 'admin',
+      standalone_admin_password: '',
+      standalone_tls_crt: '',
+      standalone_tls_key: '',
+      standalone_rhn_org_id: '',
+      standalone_rhn_activation_key: ''
     });
   }
 
@@ -871,6 +890,95 @@ function hostnameFromUrl(value) {
   } catch {
     return raw.replace(/^https?:\/\//i, '').split('/')[0].trim();
   }
+}
+
+function aapControllerBase(hostname) {
+  const raw = String(hostname || '').trim();
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, '');
+  return `https://${raw.replace(/\/+$/, '')}`;
+}
+
+function aapGetJson(urlString, { token, username, password, skipTls }, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(urlString);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const lib = parsed.protocol === 'http:' ? http : https;
+    const headers = { Accept: 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const req = lib.request(
+      {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'http:' ? 80 : 443),
+        path: `${parsed.pathname}${parsed.search}`,
+        method: 'GET',
+        headers,
+        rejectUnauthorized: !skipTls,
+        timeout: timeoutMs,
+        auth: (!token && username) ? `${username}:${password || ''}` : undefined
+      },
+      res => {
+        const chunks = [];
+        res.on('data', chunk => chunks.push(chunk));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          let json = null;
+          try {
+            json = text ? JSON.parse(text) : null;
+          } catch {
+            json = { raw: text };
+          }
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve({ status: res.statusCode, json });
+            return;
+          }
+          reject(new Error(`HTTP ${res.statusCode}`));
+        });
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('AAP ping timed out'));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function pingAapController(data) {
+  const base = aapControllerBase(data?.aap?.hostname);
+  if (!base) {
+    throw new Error('AAP Hostname URL is required');
+  }
+  const token = String(data?.aap?.oauth_token || '').trim();
+  const username = String(data?.aap?.admin_username || '').trim();
+  const password = String(data?.aap?.admin_password || '').trim();
+  if (!token && !(username && password)) {
+    throw new Error('AAP OAuth token or admin username/password is required');
+  }
+  const skipTls = data?.aap?.skip_tls_verify === true;
+  const paths = ['/api/controller/v2/ping/', '/api/v2/ping/'];
+  let lastErr;
+  for (const pingPath of paths) {
+    try {
+      const result = await aapGetJson(`${base}${pingPath}`, {
+        token,
+        username,
+        password,
+        skipTls
+      });
+      return { ok: true, url: `${base}${pingPath}`, ping: result.json };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('AAP ping failed');
 }
 
 function hydrateSelectedComponentConfigs(data) {
@@ -3489,6 +3597,74 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
   return lines.join('\n');
 }
 
+const RHBK_ZIP_MAX_BYTES = 512 * 1024 * 1024;
+const rhbkZipUploadDir = path.join(workRoot, 'uploads', 'rhbk-standalone');
+
+function safeRhbkZipName(raw) {
+  const base = path.basename(String(raw || 'rhbk.zip'))
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '');
+  const name = base || 'rhbk.zip';
+  return name.toLowerCase().endsWith('.zip') ? name : `${name}.zip`;
+}
+
+function isRhbkZipUploadPath(candidate) {
+  const resolved = path.resolve(String(candidate || ''));
+  const root = `${path.resolve(rhbkZipUploadDir)}${path.sep}`;
+  return resolved.startsWith(root) && resolved.toLowerCase().endsWith('.zip');
+}
+
+app.post('/api/rhbk-standalone-zip', (req, res) => {
+  const filename = safeRhbkZipName(req.get('X-Filename') || req.get('x-filename'));
+  fs.mkdirSync(rhbkZipUploadDir, { recursive: true });
+  const dest = path.join(rhbkZipUploadDir, filename);
+  const tmp = `${dest}.partial`;
+  let bytes = 0;
+  let tooLarge = false;
+  const out = fs.createWriteStream(tmp);
+  req.on('data', chunk => {
+    bytes += chunk.length;
+    if (bytes > RHBK_ZIP_MAX_BYTES && !tooLarge) {
+      tooLarge = true;
+      req.destroy();
+      out.destroy();
+      fs.unlink(tmp, () => {});
+      if (!res.headersSent) {
+        res.status(413).json({ error: 'RHBK zip exceeds 512MB' });
+      }
+    }
+  });
+  req.pipe(out);
+  out.on('error', err => {
+    fs.unlink(tmp, () => {});
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message || 'Failed to stage RHBK zip' });
+    }
+  });
+  out.on('finish', () => {
+    if (tooLarge || res.headersSent) return;
+    try {
+      fs.renameSync(tmp, dest);
+      res.json({
+        filename,
+        upload_path: dest,
+        repo_path: `files/${filename}`
+      });
+    } catch (err) {
+      fs.unlink(tmp, () => {});
+      res.status(500).json({ error: err.message || 'Failed to store RHBK zip' });
+    }
+  });
+});
+
+app.delete('/api/rhbk-standalone-zip', (req, res) => {
+  const candidate = req.body?.upload_path;
+  if (!isRhbkZipUploadPath(candidate)) {
+    return res.status(400).json({ error: 'Invalid upload path' });
+  }
+  fs.unlink(candidate, () => res.json({ ok: true }));
+});
+
 app.get('/api/logs' , (req, res) => {
   res.type('text/plain').send(latestLog);
 });
@@ -3743,6 +3919,16 @@ app.post('/api/airgap-architect/map', async (req, res) => {
   }
 });
 
+app.post('/api/aap-ping', async (req, res) => {
+  try {
+    const data = req.body || {};
+    const result = await pingAapController(data);
+    res.status(200).json(result);
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/api/bootstrap', async (req, res) => {
   latestLog = '';
   latestEvents = '';
@@ -3919,6 +4105,26 @@ app.post('/api/bootstrap', async (req, res) => {
   event(`Configure Contoller (Using AAP): ${configureAap}`);
   event(`Encrypt vault files: ${encryptVaultFiles}`);
 
+  const willTalkToAap = configureAap
+    || hubPublishRequested
+    || hubPushEeRequested
+    || hubUpdateCollectionOnly;
+  if (willTalkToAap && String(data?.aap?.hostname || '').trim()) {
+    event('Testing AAP controller connectivity');
+    try {
+      const ping = await pingAapController(data);
+      event(`AAP ping ok: ${ping.url}`);
+      append(`AAP ping ok: ${ping.url}\n`);
+    } catch (err) {
+      event(`Bootstrap failed: AAP connectivity test: ${err.message}`);
+      return res.status(400).json({
+        status: 'failed',
+        exitCode: 2,
+        error: `AAP connectivity test failed: ${err.message}`
+      });
+    }
+  }
+
   const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
   const gitUsesBearerAuth = usesBearerGitAuth(scmTool);
 
@@ -4052,10 +4258,16 @@ fi
 
 echo "=== Overlay hub-only Contoller org create (apply_aap_25_plus) ==="
 APPLY_AAP_SRC="\${APPLY_AAP_25_PLUS_OVERLAY:-/opt/ado-ee/apply_aap_25_plus.yml}"
+SKIP_EE_SRC="\${SKIP_EXISTING_EE_OVERLAY:-/opt/ado-ee/skip_existing_execution_environments.yml}"
 if [ -f "\$APPLY_AAP_SRC" ]; then
   find /workspace/collections -type f -name 'apply_aap_25_plus.yml' -print -exec cp -f "\$APPLY_AAP_SRC" {} \\;
 else
   echo "WARN: \$APPLY_AAP_SRC missing — hub-only may skip Contoller org create"
+fi
+if [ -f "\$SKIP_EE_SRC" ]; then
+  find /workspace/collections -type d -path '*/infra/ado/roles/bootstrap_controller/tasks' -print -exec cp -f "\$SKIP_EE_SRC" {}/skip_existing_execution_environments.yml \\;
+else
+  echo "WARN: \$SKIP_EE_SRC missing — existing EE PATCH 403 may stop bootstrap"
 fi
 
 echo "=== Overlay Galaxy/Hub credentials apply (hub-only) ==="

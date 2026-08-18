@@ -1,0 +1,28 @@
+---
+description: Run ado-preflight-ui CI checks on changed files before check-in
+alwaysApply: true
+---
+
+# Preflight UI local CI checks
+
+Unless told otherwise, validate **only files you changed**.
+
+## Before finishing any change
+
+1. Update `README.md` when behavior, env vars, or bootstrap flow changes.
+2. Add a changelog entry if the repo tracks releases (follow existing pattern).
+3. Run the same checks as [.github/workflows/ci.yml](.github/workflows/ci.yml).
+
+## Commands (repo root)
+
+```bash
+npm install
+npm run build
+node server.js &   # smoke: curl -sf http://127.0.0.1:8080/ | grep -q '<div id="root">'
+bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+./actionlint -color
+```
+
+## ADO collection changes
+
+When preflight overlays or vendors collection files (`docker/apply_aap_25_plus.yml`, etc.), also follow `ado` repo rules in `.cursor/rules/ado-ci-local-checks.mdc`.

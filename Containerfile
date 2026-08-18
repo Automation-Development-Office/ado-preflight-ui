@@ -33,6 +33,7 @@ COPY vendor/ado-ee.docker.tar /opt/ado-ee/ado-ee.docker.tar
 COPY docker/push_hub_ee.yml /opt/ado-ee/push_hub_ee.yml
 COPY docker/apply_aap_25_plus.yml /opt/ado-ee/apply_aap_25_plus.yml
 COPY docker/apply_galaxy_hub_credentials.yml /opt/ado-ee/apply_galaxy_hub_credentials.yml
+COPY docker/skip_existing_execution_environments.yml /opt/ado-ee/skip_existing_execution_environments.yml
 
 RUN set -eux; \
     mkdir -p /workspace /opt/ado-collections/extracted /opt/ado-ee; \
@@ -43,10 +44,12 @@ RUN set -eux; \
     find /opt/ado-collections -type f -name 'push_hub_ee.yml' -exec cp -f /opt/ado-ee/push_hub_ee.yml {} \;; \
     find /opt/ado-collections -type f -name 'apply_aap_25_plus.yml' -exec cp -f /opt/ado-ee/apply_aap_25_plus.yml {} \;; \
     find /opt/ado-collections -type f -name 'apply_galaxy_hub_credentials.yml' -exec cp -f /opt/ado-ee/apply_galaxy_hub_credentials.yml {} \;; \
+    find /opt/ado-collections -type d -path '*/bootstrap_controller/tasks' -exec cp -f /opt/ado-ee/skip_existing_execution_environments.yml {}/skip_existing_execution_environments.yml \;; \
     test -s /opt/ado-ee/ado-ee.docker.tar; \
     test -s /opt/ado-ee/push_hub_ee.yml; \
     test -s /opt/ado-ee/apply_aap_25_plus.yml; \
     test -s /opt/ado-ee/apply_galaxy_hub_credentials.yml; \
+    test -s /opt/ado-ee/skip_existing_execution_environments.yml; \
     chown -R 1001:0 /workspace /opt/app-root/src /opt/ado-collections /opt/ado-ee; \
     chmod -R g+rwX /workspace /opt/app-root/src /opt/ado-collections /opt/ado-ee
 

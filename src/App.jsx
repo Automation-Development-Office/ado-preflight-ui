@@ -654,7 +654,11 @@ const defaults = {
       standalone_http_port: 3000,
       standalone_ip_note: '192.168.0.66',
       standalone_rpm_path: '',
-      standalone_rpm_url: ''
+      standalone_rpm_url: '',
+      standalone_tls_crt: '',
+      standalone_tls_key: '',
+      standalone_rhn_org_id: '',
+      standalone_rhn_activation_key: ''
     },
     acm: {
       hostname: '',
@@ -684,9 +688,15 @@ const defaults = {
       ],
       standalone_hostname: 'keycloak-ado.server.lab',
       standalone_zip: '',
+      standalone_zip_file: '',
+      standalone_zip_upload_path: '',
       standalone_zip_url: '',
       standalone_admin_user: 'admin',
       standalone_admin_password: '',
+      standalone_tls_crt: '',
+      standalone_tls_key: '',
+      standalone_rhn_org_id: '',
+      standalone_rhn_activation_key: '',
       idp_name: '',
       idp_alias: '',
       idp_provider: 'oidc',
@@ -839,7 +849,11 @@ const defaults = {
       standalone_https_port: 443,
       standalone_ip_note: '192.168.0.65',
       standalone_rpm_path: '',
-      standalone_rpm_url: ''
+      standalone_rpm_url: '',
+      standalone_tls_crt: '',
+      standalone_tls_key: '',
+      standalone_rhn_org_id: '',
+      standalone_rhn_activation_key: ''
     },
     kafka: { hostname: '', storage: '', replicas: 1 },
     oadp: { hostname: '', storage: '', replicas: 1 },
@@ -1149,6 +1163,10 @@ function App() {
   const [showAapAdminPassword, setShowAapAdminPassword] = useState(false);
   const [showMachineCredentialSecrets, setShowMachineCredentialSecrets] = useState(false);
   const [showSatelliteSecrets, setShowSatelliteSecrets] = useState(false);
+  const [rhbkZipUploading, setRhbkZipUploading] = useState(false);
+  const [rhbkZipError, setRhbkZipError] = useState('');
+  const [aapPingBusy, setAapPingBusy] = useState(false);
+  const [aapPingMessage, setAapPingMessage] = useState('');
   const [showIdmSecrets, setShowIdmSecrets] = useState(false);
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
@@ -1554,28 +1572,33 @@ function App() {
     });
   };
 
-  const setAapHostname = value => {
-    setData(prev => {
-      const copy = JSON.parse(JSON.stringify(prev));
-      if (!copy.aap) copy.aap = {};
-      const previousHostname = copy.aap.hostname || '';
-      copy.aap.hostname = value;
-      if (Array.isArray(copy.aap.galaxy_credentials) && copy.aap.galaxy_credentials.length > 0) {
-        copy.aap.galaxy_credentials = applyHostnameToGalaxyCredentials(
-          copy.aap.galaxy_credentials,
-          value,
-          previousHostname
-        );
+  const pingAapController = async () => {
+    setAapPingBusy(true);
+    setAapPingMessage('');
+    try {
+      const response = await fetch('/api/aap-ping', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          aap: {
+            hostname: data.aap?.hostname || '',
+            oauth_token: data.aap?.oauth_token || '',
+            admin_username: data.aap?.admin_username || '',
+            admin_password: data.aap?.admin_password || '',
+            skip_tls_verify: data.aap?.skip_tls_verify === true
+          }
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
       }
-      if (copy.aap.container_registry_credential) {
-        copy.aap.container_registry_credential = applyHostnameToContainerRegistryCredential(
-          copy.aap.container_registry_credential,
-          value,
-          previousHostname
-        );
-      }
-      return copy;
-    });
+      setAapPingMessage(`Connected: ${payload.url || data.aap?.hostname}`);
+    } catch (err) {
+      setAapPingMessage(`AAP ping failed: ${err.message}`);
+    } finally {
+      setAapPingBusy(false);
+    }
   };
 
   const setAapHubValidated = value => {
@@ -3524,6 +3547,41 @@ function App() {
     </GridItem>
   );
 
+  const renderStandaloneTlsAndRhn = (
+    component,
+    { urlPath = 'standalone_rpm_url', showTls = true } = {}
+  ) => {
+    const cfg = data.component_config?.[component] || {};
+    const urlSet = String(cfg[urlPath] || '').trim().length > 0;
+    return (
+      <>
+        {showTls && renderTextAreaField(
+          'tls.crt (PEM, optional)',
+          `component_config.${component}.standalone_tls_crt`,
+          'PEM certificate for standalone HTTPS. GitLab writes /etc/gitlab/ssl/<host>.crt; RHBK writes /etc/rhbk/tls/tls.crt.'
+        )}
+        {showTls && renderTextAreaField(
+          'tls.key (PEM, optional)',
+          `component_config.${component}.standalone_tls_key`,
+          'PEM private key paired with tls.crt.'
+        )}
+        <GridItem span={12}>
+          <p style={{ color: mutedTextColor, margin: '8px 0 0' }}>
+            Optional RHN org + activation key. Used when the VM is unregistered and an RPM/zip
+            URL (or dnf deps) needs a subscription. Skip if already registered or using Satellite.
+            {urlSet ? ' RPM/zip URL is set, so RHN may be needed for deps.' : ''}
+          </p>
+        </GridItem>
+        {renderTextField('RHN Org ID (optional)', `component_config.${component}.standalone_rhn_org_id`, 'text')}
+        {renderTextField(
+          'RHN Activation key (optional)',
+          `component_config.${component}.standalone_rhn_activation_key`,
+          'password'
+        )}
+      </>
+    );
+  };
+
   const defaultComponentHelp = {
     hostname: 'Hostname or URL for this component. Example: https://grafana.apps.ocp.prod.rhlab or grafana.server.lab.',
     storage: 'OpenShift storage class. Use Look up when API host and token are set, or type the name. Example: ocs-storagecluster-ceph-rbd.'
@@ -3564,7 +3622,8 @@ function App() {
     bindPassword: 'LDAP bind password. Stored in vault output.',
     usersDn: 'LDAP users DN. Example: cn=users,cn=accounts,dc=server,dc=lab.',
     userAttribute: 'User attribute used for the token claim. Example: memberOf.',
-    tokenClaimType: 'Token claim type. Example: String or JSON.'
+    tokenClaimType: 'Token claim type. Example: String or JSON.',
+    standaloneZip: 'Select the official rhbk-*.zip. Generate copies it to files/ in the playbook repo so AAP can copy it from the controller/EE. Prefer Zip URL if the file is hosted.'
   };
 
   const idmHelp = {
@@ -3732,6 +3791,7 @@ echo $TOKEN
           {renderTextField('HTTP port', 'component_config.grafana.standalone_http_port', 'number')}
           {renderTextField('Airgap RPM path (Contoller)', 'component_config.grafana.standalone_rpm_path', 'text')}
           {renderTextField('Airgap RPM URL', 'component_config.grafana.standalone_rpm_url', 'text')}
+          {renderStandaloneTlsAndRhn('grafana', { showTls: false })}
         </Grid>
       )}
         <Grid hasGutter>
@@ -3959,22 +4019,57 @@ echo $TOKEN
     );
   };
 
-  const renderRhbkConfig = () => (
+  const renderRhbkConfig = () => {
+    const selected = data.component_options?.rhbk || [];
+    const showStandalone = selected.includes('standalone');
+    const showOpenshiftInstall = !showStandalone;
+
+    return (
     <>
-      {renderComponentOptions('rhbk', 'RHBK (Keycloak) Options', 'Select which RHBK (Keycloak) resources to configure. Choose Standalone for the RHEL VM zip install (ADO | Install RHBK Standalone) — wire inventory host keycloak-ado / 192.168.0.64 and a machine credential.')}
-      <Grid hasGutter>
-        {renderTextField('Hostname / URL', 'component_config.rhbk.hostname', 'text', rhbkHelp.hostname)}
-        {renderStorageClassField('Storage Class', 'component_config.rhbk.storage', rhbkHelp.storage)}
-        {renderTextField('Replicas', 'component_config.rhbk.replicas', 'number')}
-        {renderTextField('Realm', 'component_config.rhbk.realm', 'text', rhbkHelp.realm)}
-      </Grid>
-      {(data.component_options?.rhbk || []).includes('standalone') && (
+      {renderComponentOptions('rhbk', 'RHBK (Keycloak) Options', 'Select which RHBK (Keycloak) resources to configure. Choose Standalone for the RHEL VM zip install (ADO | Install RHBK Standalone) — that hides the OpenShift operator fields. Wire inventory host keycloak-ado / 192.168.0.64 and a machine credential.')}
+      {showOpenshiftInstall && (
+        <Grid hasGutter>
+          {renderTextField('Hostname / URL', 'component_config.rhbk.hostname', 'text', rhbkHelp.hostname)}
+          {renderStorageClassField('Storage Class', 'component_config.rhbk.storage', rhbkHelp.storage)}
+          {renderTextField('Replicas', 'component_config.rhbk.replicas', 'number')}
+          {renderTextField('Realm', 'component_config.rhbk.realm', 'text', rhbkHelp.realm)}
+        </Grid>
+      )}
+      {showStandalone && (
         <div style={{ marginTop: '16px', padding: '14px', border: `1px solid ${borderColor}`, borderRadius: '6px' }}>
           <div style={{ fontWeight: 700, marginBottom: '8px' }}>Standalone RHBK (RHEL VM)</div>
           <Grid hasGutter>
             {renderTextField('VM hostname (KC_HOSTNAME)', 'component_config.rhbk.standalone_hostname', 'text')}
-            {renderTextField('Zip path on Contoller/runner', 'component_config.rhbk.standalone_zip', 'text')}
+            <GridItem span={12}>
+              <FormGroup label={labelWithHelp('RHBK zip', rhbkHelp.standaloneZip)}>
+                <input
+                  id="rhbk-standalone-zip-file"
+                  type="file"
+                  accept=".zip,application/zip"
+                  disabled={rhbkZipUploading}
+                  onChange={event => {
+                    uploadRhbkStandaloneZip(event.target.files?.[0]);
+                    event.target.value = '';
+                  }}
+                  style={{ display: 'block', marginBottom: '8px' }}
+                />
+                <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
+                  {rhbkZipUploading
+                    ? 'Uploading zip to the preflight workspace…'
+                    : (data.component_config?.rhbk?.standalone_zip_file
+                      ? `Selected: ${data.component_config.rhbk.standalone_zip_file}. Generated repo path: files/${data.component_config.rhbk.standalone_zip_file}.`
+                      : 'Choose rhbk-*.zip from this workstation. It is staged and written to files/ on generate (same pattern as the Satellite manifest).')}
+                </div>
+                {rhbkZipError && (
+                  <div style={{ color: '#c9190b', fontSize: '13px', marginTop: '6px' }}>{rhbkZipError}</div>
+                )}
+                {data.component_config?.rhbk?.standalone_zip_file && (
+                  <Button variant="link" onClick={clearRhbkStandaloneZip}>Clear zip</Button>
+                )}
+              </FormGroup>
+            </GridItem>
             {renderTextField('Zip URL (optional)', 'component_config.rhbk.standalone_zip_url', 'text')}
+            {renderStandaloneTlsAndRhn('rhbk', { urlPath: 'standalone_zip_url' })}
             {renderTextField('Admin user', 'component_config.rhbk.standalone_admin_user', 'text')}
             {renderTextField('Admin password', 'component_config.rhbk.standalone_admin_password', 'password')}
           </Grid>
@@ -3982,7 +4077,8 @@ echo $TOKEN
       )}
       {renderRhbkDetailTabs()}
     </>
-  );
+    );
+  };
 
 
   const renderMachineCredentialConfig = () => {
@@ -4387,6 +4483,60 @@ echo $TOKEN
         .filter((_, rowIndex) => rowIndex !== index);
       return copy;
     });
+  };
+
+  const applyRhbkStandaloneZip = (filename, uploadPath) => {
+    setRhbkZipError('');
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.component_config) copy.component_config = {};
+      if (!copy.component_config.rhbk) copy.component_config.rhbk = {};
+      copy.component_config.rhbk.standalone_zip_file = filename || '';
+      copy.component_config.rhbk.standalone_zip_upload_path = uploadPath || '';
+      copy.component_config.rhbk.standalone_zip = filename ? `files/${filename}` : '';
+      return copy;
+    });
+  };
+
+  const uploadRhbkStandaloneZip = async file => {
+    if (!file) return;
+    setRhbkZipUploading(true);
+    try {
+      const response = await fetch('/api/rhbk-standalone-zip', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Filename': file.name
+        },
+        body: file
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.error || `Upload failed (${response.status})`);
+      }
+      applyRhbkStandaloneZip(result.filename, result.upload_path);
+    } catch (err) {
+      applyRhbkStandaloneZip('', '');
+      setRhbkZipError(err.message || 'Could not stage the RHBK zip');
+    } finally {
+      setRhbkZipUploading(false);
+    }
+  };
+
+  const clearRhbkStandaloneZip = async () => {
+    const uploadPath = data.component_config?.rhbk?.standalone_zip_upload_path;
+    if (uploadPath) {
+      try {
+        await fetch('/api/rhbk-standalone-zip', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ upload_path: uploadPath })
+        });
+      } catch {
+        // Clearing the form still proceeds if the staged file is already gone.
+      }
+    }
+    applyRhbkStandaloneZip('', '');
   };
 
   const setSatelliteManifest = file => {
@@ -6703,24 +6853,27 @@ echo $TOKEN
       border: `1px solid ${borderColor}`,
       borderRadius: '4px'
     };
+    const showStandalone = (data.component_options?.gitlab || []).includes('standalone');
     return (
     <>
       {renderComponentOptions(
         'gitlab',
         'GitLab Options',
-        'Choose Standalone for the RHEL Omnibus install (ADO | Install GitLab Standalone) — inventory host gitlab-ado / 192.168.0.65.'
+        'Choose Standalone for the RHEL Omnibus install (ADO | Install GitLab Standalone) — inventory host gitlab-ado / 192.168.0.65. Standalone hides OpenShift operator fields.'
       )}
+      {!showStandalone && (
       <Grid hasGutter>
         {renderTextField(
           'Hostname / URL',
           'component_config.gitlab.hostname',
           'text',
-          'OpenShift GitLab route or standalone hostname. Lab default: gitlab-ado.server.lab.'
+          'OpenShift GitLab route. Lab default: gitlab-ado.server.lab.'
         )}
         {renderStorageClassField('Storage Class', 'component_config.gitlab.storage', defaultComponentHelp.storage)}
         {renderTextField('Replicas', 'component_config.gitlab.replicas', 'number')}
       </Grid>
-      {(data.component_options?.gitlab || []).includes('standalone') && (
+      )}
+      {showStandalone && (
         <Grid hasGutter style={{ marginTop: '12px' }}>
           <GridItem span={12}>
             <Title headingLevel="h3">Standalone RHEL GitLab</Title>
@@ -6749,6 +6902,7 @@ echo $TOKEN
           {renderTextField('HTTPS port', 'component_config.gitlab.standalone_https_port', 'number')}
           {renderTextField('Airgap RPM path (Contoller)', 'component_config.gitlab.standalone_rpm_path', 'text')}
           {renderTextField('Airgap RPM URL', 'component_config.gitlab.standalone_rpm_url', 'text')}
+          {renderStandaloneTlsAndRhn('gitlab')}
         </Grid>
       )}
     </>
@@ -8255,6 +8409,18 @@ ${vaultYaml}
                           />
                         </FormGroup>
                       </GridItem>
+                      <GridItem span={12}>
+                        <Button
+                          variant="secondary"
+                          isDisabled={aapPingBusy || !String(data.aap?.hostname || '').trim()}
+                          onClick={pingAapController}
+                        >
+                          {aapPingBusy ? 'Testing AAP…' : 'Test AAP connection'}
+                        </Button>
+                        {aapPingMessage && (
+                          <p style={{ margin: '8px 0 0', color: mutedTextColor }}>{aapPingMessage}</p>
+                        )}
+                      </GridItem>
                     </Grid>
                   )}
                   {activeAapConfigTab === 'hub' && (
@@ -8560,7 +8726,9 @@ ${vaultYaml}
                             Registry credential for EE pulls, attaches selected creds to the
                             organization in the order below (1 = searched first), and can create an
                             extra Contoller user. Independent of Hub collection/EE push — enable
-                            either tab, or both.
+                            either tab, or both. The built-in <code>Ansible Galaxy</code> credential
+                            is platform-global (not org-owned); bootstrap attaches it and will not
+                            try to create a duplicate.
                           </p>
                           <Checkbox
                             id="aap-galaxy-setup-enabled"
