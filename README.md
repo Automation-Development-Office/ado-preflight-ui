@@ -473,6 +473,18 @@ Hub registry image name defaults to lowercase `ado-ee` (registry-safe). The UI
 label remains **ADO EE**. The Contoller execution environment object name can
 remain org-scoped (`ADO-ee` / `ORG-ee`) as a separate field.
 
+### Contoller collections without ADO EE
+
+When job templates use a stock EE (`ee-supported-rhel9`) instead of ADO EE,
+Contoller only installs `collections/requirements.yml` (including the local
+`type: dir` vendored `infra.ado`) if the **organization already has Galaxy
+credentials** attached in Contoller.
+
+Quick start: attach Galaxy credentials once (preflight Galaxy tab, or Contoller
+UI). You do **not** need to re-check the Galaxy tab on every bootstrap if they
+are already on the org. Push ADO EE is the other option when you want
+`infra.ado` baked into the EE.
+
 ### IDM
 
 IDM configuration includes:

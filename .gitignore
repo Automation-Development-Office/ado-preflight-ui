@@ -7,3 +7,7 @@ node_modules/
 # Baked EE for disconnected Hub push (prepared locally; not committed)
 vendor/ado-ee.docker.tar
 vendor/*.tar
+
+.local/
+.cache/
+.cursor/

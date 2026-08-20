@@ -13,6 +13,14 @@ const port = 8080;
 
 const workRoot = '/workspace';
 const collectionDir = '/opt/ado-collections';
+
+function hasAnsiblePlatformCollection() {
+  try {
+    return fs.readdirSync(collectionDir).some(f => /^ansible-platform-.*\.tar\.gz$/.test(f));
+  } catch {
+    return false;
+  }
+}
 const uiDir = path.join(__dirname, 'dist');
 const packageJson = require('./package.json');
 
@@ -892,6 +900,38 @@ function hostnameFromUrl(value) {
   }
 }
 
+/** Derive https://host/realms/rhlab from OIDC auth/token URLs. */
+function keycloakRealmUrlFromOidcUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  try {
+    const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    const parsed = new URL(withScheme);
+    const match = parsed.pathname.match(/(\/realms\/[^/]+)/i);
+    if (!match) return '';
+    return `${parsed.origin}${match[1]}`.replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+async function fetchKeycloakRealmPublicKey({ authorizationUrl, accessTokenUrl, skipTlsVerify }) {
+  const realmUrl = keycloakRealmUrlFromOidcUrl(authorizationUrl)
+    || keycloakRealmUrlFromOidcUrl(accessTokenUrl);
+  if (!realmUrl) {
+    throw new Error(
+      'Set Authorization URL or Access token URL first (expected '
+      + 'https://<host>/realms/<realm>/protocol/openid-connect/...).'
+    );
+  }
+  const result = await aapGetJson(`${realmUrl}`, { skipTls: skipTlsVerify === true });
+  const publicKey = String(result.json?.public_key || '').trim();
+  if (!publicKey) {
+    throw new Error(`Keycloak responded from ${realmUrl} but public_key was empty`);
+  }
+  return { realmUrl, publicKey };
+}
+
 function aapControllerBase(hostname) {
   const raw = String(hostname || '').trim();
   if (!raw) return '';
@@ -1029,6 +1069,97 @@ function normalizeAdditionalEnvironments(value) {
 }
 
 
+function aapAuthDownloadTags(data) {
+  const auth = data?.aap?.auth || {};
+  const tags = [
+    { key: 'keycloak_oidc', tag: 'add-auth-keycloak' },
+    { key: 'ldap', tag: 'add-auth-ldap' },
+    { key: 'keycloak_saml', tag: 'add-auth-keycloak-saml' }
+  ];
+  return tags.filter(({ key }) => auth[key]?.enabled === true).map(({ tag }) => tag);
+}
+
+function activeOnboardTenants(aap) {
+  const tenants = aap?.onboard?.tenants;
+  if (!Array.isArray(tenants)) return [];
+  return tenants.filter(
+    tenant => tenant && tenant.enabled !== false && String(tenant.organization || '').trim()
+  );
+}
+
+function aapOnboardRequested(data) {
+  const onboard = data?.aap?.onboard || {};
+  if (onboard.enabled !== true) return false;
+  return activeOnboardTenants(data?.aap).length > 0;
+}
+
+function onboardKeycloakGroupsRequested(aap) {
+  const onboard = aap?.onboard || {};
+  if (onboard.enabled !== true) return false;
+  const kc = onboard.keycloak || {};
+  if (kc.create_groups === false) return false;
+  return activeOnboardTenants(aap).some(
+    tenant => tenant.create_keycloak_groups !== false
+      && (
+        String(tenant.admin_groups || '').trim()
+        || String(tenant.developer_groups || '').trim()
+      )
+  );
+}
+
+function aapAuthConfigRequested(data) {
+  return aapAuthDownloadTags(data).length > 0;
+}
+
+function aapStandaloneConfigRequested(data) {
+  return aapAuthConfigRequested(data);
+}
+
+function aapStandaloneRun(data) {
+  return data?.aap?.standalone_run === true
+    || data?.aap?.hub_update_collection_only === true;
+}
+
+function syncAapStandaloneFields(aap) {
+  if (!aap || typeof aap !== 'object') return;
+  if (aap.standalone_run === undefined) {
+    aap.standalone_run = aap.hub_update_collection_only === true;
+  }
+  aap.hub_update_collection_only = aap.standalone_run === true;
+}
+
+function aapStandaloneWorkSelected(data) {
+  return (
+    data?.aap?.hub_publish_ado_collection === true
+    || data?.aap?.hub_push_ee === true
+    || data?.aap?.galaxy_setup_enabled === true
+    || aapAuthConfigRequested(data)
+    || attachAapLicenseRequested(data)
+    || installAapFullRequested(data)
+  );
+}
+
+function stripInactiveAapSections(data) {
+  if (!data?.aap || typeof data.aap !== 'object') return data;
+
+  if (data.aap.auth && typeof data.aap.auth === 'object') {
+    Object.entries(data.aap.auth).forEach(([key, value]) => {
+      if (!value || value.enabled !== true) {
+        delete data.aap.auth[key];
+      }
+    });
+    if (Object.keys(data.aap.auth).length === 0) {
+      delete data.aap.auth;
+    }
+  }
+
+  if (!aapOnboardRequested(data)) {
+    delete data.aap.onboard;
+  }
+
+  return data;
+}
+
 function normalizePreflightPayload(input) {
   const data = JSON.parse(JSON.stringify(input || {}));
 
@@ -1049,11 +1180,15 @@ function normalizePreflightPayload(input) {
     }
   }
   if (data.aap.hub_update_collection_only === undefined) data.aap.hub_update_collection_only = false;
-  const hubUpdateCollectionOnly = data.aap.hub_update_collection_only === true;
+  if (data.aap.standalone_run === undefined) {
+    data.aap.standalone_run = data.aap.hub_update_collection_only === true;
+  }
+  syncAapStandaloneFields(data.aap);
+  const standaloneRun = aapStandaloneRun(data);
+  const hubUpdateCollectionOnly = standaloneRun;
 
   if (hubUpdateCollectionOnly) {
-    // Hub-only: collection and/or EE push without scaffolding other components.
-    // Collection publish/force remain explicit checkboxes (not forced here).
+    // Standalone AAP run: skip component playbooks; apply enabled AAP tabs only.
     data.components = [];
     delete data.component;
     data.platform = [];
@@ -1324,8 +1459,13 @@ function normalizePreflightPayload(input) {
       host: String(data.aap.hostname || '').replace(/\/+$/, ''),
       username: '',
       password: '',
-      verify_ssl: true
+      verify_ssl: !data.aap.skip_tls_verify
     };
+  }
+  // If skip_tls_verify is set globally and the registry credential still has verify_ssl=true
+  // (e.g. loaded from an old saved JSON), flip it to false so EE pulls work on self-signed clusters.
+  if (data.aap.skip_tls_verify === true && data.aap.container_registry_credential.verify_ssl === true) {
+    data.aap.container_registry_credential.verify_ssl = false;
   }
   // Galaxy tab mirrors Hub: empty token/password fields fall back to General credentials.
   if (data.aap.galaxy_setup_enabled === true) {
@@ -1664,6 +1804,8 @@ function normalizePreflightPayload(input) {
       }
     }
   }
+
+  stripInactiveAapSections(data);
 
   return data;
 }
@@ -3537,9 +3679,13 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
     `Organization: ${data?.aap?.organization || 'not configured'}`,
     `Project Name: ${projectName}`,
     `AAP Hub collection update: ${data?.aap?.hub_publish_ado_collection ? 'yes' : 'no'}`,
-    `AAP Hub/Galaxy requirements.yml: ${data?.aap?.hub_publish_ado_collection ? 'written (latest, no pin)' : 'omitted (Hub not requested)'}`,
+    `AAP Hub/Galaxy requirements.yml: ${
+      data?.aap?.hub_publish_ado_collection
+        ? 'written (Hub/Galaxy names)'
+        : 'local type:dir for vendored infra.ado (org must already have Galaxy creds, or use ADO EE)'
+    }`,
     `AAP Hub force update: ${data?.aap?.hub_force_ado_collection_update ? 'yes' : 'no'}`,
-    `AAP Hub update only: ${data?.aap?.hub_update_collection_only ? 'yes (skip playbooks/full Contoller scaffolding; still applies Hub collection/EE)' : 'no'}`,
+    `AAP standalone run: ${aapStandaloneRun(data) ? 'yes (AAP tabs only — skip component playbooks/full Contoller scaffolding)' : 'no'}`,
     `AAP Hub hostname: ${data?.aap?.hub_hostname || data?.hub?.hostname || 'defaults to AAP hostname'}`,
     `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`,
     `AAP Hub EE push: ${data?.aap?.hub_push_ee ? 'yes' : 'no (optional; default off)'}`,
@@ -3929,6 +4075,23 @@ app.post('/api/aap-ping', async (req, res) => {
   }
 });
 
+app.post('/api/keycloak/realm-public-key', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const oidc = body.aap?.auth?.keycloak_oidc || body.keycloak_oidc || body;
+    const skipTls = body.skip_tls_verify === true
+      || body.aap?.skip_tls_verify === true;
+    const result = await fetchKeycloakRealmPublicKey({
+      authorizationUrl: oidc.authorization_url || body.authorization_url,
+      accessTokenUrl: oidc.access_token_url || body.access_token_url,
+      skipTlsVerify: skipTls
+    });
+    res.status(200).json({ ok: true, ...result });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/api/bootstrap', async (req, res) => {
   latestLog = '';
   latestEvents = '';
@@ -3960,23 +4123,25 @@ app.post('/api/bootstrap', async (req, res) => {
   // License-only attach must not skip Using AAP / controller configuration.
   const configureAap = aapEnabled && !installAapDuringBootstrap;
 
-  const hubUpdateCollectionOnly = data?.aap?.hub_update_collection_only === true;
+  const standaloneRun = aapStandaloneRun(data);
+  const hubUpdateCollectionOnly = standaloneRun;
   const hubPublishRequested = aapEnabled && data?.aap?.hub_publish_ado_collection === true;
   const hubPushEeRequested = aapEnabled && data?.aap?.hub_push_ee === true;
+  const gatewayAuthRequested = aapAuthConfigRequested(data);
   const hasAapOAuthToken = Boolean(String(data?.aap?.oauth_token || '').trim());
   const hasAapPasswordAuth = Boolean(
     String(data?.aap?.admin_username || '').trim()
     && String(data?.aap?.admin_password || '').trim()
   );
 
-  if (hubUpdateCollectionOnly && !hubPublishRequested && !hubPushEeRequested) {
-    event('Bootstrap failed: Hub-only run needs collection update and/or EE push enabled');
+  if (standaloneRun && !aapStandaloneWorkSelected(data)) {
+    event('Bootstrap failed: Standalone AAP run needs at least one AAP tab enabled');
     return res.status(400).json({
       status: 'failed',
       exitCode: 2,
       error:
-        'Run Hub updates only is enabled, but neither collection update nor EE push is checked. '
-        + 'Enable at least one Hub option, or turn off Hub-only mode.'
+        'Standalone AAP run is enabled on General, but no AAP tab work is selected. '
+        + 'Enable Install AAP, License, Hub, Galaxy, or Add authentication options, or turn off Standalone.'
     });
   }
 
@@ -4015,6 +4180,99 @@ app.post('/api/bootstrap', async (req, res) => {
 
   if (aapEnabled && !hubPublishRequested) {
     event('Note: Hub collection update is off (optional). Contoller will use whatever infra.ado is already on Hub.');
+  }
+
+  const keycloakOidcEnabled = data?.aap?.auth?.keycloak_oidc?.enabled === true;
+  if (keycloakOidcEnabled) {
+    const oidc = data.aap.auth.keycloak_oidc || {};
+    const missing = [];
+    if (!String(oidc.key || '').trim()) missing.push('Client ID (KEY)');
+    if (!String(oidc.secret || '').trim()) missing.push('Client secret');
+    if (!String(oidc.access_token_url || '').trim()) missing.push('Access token URL');
+    if (!String(oidc.authorization_url || '').trim()) missing.push('Authorization URL');
+    if (!String(oidc.public_key || '').trim()) missing.push('Realm public key (RS256 from Keycloak → Realm Settings → Keys)');
+    if (missing.length > 0) {
+      event(`Bootstrap failed: Keycloak OIDC missing required fields: ${missing.join(', ')}`);
+      return res.status(400).json({
+        status: 'failed',
+        exitCode: 2,
+        error:
+          `Keycloak OIDC is enabled but missing: ${missing.join(', ')}. `
+          + 'Fill these on Add authentication → Keycloak before Run Bootstrap.'
+      });
+    }
+    if (!hasAapOAuthToken && !hasAapPasswordAuth) {
+      event('Bootstrap failed: Keycloak OIDC apply needs AAP OAuth token or admin username/password');
+      return res.status(400).json({
+        status: 'failed',
+        exitCode: 2,
+        error:
+          'Keycloak OIDC configuration requires General → AAP admin credentials '
+          + '(OAuth token or username/password) so bootstrap can apply Gateway authenticators.'
+      });
+    }
+  }
+
+  if (aapOnboardRequested(data) && !keycloakOidcEnabled) {
+    event('Bootstrap failed: Onboard tenants require Keycloak OIDC on Add authentication');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error:
+        'Onboard tenant organizations require Keycloak OIDC (Add authentication → Keycloak). '
+        + 'Enable and configure OIDC, then add tenants on the Onboard tab.'
+    });
+  }
+
+  if (aapOnboardRequested(data)) {
+    const invalidTenants = activeOnboardTenants(data.aap).filter((tenant) => {
+      const missing = [];
+      if (!String(tenant.admin_groups || '').trim()) missing.push('admin Keycloak group(s)');
+      if (!String(tenant.developer_groups || '').trim()) missing.push('developer Keycloak group(s)');
+      tenant.__missing = missing;
+      return missing.length > 0;
+    });
+    if (invalidTenants.length > 0) {
+      const detail = invalidTenants
+        .map(t => `${t.organization || 'tenant'} (${t.__missing.join(', ')})`)
+        .join('; ');
+      event(`Bootstrap failed: Onboard tenants missing required fields: ${detail}`);
+      return res.status(400).json({
+        status: 'failed',
+        exitCode: 2,
+        error: `Onboard tenants missing required fields: ${detail}`
+      });
+    }
+  }
+
+  if (onboardKeycloakGroupsRequested(data.aap)) {
+    const kc = data.aap.onboard.keycloak || {};
+    const missing = [];
+    if (!String(kc.base_url || '').trim()) missing.push('Keycloak base URL');
+    if (!String(kc.realm || '').trim()) missing.push('Keycloak realm');
+    if (!String(kc.admin_username || '').trim()) missing.push('Keycloak admin username');
+    if (!String(kc.admin_password || '').trim()) missing.push('Keycloak admin password');
+    if (missing.length > 0) {
+      event(`Bootstrap failed: Onboard Keycloak missing: ${missing.join(', ')}`);
+      return res.status(400).json({
+        status: 'failed',
+        exitCode: 2,
+        error:
+          `Onboard → Keycloak group creation requires: ${missing.join(', ')}. `
+          + 'Fill these on the Onboard tab or disable Create Keycloak groups.'
+      });
+    }
+  }
+
+  if (aapAuthConfigRequested(data) && !hasAnsiblePlatformCollection()) {
+    event('Bootstrap failed: ansible.platform collection tarball missing (required for Add authentication)');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error:
+        'Add authentication requires the ansible.platform collection (ansible-platform-*.tar.gz) '
+        + 'in the preflight UI image. Rebuild the container so /opt/ado-collections includes it.'
+    });
   }
 
   if (hubPushEeRequested && !hasAapOAuthToken && !hasAapPasswordAuth) {
@@ -4150,6 +4408,7 @@ set -euo pipefail
 
 COLLECTION_DIR="${collectionDir}"
 HUB_PUBLISH="${hubPublishRequested ? 'true' : 'false'}"
+GATEWAY_AUTH="${gatewayAuthRequested ? 'true' : 'false'}"
 
 rm -rf /workspace/collections
 mkdir -p /workspace/collections
@@ -4204,6 +4463,18 @@ ansible-galaxy collection install "$COLLECTION_DIR"/infra-controller_configurati
 echo ""
 echo "=== Installing infra.aap_configuration Collection ==="
 ansible-galaxy collection install "$COLLECTION_DIR"/infra-aap_configuration-*.tar.gz -p /workspace/collections --force --no-deps
+
+echo ""
+echo "=== Installing ansible.platform Collection ==="
+if ls "$COLLECTION_DIR"/ansible-platform-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install "$COLLECTION_DIR"/ansible-platform-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  if [ "$GATEWAY_AUTH" = "true" ]; then
+    echo "ERROR: ansible-platform tarball required for Add authentication but not found in $COLLECTION_DIR." >&2
+    exit 1
+  fi
+  echo "ansible-platform tarball not found; skipping"
+fi
 
 echo ""
 echo "=== Installing ansible.hub Collection ==="
@@ -4270,6 +4541,14 @@ else
   echo "WARN: \$SKIP_EE_SRC missing — existing EE PATCH 403 may stop bootstrap"
 fi
 
+echo "=== Overlay AAP smoke test (non-fatal demo JT launch) ==="
+SMOKE_TEST_SRC="\${RUN_SMOKE_TEST_OVERLAY:-/opt/ado-ee/run_smoke_test.yml}"
+if [ -f "\$SMOKE_TEST_SRC" ]; then
+  find /workspace/collections -type f -name 'run_smoke_test.yml' -print -exec cp -f "\$SMOKE_TEST_SRC" {} \\;
+else
+  echo "WARN: \$SMOKE_TEST_SRC missing — broken Demo JT may fail bootstrap at smoke test"
+fi
+
 echo "=== Overlay Galaxy/Hub credentials apply (hub-only) ==="
 APPLY_GALAXY_SRC="\${APPLY_GALAXY_HUB_CREDS_OVERLAY:-/opt/ado-ee/apply_galaxy_hub_credentials.yml}"
 if [ -f "\$APPLY_GALAXY_SRC" ]; then
@@ -4282,6 +4561,28 @@ if [ -f "\$APPLY_GALAXY_SRC" ]; then
   fi
 else
   echo "WARN: \$APPLY_GALAXY_SRC missing — hub-only may skip Galaxy credential apply"
+fi
+
+echo "=== Overlay Gateway auth apply (prefer admin basic auth) ==="
+APPLY_GATEWAY_AUTH_SRC="\${APPLY_GATEWAY_AUTH_OVERLAY:-/opt/ado-ee/apply_gateway_auth.yml}"
+if [ -f "\$APPLY_GATEWAY_AUTH_SRC" ]; then
+  find /workspace/collections -type f -name 'apply_gateway_auth.yml' -print -exec cp -f "\$APPLY_GATEWAY_AUTH_SRC" {} \\;
+else
+  echo "WARN: \$APPLY_GATEWAY_AUTH_SRC missing — Gateway auth may fail with Controller OAuth token"
+fi
+
+echo "=== Overlay gateway_authenticators (disable async for ansible.platform 2.7) ==="
+GATEWAY_AUTH_SRC="\${GATEWAY_AUTHENTICATORS_OVERLAY:-/opt/ado-ee/gateway_authenticators_main.yml}"
+GATEWAY_MAPS_SRC="\${GATEWAY_AUTHENTICATOR_MAPS_OVERLAY:-/opt/ado-ee/gateway_authenticator_maps_main.yml}"
+if [ -f "\$GATEWAY_AUTH_SRC" ]; then
+  find /workspace/collections -path '*/infra/aap_configuration/roles/gateway_authenticators/tasks/main.yml' -print -exec cp -f "\$GATEWAY_AUTH_SRC" {} \\;
+else
+  echo "WARN: \$GATEWAY_AUTH_SRC missing — Gateway authenticator apply may fail (async unsupported)"
+fi
+if [ -f "\$GATEWAY_MAPS_SRC" ]; then
+  find /workspace/collections -path '*/infra/aap_configuration/roles/gateway_authenticator_maps/tasks/main.yml' -print -exec cp -f "\$GATEWAY_MAPS_SRC" {} \\;
+else
+  echo "WARN: \$GATEWAY_MAPS_SRC missing — Gateway authenticator map apply may fail (async unsupported)"
 fi
 
 echo ""

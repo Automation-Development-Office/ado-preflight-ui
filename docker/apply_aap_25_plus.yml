@@ -180,6 +180,8 @@
     - bootstrap_controller_hub_collection_artifacts | default([]) | length > 0
   block:
     - name: AAP 2.5+ | Upload/approve ADO collection artifact on AAP Hub
+      # Treat the known ah_collection auto_approve IndexError as non-fatal.
+      # We handle unexpected errors below by inspecting the loop result.
       ansible.hub.ah_collection:
         namespace: "{{ (__hub_collection_file | basename).split('-')[0] }}"
         name: "{{ (__hub_collection_file | basename).split('-')[1] }}"
@@ -204,30 +206,31 @@
       loop: "{{ bootstrap_controller_hub_collection_artifacts | default([]) }}"
       loop_control:
         loop_var: __hub_collection_file
-  rescue:
-    # ansible.hub.ah_collection auto_approve crashes (IndexError) when the same
-    # namespace/name/version already exists and overwrite_existing is false.
-    # Looped failures put IndexError under results[].module_stderr, not top-level.
-    - name: AAP 2.5+ | Collect Hub publish failure text
-      ansible.builtin.set_fact:
-        bootstrap_controller_hub_publish_failure_text: "{{ ansible_failed_result | string }}"
+      register: bootstrap_controller_hub_publish_attempt
+      failed_when: false
 
-    - name: AAP 2.5+ | Detect Hub approve crash for already-published collection version
+    # Loop failures land under bootstrap_controller_hub_publish_attempt.results[].
+    - name: AAP 2.5+ | Detect Hub publish failures
       ansible.builtin.set_fact:
-        # ansible.hub.ah_collection can upload successfully then crash in approve()
-        # with IndexError when staging has nothing left to move (already approved,
-        # auto-approved, or overwrite path). Treat that as non-fatal even when
-        # force update is enabled so bootstrap can continue.
-        bootstrap_controller_hub_publish_already_present: >-
+        bootstrap_controller_hub_publish_failures: >-
           {{
-            (
-              'IndexError' in (bootstrap_controller_hub_publish_failure_text | default('') | string)
-            )
-            or
-            (
-              'Awaiting approval not found' in (bootstrap_controller_hub_publish_failure_text | default('') | string)
-            )
+            bootstrap_controller_hub_publish_attempt.results
+            | default([])
+            | selectattr('failed', 'equalto', true)
+            | list
           }}
+
+    - name: AAP 2.5+ | Detect Hub publish unexpected errors
+      ansible.builtin.set_fact:
+        bootstrap_controller_hub_publish_unexpected_error: >-
+          {%- set ns = namespace(v=false) -%}
+          {%- for r in (bootstrap_controller_hub_publish_failures | default([])) -%}
+            {%- set text = (r.module_stderr | default('') ~ ' ' ~ (r.msg | default('') | string)) -%}
+            {%- if not (('IndexError' in text) or ('Awaiting approval not found' in text)) -%}
+              {%- set ns.v = true -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.v }}
 
     - name: AAP 2.5+ | Warn when Hub collection version already present
       ansible.builtin.debug:
@@ -240,14 +243,17 @@
           or bump galaxy.yml version and rerun. Artifact:
           {{ bootstrap_controller_hub_collection_artifacts | default([]) | join(', ') }}
           Repository: {{ bootstrap_controller_hub_publish_repository | default('validated') }}
-      when: bootstrap_controller_hub_publish_already_present | default(false) | bool
+      when:
+        - (bootstrap_controller_hub_publish_failures | default([]) | length) > 0
+        - not (bootstrap_controller_hub_publish_unexpected_error | default(false) | bool)
 
     - name: AAP 2.5+ | Fail Hub collection publish for unexpected errors
       ansible.builtin.fail:
         msg: >-
-          AAP Hub collection publish failed:
-          {{ ansible_failed_result.msg | default(ansible_failed_result) }}
-      when: not (bootstrap_controller_hub_publish_already_present | default(false) | bool)
+          AAP Hub collection publish failed with unexpected error(s). Failure(s):
+          {{ bootstrap_controller_hub_publish_failures | default([]) | to_json }}
+      when:
+        - bootstrap_controller_hub_publish_unexpected_error | default(false) | bool
 
 - name: AAP 2.5+ | Push ADO EE image to AAP Hub registry
   ansible.builtin.include_tasks: push_hub_ee.yml
@@ -279,7 +285,7 @@
         ~ '/aap_config_vars.yml'
       ) is file
 
-- name: AAP 2.5+ | Refresh org/credential facts from aap_config_vars (hub-only)
+- name: AAP 2.5+ | Refresh org/credential facts from aap_config_vars (hub-only)  # noqa: var-naming[no-role-prefix]
   ansible.builtin.set_fact:
     bootstrap_controller_controller_organizations: >-
       {{
@@ -305,7 +311,7 @@
 
 # Hub-only ends before full Contoller credential dispatch — still apply Galaxy tab
 # credentials when enabled so Hub + Galaxy (or either alone) both work when selected.
-- name: AAP 2.5+ | Apply Galaxy/Hub credentials before hub-only stop
+- name: AAP 2.5+ | Apply Galaxy/Hub credentials before standalone AAP stop
   ansible.builtin.include_tasks: apply_galaxy_hub_credentials.yml
   when:
     - bootstrap_controller_hub_update_collection_only | default(false) | bool
@@ -335,7 +341,13 @@
         ) > 0
       )
 
-- name: AAP 2.5+ | Stop after ADO Hub collection / EE update
+- name: AAP 2.5+ | Apply gateway authenticators from preflight Auth (standalone)
+  ansible.builtin.include_tasks: apply_gateway_auth.yml
+  when:
+    - bootstrap_controller_hub_update_collection_only | default(false) | bool
+    - aap_auth_configure_gateway | default(false) | bool
+
+- name: AAP 2.5+ | Stop after standalone AAP tab work
   ansible.builtin.meta: end_host
   when: bootstrap_controller_hub_update_collection_only | default(false) | bool
 
@@ -893,9 +905,8 @@
     - aap_auth_configure_gateway | default(false) | bool
     - not (bootstrap_controller_hub_update_collection_only | default(false) | bool)
 
-# Create/update credentials first. Skip EE PATCH when the name already exists
-# (global / other-org EEs 403 org tokens; JTs still reference the name).
-- name: AAP 2.5+ | Drop global Ansible Galaxy from credential create list
+# Create/update credentials and EEs first
+- name: AAP 2.5+ | Drop global Ansible Galaxy from credential create list  # noqa: var-naming[no-role-prefix]
   ansible.builtin.set_fact:
     controller_credentials: >-
       {{
@@ -1008,7 +1019,7 @@
         | list
       }}
 
-- name: AAP 2.5+ | Normalize controller projects before apply
+- name: AAP 2.5+ | Normalize controller projects before apply  # noqa: var-naming[no-role-prefix]
   ansible.builtin.set_fact:
     controller_projects: "{{ bootstrap_controller_projects_sanitized }}"
     bootstrap_controller_controller_projects: "{{ bootstrap_controller_projects_sanitized }}"
@@ -1022,6 +1033,32 @@
   ansible.builtin.include_role:
     name: infra.aap_configuration.controller_projects
   when: controller_projects | default([]) | length > 0
+
+# controller_projects may no-op when the project already exists, leaving an
+# old scm_branch. Explicitly align URL/branch before sync.
+- name: AAP 2.5+ | Align existing project git URL and branch
+  ansible.controller.project:
+    name: "{{ item.name }}"
+    organization: "{{ item.organization | default(omit) }}"
+    scm_type: "{{ item.scm_type | default('git') }}"
+    scm_url: "{{ item.scm_url | default(omit) }}"
+    scm_branch: "{{ item.scm_branch | default(omit) }}"
+    scm_credential: "{{ item.credential | default(item.scm_credential | default(omit)) }}"
+    update_project: false
+    wait: false
+    state: present
+    controller_host: "{{ controller_host | default(vault_controller_hostname) }}"
+    controller_oauthtoken: "{{ controller_oauthtoken | default(vault_controller_oauthtoken | default(omit)) }}"
+    controller_username: "{{ controller_username | default(vault_controller_username | default(omit)) }}"
+    controller_password: "{{ controller_password | default(vault_controller_password | default(omit)) }}"
+    validate_certs: "{{ controller_validate_certs | default(false) }}"
+  loop: "{{ controller_projects | default([]) }}"
+  loop_control:
+    label: "{{ item.name }} branch={{ item.scm_branch | default('') }}"
+  when:
+    - controller_projects | default([]) | length > 0
+    - item.scm_type | default('') | length > 0
+    - (item.scm_branch | default('') | length > 0) or (item.scm_url | default('') | length > 0)
 
 - name: AAP 2.5+ | Force project sync before creating job templates
   ansible.controller.project_update:

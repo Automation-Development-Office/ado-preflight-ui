@@ -113,6 +113,63 @@ function aapAppExplicitlySelected(source) {
   );
 }
 
+const AAP_AUTH_DOWNLOAD_TAGS = [
+  { key: 'keycloak_oidc', tag: 'add-auth-keycloak' },
+  { key: 'ldap', tag: 'add-auth-ldap' },
+  { key: 'keycloak_saml', tag: 'add-auth-keycloak-saml' }
+];
+
+const AAP_ORG_ROLES = ['Organization Admin', 'Organization Member', 'Organization Auditor'];
+const AAP_TEAM_ROLES = ['Execute', 'Team Admin', 'Team Member', 'Team Auditor'];
+
+function slugifyOnboardOrg(organization) {
+  return String(organization || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'tenant';
+}
+
+function defaultOnboardTenant(organization = 'ADO') {
+  const org = String(organization || 'ADO').trim() || 'ADO';
+  const slug = slugifyOnboardOrg(org);
+  return {
+    enabled: true,
+    organization: org,
+    description: `${org} tenant`,
+    create_organization: true,
+    admin_groups: `aap-${slug}-admins`,
+    admin_role: 'Organization Admin',
+    developer_groups: `aap-${slug}-developers`,
+    developer_role: 'Organization Member',
+    create_team: true,
+    team_name: `${org}-Developers`,
+    team_role: 'Execute',
+    create_keycloak_groups: true
+  };
+}
+
+function activeOnboardTenants(aap) {
+  const tenants = aap?.onboard?.tenants;
+  if (!Array.isArray(tenants)) return [];
+  return tenants.filter(
+    tenant => tenant && tenant.enabled !== false && String(tenant.organization || '').trim()
+  );
+}
+
+function aapOnboardRequested(payload) {
+  const onboard = payload?.aap?.onboard || {};
+  if (onboard.enabled !== true) return false;
+  return activeOnboardTenants(payload?.aap).length > 0;
+}
+
+function aapAuthDownloadTags(payload) {
+  const auth = payload?.aap?.auth || {};
+  return AAP_AUTH_DOWNLOAD_TAGS
+    .filter(({ key }) => auth[key]?.enabled === true)
+    .map(({ tag }) => tag);
+}
+
 function preflightDownloadBasename(payload, { scrubbed = false } = {}) {
   const env = payload?.environment || 'env';
   const parts = [`ado-preflight-${env}`];
@@ -127,10 +184,7 @@ function preflightDownloadBasename(payload, { scrubbed = false } = {}) {
   ) {
     parts.push('openshift-agent');
   }
-  const hubOnly = (
-    payload?.aap?.hub_update_collection_only === true
-    || payload?.hub?.update_only === true
-  );
+  const hubOnly = aapStandaloneRun(payload);
   const hubWork = (
     hubOnly
     || payload?.aap?.hub_publish_ado_collection === true
@@ -147,6 +201,8 @@ function preflightDownloadBasename(payload, { scrubbed = false } = {}) {
   } else if (galaxyWork) {
     parts.push('galaxycreds');
   }
+  aapAuthDownloadTags(payload).forEach(tag => parts.push(tag));
+  if (aapOnboardRequested(payload)) parts.push('onboard');
   const components = Array.isArray(payload?.components)
     ? payload.components.filter(Boolean)
     : [];
@@ -157,6 +213,146 @@ function preflightDownloadBasename(payload, { scrubbed = false } = {}) {
   }
   if (scrubbed) parts.push('scrubbed');
   return `${parts.join('-')}.json`;
+}
+
+/** Any Add authentication tab method enabled (Keycloak OIDC, LDAP, SAML, …). */
+function aapAuthConfigRequested(payload) {
+  return aapAuthDownloadTags(payload).length > 0;
+}
+
+/** @deprecated alias — use aapAuthConfigRequested */
+function aapStandaloneConfigRequested(payload) {
+  return aapAuthConfigRequested(payload);
+}
+
+/** General → Standalone AAP run (skip component playbooks; run enabled AAP tabs only). */
+function aapStandaloneRun(payload) {
+  return payload?.aap?.standalone_run === true
+    || payload?.aap?.hub_update_collection_only === true;
+}
+
+function syncAapStandaloneFields(aap) {
+  if (!aap || typeof aap !== 'object') return;
+  if (aap.standalone_run === undefined) {
+    aap.standalone_run = aap.hub_update_collection_only === true;
+  }
+  aap.hub_update_collection_only = aap.standalone_run === true;
+}
+
+function clearStandaloneWhenComponentsSelected(copy) {
+  const components = Array.isArray(copy.components)
+    ? copy.components.filter(c => c && c !== 'all')
+    : [];
+  if (components.length === 0) return;
+  if (!copy.aap) copy.aap = {};
+  copy.aap.standalone_run = false;
+  copy.aap.hub_update_collection_only = false;
+  if (!copy.aap.onboard) {
+    copy.aap.onboard = JSON.parse(JSON.stringify(defaults.aap.onboard));
+  }
+  copy.aap.onboard.enabled = false;
+  if (copy.aap.auth && typeof copy.aap.auth === 'object') {
+    Object.values(copy.aap.auth).forEach(method => {
+      if (method && typeof method === 'object' && Object.prototype.hasOwnProperty.call(method, 'enabled')) {
+        method.enabled = false;
+      }
+    });
+  }
+}
+
+/** Derive https://host/realms/rhlab from OIDC auth/token URLs. */
+function keycloakRealmUrlFromOidcUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+    const parsed = new URL(withScheme);
+    const match = parsed.pathname.match(/(\/realms\/[^/]+)/i);
+    if (!match) return '';
+    return `${parsed.origin}${match[1]}`.replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function keycloakRealmPublicKeyCurlHint(authorizationUrl, accessTokenUrl) {
+  const realmUrl = keycloakRealmUrlFromOidcUrl(authorizationUrl)
+    || keycloakRealmUrlFromOidcUrl(accessTokenUrl)
+    || 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab';
+  return `curl -sk ${realmUrl} | jq -r '.public_key'`;
+}
+
+function keycloakRealmNameFromOidcUrl(url) {
+  const realmUrl = keycloakRealmUrlFromOidcUrl(url);
+  if (!realmUrl) return '';
+  const match = realmUrl.match(/\/realms\/([^/]+)$/i);
+  return match ? match[1] : '';
+}
+
+function keycloakBaseUrlFromOidcUrl(url) {
+  const realmUrl = keycloakRealmUrlFromOidcUrl(url);
+  if (!realmUrl) return '';
+  return realmUrl.replace(/\/realms\/[^/]+$/i, '');
+}
+
+function defaultOnboardKeycloak(aap) {
+  const oidc = aap?.auth?.keycloak_oidc || {};
+  const authUrl = oidc.authorization_url || oidc.access_token_url || '';
+  return {
+    create_groups: false,
+    base_url: keycloakBaseUrlFromOidcUrl(authUrl) || 'https://keycloak.apps.ocp.prod.rhlab',
+    realm: keycloakRealmNameFromOidcUrl(authUrl) || 'rhlab',
+    admin_username: 'admin',
+    admin_password: '',
+    verify_ssl: false
+  };
+}
+
+function onboardKeycloakGroupsRequested(aap) {
+  const onboard = aap?.onboard || {};
+  if (onboard.enabled !== true) return false;
+  const kc = onboard.keycloak || {};
+  if (kc.create_groups === false) return false;
+  return activeOnboardTenants(aap).some(
+    tenant => tenant.create_keycloak_groups !== false
+      && (
+        String(tenant.admin_groups || '').trim()
+        || String(tenant.developer_groups || '').trim()
+      )
+  );
+}
+
+function aapStandaloneWorkSelected(payload) {
+  return (
+    payload?.aap?.hub_publish_ado_collection === true
+    || payload?.aap?.hub_push_ee === true
+    || payload?.aap?.galaxy_setup_enabled === true
+    || aapAuthConfigRequested(payload)
+    || attachAapLicenseRequested(payload)
+    || installAapFullRequested(payload)
+  );
+}
+
+/** Drop disabled AAP auth/onboard blocks so Download JSON stays minimal. */
+function stripInactiveAapSections(payload) {
+  if (!payload?.aap || typeof payload.aap !== 'object') return payload;
+
+  if (payload.aap.auth && typeof payload.aap.auth === 'object') {
+    Object.entries(payload.aap.auth).forEach(([key, value]) => {
+      if (!value || value.enabled !== true) {
+        delete payload.aap.auth[key];
+      }
+    });
+    if (Object.keys(payload.aap.auth).length === 0) {
+      delete payload.aap.auth;
+    }
+  }
+
+  if (!aapOnboardRequested(payload)) {
+    delete payload.aap.onboard;
+  }
+
+  return payload;
 }
 
 /** Redact secrets/tokens for shareable preflight JSON downloads. */
@@ -910,15 +1106,15 @@ const defaults = {
 
   component_options: {
     openshift: [],
-    grafana: [...componentOptionDefaults.grafana],
-    gitlab: [...componentOptionDefaults.gitlab],
-    rhbk: [...componentOptionDefaults.rhbk],
+    grafana: [],
+    gitlab: [],
+    rhbk: [],
     acs: [],
     satellite: [],
     idm: [],
-    rhel: [...componentOptionDefaults.rhel],
-    compliance: ['pci_dss'],
-    stig: ['rhel_9_stig']
+    rhel: [],
+    compliance: [],
+    stig: []
   },
 
   collections: {
@@ -958,6 +1154,7 @@ const defaults = {
     hub_force_ado_collection_update: false,
     // When true: run Hub collection and/or EE push without scaffolding playbooks / Contoller apply / other components
     hub_update_collection_only: false,
+    standalone_run: false,
     // Hub API / registry hostname (defaults from AAP Hostname URL host)
     hub_hostname: '',
     // Optional Hub EE — default is baked docker-archive inside the UI image (disconnected).
@@ -988,12 +1185,18 @@ const defaults = {
         authorization_url: 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab/protocol/openid-connect/auth',
         access_token_url: 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab/protocol/openid-connect/token',
         public_key: '',
+        verify_ssl: false,
         groups_claim: 'Group',
         superuser_groups: '',
         organization_maps: [
           { organization: 'ADO', groups: '', role: 'Organization Member' }
         ]
       }
+    },
+    onboard: {
+      enabled: false,
+      keycloak: defaultOnboardKeycloak({ auth: { keycloak_oidc: { authorization_url: 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab/protocol/openid-connect/auth' } } }),
+      tenants: []
     },
     galaxy_user_account: {
       enabled: false,
@@ -1167,6 +1370,9 @@ function App() {
   const [rhbkZipError, setRhbkZipError] = useState('');
   const [aapPingBusy, setAapPingBusy] = useState(false);
   const [aapPingMessage, setAapPingMessage] = useState('');
+  const [aapPingStatus, setAapPingStatus] = useState('');
+  const [keycloakPublicKeyBusy, setKeycloakPublicKeyBusy] = useState(false);
+  const [keycloakPublicKeyMessage, setKeycloakPublicKeyMessage] = useState('');
   const [showIdmSecrets, setShowIdmSecrets] = useState(false);
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
@@ -1174,6 +1380,7 @@ function App() {
   const [additionalEnvOtherDraft, setAdditionalEnvOtherDraft] = useState('');
   const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
   const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
+  const [activeAapAuthTab, setActiveAapAuthTab] = useState('keycloak');
   const [storageClassLookup, setStorageClassLookup] = useState({
     loading: false,
     error: '',
@@ -1575,6 +1782,7 @@ function App() {
   const pingAapController = async () => {
     setAapPingBusy(true);
     setAapPingMessage('');
+    setAapPingStatus('');
     try {
       const response = await fetch('/api/aap-ping', {
         method: 'POST',
@@ -1593,11 +1801,44 @@ function App() {
       if (!response.ok) {
         throw new Error(payload.error || `HTTP ${response.status}`);
       }
-      setAapPingMessage(`Connected: ${payload.url || data.aap?.hostname}`);
+      setAapPingStatus('success');
+      setAapPingMessage(
+        `Successful — connected to ${payload.url || data.aap?.hostname}`
+      );
     } catch (err) {
-      setAapPingMessage(`AAP ping failed: ${err.message}`);
+      setAapPingStatus('error');
+      setAapPingMessage(`Failed: ${err.message}`);
     } finally {
       setAapPingBusy(false);
+    }
+  };
+
+  const fetchKeycloakRealmPublicKey = async () => {
+    setKeycloakPublicKeyBusy(true);
+    setKeycloakPublicKeyMessage('');
+    const oidc = data.aap?.auth?.keycloak_oidc || {};
+    try {
+      const response = await fetch('/api/keycloak/realm-public-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          skip_tls_verify: data.aap?.skip_tls_verify === true,
+          authorization_url: oidc.authorization_url || '',
+          access_token_url: oidc.access_token_url || ''
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      set('aap.auth.keycloak_oidc.public_key', payload.publicKey || '');
+      setKeycloakPublicKeyMessage(
+        `Fetched RS256 public key from ${payload.realmUrl || 'Keycloak realm'}.`
+      );
+    } catch (err) {
+      setKeycloakPublicKeyMessage(`Fetch failed: ${err.message}`);
+    } finally {
+      setKeycloakPublicKeyBusy(false);
     }
   };
 
@@ -1609,7 +1850,6 @@ function App() {
       copy.aap.hub_mark_ado_validated = value;
       if (!value) {
         copy.aap.hub_force_ado_collection_update = false;
-        if (!copy.aap.hub_push_ee) copy.aap.hub_update_collection_only = false;
       } else {
         // Hub collection publish needs Galaxy/Hub API token creds + org.
         copy.aap.galaxy_setup_enabled = true;
@@ -1625,6 +1865,24 @@ function App() {
             copy.aap.hostname || ''
           );
         }
+      }
+      return copy;
+    });
+  };
+
+  const setAapStandaloneRun = value => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      copy.aap.standalone_run = value === true;
+      copy.aap.hub_update_collection_only = value === true;
+      if (value === true) {
+        copy.components = [];
+        delete copy.component;
+        copy.platform = [];
+        copy.selected_component_apps = [];
+        copy.component_config = {};
+        copy.component_options = {};
       }
       return copy;
     });
@@ -1679,9 +1937,6 @@ function App() {
         syncHubEeSourceImage(copy.aap);
         copy.aap.execution_environment = resolveHubExecutionEnvironmentName(copy.aap);
       } else {
-        if (!copy.aap.hub_publish_ado_collection) {
-          copy.aap.hub_update_collection_only = false;
-        }
         if (
           !copy.aap.execution_environment
           || copy.aap.execution_environment === previousHubEe
@@ -2100,6 +2355,10 @@ function App() {
     if (merged.aap.hub_publish_ado_collection === undefined) merged.aap.hub_publish_ado_collection = false;
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
+    if (merged.aap.standalone_run === undefined) {
+      merged.aap.standalone_run = merged.aap.hub_update_collection_only === true;
+    }
+    syncAapStandaloneFields(merged.aap);
     if (merged.hub && typeof merged.hub === 'object') {
       if (merged.hub.update_only !== undefined) {
         merged.aap.hub_update_collection_only = merged.hub.update_only === true;
@@ -2129,6 +2388,7 @@ function App() {
         if (ee.description) merged.aap.hub_ee_description = ee.description;
       }
     }
+    syncAapStandaloneFields(merged.aap);
     if (merged.aap.hub_push_ee === undefined) merged.aap.hub_push_ee = false;
     if (merged.aap.hub_hostname === undefined) merged.aap.hub_hostname = '';
     if (!String(merged.aap.hub_hostname || '').trim()) {
@@ -2173,14 +2433,48 @@ function App() {
     if (!merged.aap.auth) merged.aap.auth = JSON.parse(JSON.stringify(defaults.aap.auth || {}));
     if (!merged.aap.auth.keycloak_oidc) {
       merged.aap.auth.keycloak_oidc = JSON.parse(JSON.stringify(defaults.aap.auth.keycloak_oidc));
-    } else if (merged.aap.auth.keycloak_oidc.enabled === undefined) {
+    } else     if (merged.aap.auth.keycloak_oidc.enabled === undefined) {
       merged.aap.auth.keycloak_oidc.enabled = false;
+    }
+    if (merged.aap.auth.keycloak_oidc.verify_ssl === undefined) {
+      merged.aap.auth.keycloak_oidc.verify_ssl = false;
     }
     if (!Array.isArray(merged.aap.auth.keycloak_oidc.organization_maps)) {
       merged.aap.auth.keycloak_oidc.organization_maps = [
         { organization: mergeOrg || 'ADO', groups: '', role: 'Organization Member' }
       ];
     }
+    if (!merged.aap.onboard) {
+      merged.aap.onboard = JSON.parse(JSON.stringify(defaults.aap.onboard || { enabled: false, tenants: [] }));
+    }
+    if (merged.aap.onboard.enabled === undefined) merged.aap.onboard.enabled = false;
+    if (
+      merged.aap.onboard.enabled === true
+      && activeOnboardTenants(merged.aap).length === 0
+    ) {
+      merged.aap.onboard.enabled = false;
+    }
+    if (!merged.aap.onboard.keycloak) {
+      merged.aap.onboard.keycloak = defaultOnboardKeycloak(merged.aap);
+    } else {
+      const kcDefaults = defaultOnboardKeycloak(merged.aap);
+      if (!String(merged.aap.onboard.keycloak.base_url || '').trim()) {
+        merged.aap.onboard.keycloak.base_url = kcDefaults.base_url;
+      }
+      if (!String(merged.aap.onboard.keycloak.realm || '').trim()) {
+        merged.aap.onboard.keycloak.realm = kcDefaults.realm;
+      }
+      if (merged.aap.onboard.keycloak.create_groups === undefined) {
+        merged.aap.onboard.keycloak.create_groups = false;
+      }
+      if (merged.aap.onboard.keycloak.verify_ssl === undefined) {
+        merged.aap.onboard.keycloak.verify_ssl = false;
+      }
+      if (!String(merged.aap.onboard.keycloak.admin_username || '').trim()) {
+        merged.aap.onboard.keycloak.admin_username = 'admin';
+      }
+    }
+    if (!Array.isArray(merged.aap.onboard.tenants)) merged.aap.onboard.tenants = [];
     if (merged.aap.galaxy_hub_token === undefined) merged.aap.galaxy_hub_token = '';
     if (!merged.aap.galaxy_user_account) {
       merged.aap.galaxy_user_account = { ...defaults.aap.galaxy_user_account };
@@ -2257,6 +2551,8 @@ function App() {
     }
   };
 
+  const standaloneRun = aapStandaloneRun(data);
+
   const buildPreflightPayload = () => {
     const payload = hydrateSelectedComponentConfigs(pruneInactiveComponentApps(data));
     const selectedApps = selectedComponentAppsFrom(payload);
@@ -2293,6 +2589,15 @@ function App() {
       payload.aap.machine_credential.name = normalizeOrgScopedName(payload.aap.machine_credential.name, org, 'machine');
       payload.aap.hub_mark_ado_validated = payload.aap.hub_publish_ado_collection === true;
       if (payload.aap.hub_force_ado_collection_update === undefined) payload.aap.hub_force_ado_collection_update = false;
+      syncAapStandaloneFields(payload.aap);
+      if (payload.aap.standalone_run === true) {
+        payload.components = [];
+        delete payload.component;
+        payload.platform = [];
+        payload.selected_component_apps = [];
+        payload.component_config = {};
+        payload.component_options = {};
+      }
       if (payload.aap.hub_update_collection_only === undefined) payload.aap.hub_update_collection_only = false;
       if (payload.aap.hub_push_ee === undefined) payload.aap.hub_push_ee = false;
       if (payload.aap.hub_ee_pull === undefined) payload.aap.hub_ee_pull = false;
@@ -2338,16 +2643,43 @@ function App() {
           description: payload.aap.hub_ee_description
         }
       };
-      if (payload.aap.hub_update_collection_only === true) {
-        // Hub-only run: collection and/or EE push without scaffolding other work.
-        // Do not force collection publish/overwrite — those stay explicit checkboxes.
-        payload.components = [];
-        delete payload.component;
-        payload.platform = [];
-        payload.selected_component_apps = [];
-        payload.component_config = {};
-        payload.component_options = {};
+      // Populate galaxy_hub_token and all galaxy credential tokens from the best
+      // available token (galaxy_hub_token → oauth_token → admin_password) so the
+      // downloaded JSON is self-contained and doesn't rely on server-side fallback.
+      if (payload.aap.galaxy_setup_enabled === true) {
+        const generalToken = String(payload.aap.oauth_token || '').trim();
+        const generalPassword = String(payload.aap.admin_password || '').trim();
+        const generalUser = String(payload.aap.admin_username || 'admin').trim() || 'admin';
+        const sharedHubToken = String(payload.aap.galaxy_hub_token || '').trim()
+          || generalToken
+          || generalPassword;
+        if (!String(payload.aap.galaxy_hub_token || '').trim() && sharedHubToken) {
+          payload.aap.galaxy_hub_token = sharedHubToken;
+        }
+        if (Array.isArray(payload.aap.galaxy_credentials)) {
+          payload.aap.galaxy_credentials = payload.aap.galaxy_credentials.map((cred) => {
+            if (!cred || typeof cred !== 'object') return cred;
+            const next = { ...cred };
+            if (!String(next.token || '').trim()) next.token = sharedHubToken;
+            return next;
+          });
+        }
+        const registry = payload.aap.container_registry_credential;
+        if (registry && typeof registry === 'object' && registry.enabled !== false) {
+          if (!String(registry.username || '').trim()) registry.username = generalUser;
+          if (!String(registry.password || '').trim()) {
+            registry.password = sharedHubToken || generalPassword;
+          }
+          if (!String(registry.host || '').trim()) {
+            registry.host = payload.aap.hub_hostname
+              || String(payload.aap.hostname || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+          }
+          if (payload.aap.skip_tls_verify === true && registry.verify_ssl === true) {
+            registry.verify_ssl = false;
+          }
+        }
       }
+
       payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
         const { id, ...credentialPayload } = credential;
         return credentialPayload;
@@ -2488,6 +2820,8 @@ function App() {
       payload.jira = { ...(payload.jira || {}), enabled: false };
     }
 
+    stripInactiveAapSections(payload);
+
     return payload;
   };
 
@@ -2541,7 +2875,7 @@ function App() {
     const vFlag = verbosity > 0 ? `-${'v'.repeat(Math.min(verbosity, 6))} ` : '';
     const skipTls = data?.aap?.skip_tls_verify === true ? 'true' : 'false';
     const encryptVault = data?.vault?.encrypt !== false ? 'true' : 'false';
-    const hubOnly = data?.aap?.hub_update_collection_only === true;
+    const hubOnly = aapStandaloneRun(data);
     const generatePlaybooks = hubOnly ? 'false' : 'true';
     const gitSkipTls = data?.git?.skip_tls_verify !== false ? 'false' : 'true';
     const extraArgs = String(data?.ansible?.extra_args || '').trim();
@@ -2598,6 +2932,18 @@ function App() {
       copy.components = next;
       copy.component = next.length === 0 ? '' : next[0];
 
+      if (!copy.component_options) copy.component_options = {};
+
+      if (!wasSelected) {
+        if (component === 'all') {
+          copy.component_options = Object.fromEntries(
+            Object.keys(componentOptionDefaults).map(key => [key, []])
+          );
+        } else if (componentOptionDefaults[component]) {
+          copy.component_options[component] = [];
+        }
+      }
+
       if (!copy.component_apps) copy.component_apps = {};
       if (component === 'provision') {
         if (!wasSelected) {
@@ -2613,6 +2959,8 @@ function App() {
 
       if (!copy.jira) copy.jira = {};
       copy.jira.enabled = next.includes('all') || next.includes('jira');
+
+      clearStandaloneWhenComponentsSelected(copy);
 
       return copy;
     });
@@ -2661,6 +3009,13 @@ function App() {
 
       copy.components = nextComponents;
       copy.component = nextComponents.includes('all') ? 'all' : nextComponents[0];
+
+      if (!isSelected && componentOptionDefaults[app]) {
+        if (!copy.component_options) copy.component_options = {};
+        copy.component_options[app] = [];
+      }
+
+      clearStandaloneWhenComponentsSelected(copy);
 
       return copy;
     });
@@ -8262,7 +8617,8 @@ ${vaultYaml}
                     <Tab eventKey="license" title="License" />
                     <Tab eventKey="hub" title="Hub" />
                     <Tab eventKey="galaxy" title="Galaxy" />
-                    <Tab eventKey="keycloak" title="Keycloak" />
+                    <Tab eventKey="authentication" title="Add authentication" />
+                    <Tab eventKey="onboard" title="Onboard" />
                   </Tabs>
                   <br />
                   {activeAapConfigTab === 'install' && (
@@ -8410,6 +8766,35 @@ ${vaultYaml}
                         </FormGroup>
                       </GridItem>
                       <GridItem span={12}>
+                        <FormGroup label="Standalone AAP run">
+                          <Checkbox
+                            id="aap-standalone-run"
+                            label="Run AAP tabs only (skip OpenShift/RHEL component playbooks and full Contoller scaffolding)"
+                            isChecked={standaloneRun}
+                            onChange={(_, v) => setAapStandaloneRun(v)}
+                          />
+                          <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 0' }}>
+                            Off by default. Check this for Hub/Galaxy/Add authentication/Onboard-only runs with no
+                            OpenShift/RHEL components selected. Selecting any component above automatically
+                            turns this off and runs a full bootstrap instead.
+                          </div>
+                          {standaloneRun && !aapStandaloneWorkSelected(data) && (
+                            <div style={{ color: '#f0ab00', fontSize: '13px', margin: '6px 0 0' }}>
+                              Standalone is on but no AAP tab work is selected yet. Enable something on
+                              Install AAP, License, Hub, Galaxy, or Add authentication before Run Bootstrap.
+                            </div>
+                          )}
+                          {!standaloneRun
+                            && data.aap?.enabled !== false
+                            && (!Array.isArray(data.components) || data.components.length === 0) && (
+                            <div style={{ color: '#f0ab00', fontSize: '13px', margin: '6px 0 0' }}>
+                              No components selected — check Standalone AAP run for Hub/Galaxy/Keycloak-only
+                              work, or select components above for a full bootstrap.
+                            </div>
+                          )}
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={12}>
                         <Button
                           variant="secondary"
                           isDisabled={aapPingBusy || !String(data.aap?.hostname || '').trim()}
@@ -8418,7 +8803,19 @@ ${vaultYaml}
                           {aapPingBusy ? 'Testing AAP…' : 'Test AAP connection'}
                         </Button>
                         {aapPingMessage && (
-                          <p style={{ margin: '8px 0 0', color: mutedTextColor }}>{aapPingMessage}</p>
+                          <p
+                            style={{
+                              margin: '8px 0 0',
+                              color: aapPingStatus === 'success'
+                                ? '#3e8635'
+                                : aapPingStatus === 'error'
+                                  ? '#c9190b'
+                                  : mutedTextColor,
+                              fontWeight: aapPingStatus ? 600 : 400
+                            }}
+                          >
+                            {aapPingMessage}
+                          </p>
                         )}
                       </GridItem>
                     </Grid>
@@ -8428,8 +8825,8 @@ ${vaultYaml}
                       <GridItem span={12}>
                         <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
                           Publish the <code>infra.ado</code> collection and/or push the ADO execution
-                          environment image into Private Automation Hub. You can run this tab by itself
-                          (collection, EE, or both) without selecting OpenShift/RHEL components.
+                          environment image into Private Automation Hub. Check General → Standalone AAP run
+                          to apply Hub/Galaxy/Add authentication/Onboard without OpenShift/RHEL component playbooks.
                         </div>
                         <div
                           style={{
@@ -8468,7 +8865,7 @@ ${vaultYaml}
                               hostnameFromUrl(data.aap.hostname)
                               || 'aap.example.com'
                             }
-                            isRequired={data.aap.hub_update_collection_only === true}
+                            isRequired={standaloneRun && (data.aap.hub_publish_ado_collection || data.aap.hub_push_ee)}
                           />
                           <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 0' }}>
                             API/registry host for Private Automation Hub (host only, no path). Used for
@@ -8501,50 +8898,6 @@ ${vaultYaml}
                         </FormGroup>
                       </GridItem>
                       <GridItem span={12}>
-                        <FormGroup label="Standalone Hub run">
-                          <Checkbox
-                            label="Run Hub updates only (skip playbooks, Contoller config, and other components)"
-                            isChecked={data.aap.hub_update_collection_only}
-                            isDisabled={
-                              !data.aap.hub_publish_ado_collection && !data.aap.hub_push_ee
-                            }
-                            onChange={(_, v) => {
-                              setData(prev => {
-                                const copy = JSON.parse(JSON.stringify(prev));
-                                if (!copy.aap) copy.aap = {};
-                                copy.aap.hub_update_collection_only = v === true;
-                                if (v) {
-                                  // Hub-only still creates the General org if missing, and
-                                  // Galaxy/registry creds so Contoller can pull Hub EE.
-                                  copy.aap.galaxy_setup_enabled = true;
-                                  const org = copy.aap.organization || 'ADO';
-                                  if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
-                                    copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
-                                      org,
-                                      copy.aap.hostname || ''
-                                    );
-                                  }
-                                  if (!copy.aap.container_registry_credential) {
-                                    copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
-                                      org,
-                                      copy.aap.hostname || ''
-                                    );
-                                  }
-                                }
-                                return copy;
-                              });
-                            }}
-                          />
-                          <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 0' }}>
-                            Runs only Hub work on this tab (collection and/or EE push). Still creates
-                            the General organization if it does not exist, and applies Galaxy/Hub
-                            registry credentials needed for Contoller EE pulls. Skips playbook
-                            scaffolding and full Contoller object apply. Enable collection and/or EE
-                            push (both get Galaxy credentials checked), check this, then Run Bootstrap.
-                          </div>
-                        </FormGroup>
-                      </GridItem>
-                      <GridItem span={12}>
                         <FormGroup label="Execution environment (optional)">
                           <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
                             Pushes ADO EE into Private Automation Hub with <code>skopeo</code>
@@ -8555,6 +8908,10 @@ ${vaultYaml}
                             <code>docker-archive:/opt/ado-ee/ado-ee.docker.tar</code> — no host podman
                             socket and no runtime internet. Registry login uses the AAP admin
                             password / token from this form (lab Hub only).
+                            Without ADO EE, Contoller jobs need Galaxy credentials already on the
+                            organization so project sync can install vendored{' '}
+                            <code>infra.ado</code> (Galaxy tab creates them if missing; leave it off
+                            if they already exist in Contoller).
                           </p>
                           <Checkbox
                             id="aap-hub-push-ee"
@@ -8730,6 +9087,24 @@ ${vaultYaml}
                             is platform-global (not org-owned); bootstrap attaches it and will not
                             try to create a duplicate.
                           </p>
+                          <div
+                            style={{
+                              marginBottom: '12px',
+                              padding: '8px 10px',
+                              border: '1px solid #f0ad4e',
+                              borderRadius: '4px',
+                              background: 'rgba(240, 173, 78, 0.08)',
+                              color: textColor,
+                              fontSize: '13px'
+                            }}
+                          >
+                            Contoller only installs project <code>collections/requirements.yml</code>{' '}
+                            (vendored <code>infra.ado</code>) when the organization already has Galaxy
+                            credentials attached. If they are already on the org in Contoller, leave
+                            this off. Use this tab only to create/attach them. Stock EEs like{' '}
+                            <code>ee-supported-rhel9</code> do not ship <code>infra.ado</code>; ADO EE
+                            push is the other option.
+                          </div>
                           <Checkbox
                             id="aap-galaxy-setup-enabled"
                             label="Configure Galaxy credentials and attach them to the organization"
@@ -8826,6 +9201,9 @@ ${vaultYaml}
                             <p style={{ color: mutedTextColor, margin: '0 0 8px', fontSize: '13px' }}>
                               Organization Galaxy credential order: <strong>1</strong> is tried first
                               by Contoller, then 2, 3, … Use Move up/down or set the Order number.
+                              Order + &quot;Attach to organization&quot; set the full org search list.
+                              Unchecking <strong>Create</strong> skips creating/updating that
+                              credential this run; it still keeps its attach/order in the org list.
                             </p>
                           </GridItem>
                           {(data.aap.galaxy_credentials || []).map((credential, index) => (
@@ -8837,7 +9215,7 @@ ${vaultYaml}
                                       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                                         <Checkbox
                                           id={`aap-galaxy-cred-enabled-${index}`}
-                                          label={`Create ${credential.name || 'credential'}`}
+                                          label={`Create/update ${credential.name || 'credential'}`}
                                           isChecked={credential.enabled !== false}
                                           onChange={(_, v) => set(`aap.galaxy_credentials.${index}.enabled`, v)}
                                         />
@@ -8981,34 +9359,56 @@ ${vaultYaml}
                       )}
                     </Grid>
                   )}
-                  {activeAapConfigTab === 'keycloak' && (
+                  {activeAapConfigTab === 'authentication' && (
                     <div>
                       <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '12px' }}>
-                        Wire AAP Automation Gateway to Keycloak (OIDC) and map Keycloak groups to AAP
-                        organizations / superuser. Runs with full Controller bootstrap when Using AAP is on,
-                        same as Hub/Galaxy toggles — enable only what you need for this run.
+                        Configure Automation Gateway authentication methods (same as AAP Access Management →
+                        Authentication Methods). For auth-only runs, check General → Standalone AAP run and
+                        enable the method you need on a sub-tab below.
                       </div>
                       {!data.aap?.enabled && (
                         <div style={{ color: '#8a6d3b', fontSize: '13px', marginBottom: '12px' }}>
                           Turn on Using AAP (and set General hostname / admin) so bootstrap can apply Gateway auth.
                         </div>
                       )}
-                      <Checkbox
-                        id="aap-keycloak-oidc-enabled"
-                        label="Configure Keycloak OIDC authenticator on next bootstrap"
-                        isChecked={data.aap?.auth?.keycloak_oidc?.enabled === true}
-                        onChange={(_, v) => {
-                          setData(prev => {
-                            const copy = JSON.parse(JSON.stringify(prev));
-                            if (!copy.aap) copy.aap = {};
-                            if (!copy.aap.auth) copy.aap.auth = {};
-                            if (!copy.aap.auth.keycloak_oidc) copy.aap.auth.keycloak_oidc = {};
+                      <Tabs activeKey={activeAapAuthTab} onSelect={(_, key) => setActiveAapAuthTab(key)}>
+                        <Tab eventKey="keycloak" title="Keycloak" />
+                      </Tabs>
+                      <br />
+                      {activeAapAuthTab === 'keycloak' && (
+                        <div>
+                          <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '12px' }}>
+                            Wire AAP Automation Gateway to Keycloak (OIDC) and map Keycloak groups to AAP
+                            organizations / superuser. Leave Hub collection publish off on the Hub tab unless
+                            you need a refresh.
+                            <br />
+                            <br />
+                            Assumes Keycloak or Red Hat build of Keycloak (RHBK) is already running and
+                            configured: realm, OIDC client (e.g. <code>aap-gateway</code> with client
+                            authentication), client secret, valid redirect URIs and web origins for your AAP
+                            hostname (typically <code>https://your-aap-host/*</code> for redirect URIs and the
+                            origin without <code>/*</code> for web origins), group mappers / groups claim (<code>Group</code>), Keycloak 26+ lightweight-token mappers (<code>aud</code> and <code>username</code> on the client dedicated scope), and any groups you reference below (superuser and
+                            organization maps). On lab clusters with self-signed ingress certs, keep
+                            &quot;Skip TLS verify for Gateway → Keycloak&quot; checked so bootstrap sets{' '}
+                            <code>VERIFY_SSL: false</code> for the token exchange. Preflight only registers
+                            the Gateway authenticator — it does not install or configure Keycloak.
+                          </div>
+                          <Checkbox
+                            id="aap-keycloak-oidc-enabled"
+                            label="Configure Keycloak OIDC authenticator on next bootstrap"
+                            isChecked={data.aap?.auth?.keycloak_oidc?.enabled === true}
+                            onChange={(_, v) => {
+                              setData(prev => {
+                                const copy = JSON.parse(JSON.stringify(prev));
+                                if (!copy.aap) copy.aap = {};
+                                if (!copy.aap.auth) copy.aap.auth = {};
+                                if (!copy.aap.auth.keycloak_oidc) copy.aap.auth.keycloak_oidc = {};
                             copy.aap.auth.keycloak_oidc.enabled = v === true;
                             return copy;
-                          });
-                        }}
-                      />
-                      {data.aap?.auth?.keycloak_oidc?.enabled === true && (
+                              });
+                            }}
+                          />
+                          {data.aap?.auth?.keycloak_oidc?.enabled === true && (
                         <Grid hasGutter style={{ marginTop: '12px' }}>
                           <GridItem span={6}>
                             <FormGroup label="Authenticator name">
@@ -9063,12 +9463,83 @@ ${vaultYaml}
                             </FormGroup>
                           </GridItem>
                           <GridItem span={12}>
-                            <FormGroup label="Realm public key (optional)">
+                            <Checkbox
+                              id="aap-keycloak-oidc-skip-tls-verify"
+                              label="Skip TLS verify for Gateway → Keycloak (sets VERIFY_SSL: false)"
+                              isChecked={data.aap.auth.keycloak_oidc.verify_ssl !== true}
+                              onChange={(_, v) => set('aap.auth.keycloak_oidc.verify_ssl', v ? false : true)}
+                            />
+                            <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '4px' }}>
+                              Required on most lab/OpenShift clusters where Keycloak uses a self-signed ingress
+                              certificate. Uncheck only when the gateway pod trusts Keycloak&apos;s TLS chain.
+                            </div>
+                          </GridItem>
+                          <GridItem span={12}>
+                            <FormGroup
+                              label={labelWithHelp(
+                                'Realm public key (required)',
+                                (
+                                  <div>
+                                    <p style={{ margin: '0 0 8px' }}>
+                                      Not the TLS/HTTPS certificate and not the OIDC client secret. This is the
+                                      realm RS256 signing public key — a long base64 string AAP Gateway uses to
+                                      verify JWT access tokens from Keycloak.
+                                    </p>
+                                    <p style={{ margin: '0 0 8px' }}>
+                                      <strong>Auto:</strong> fill Authorization URL above, then click
+                                      {' '}&quot;Fetch from Keycloak&quot; (uses General → skip TLS if checked).
+                                    </p>
+                                    <p style={{ margin: '0 0 8px' }}>
+                                      <strong>Manual:</strong> Keycloak admin → Realm Settings → Keys → RS256
+                                      → Public key. Or from a shell:
+                                    </p>
+                                    <pre
+                                      style={{
+                                        margin: 0,
+                                        padding: '8px',
+                                        fontSize: '12px',
+                                        whiteSpace: 'pre-wrap',
+                                        wordBreak: 'break-all',
+                                        background: isDark ? '#1b1d21' : '#f0f0f0',
+                                        borderRadius: '4px'
+                                      }}
+                                    >
+                                      {keycloakRealmPublicKeyCurlHint(
+                                        data.aap.auth.keycloak_oidc.authorization_url,
+                                        data.aap.auth.keycloak_oidc.access_token_url
+                                      )}
+                                    </pre>
+                                  </div>
+                                )
+                              )}
+                              isRequired
+                            >
+                              <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                                <Button
+                                  variant="secondary"
+                                  isDisabled={
+                                    keycloakPublicKeyBusy
+                                    || (
+                                      !keycloakRealmUrlFromOidcUrl(data.aap.auth.keycloak_oidc.authorization_url)
+                                      && !keycloakRealmUrlFromOidcUrl(data.aap.auth.keycloak_oidc.access_token_url)
+                                    )
+                                  }
+                                  onClick={fetchKeycloakRealmPublicKey}
+                                >
+                                  {keycloakPublicKeyBusy ? 'Fetching from Keycloak…' : 'Fetch from Keycloak'}
+                                </Button>
+                              </div>
                               <TextArea
                                 value={data.aap.auth.keycloak_oidc.public_key || ''}
                                 onChange={(_, v) => set('aap.auth.keycloak_oidc.public_key', v)}
                                 rows={3}
+                                placeholder="Long base64 RS256 public key (or use Fetch from Keycloak)"
                               />
+                              {keycloakPublicKeyMessage && (
+                                <p style={{ margin: '8px 0 0', color: mutedTextColor }}>
+                                  {keycloakPublicKeyMessage}
+                                </p>
+                              )}
                             </FormGroup>
                           </GridItem>
                           <GridItem span={4}>
@@ -9198,6 +9669,394 @@ ${vaultYaml}
                             </Button>
                           </GridItem>
                         </Grid>
+                      )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {activeAapConfigTab === 'onboard' && (
+                    <div>
+                      <Checkbox
+                        id="onboard-enabled"
+                        label="Enable tenant onboarding"
+                        isChecked={data.aap?.onboard?.enabled === true}
+                        onChange={(_, v) => set('aap.onboard.enabled', v === true)}
+                      />
+                      <div style={{ color: mutedTextColor, fontSize: '13px', margin: '8px 0 12px' }}>
+                        Off by default. Turn on only when you need org/team maps and optional Keycloak
+                        group creation — otherwise onboarding is omitted from Download JSON.
+                      </div>
+                      {data.aap?.onboard?.enabled === true && (
+                      <>
+                      <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '12px' }}>
+                        Onboard tenant organizations with Keycloak group → AAP role maps. Bootstrap
+                        creates each organization (optional), applies Gateway authenticator maps for
+                        org admins and developers, and optionally maps developers to a team with
+                        Execute access so they can run jobs only inside that org.
+                        <br />
+                        <br />
+                        Requires <strong>Add authentication → Keycloak</strong> OIDC enabled.
+                        Create matching groups in Keycloak (or your IdP sync) before users log in —
+                        e.g. <code>aap-acme-admins</code> and <code>aap-acme-developers</code>.
+                        Or check <strong>Create Keycloak groups on bootstrap</strong> below to have
+                        bootstrap create them via the Keycloak admin API.
+                        Do not add tenant users to platform superuser groups unless they should
+                        administer all of AAP.
+                      </div>
+                      <Card style={{ ...cardStyle, marginBottom: '12px' }}>
+                        <CardBody>
+                          <Title headingLevel="h3" style={{ margin: '0 0 8px', fontSize: '16px' }}>
+                            Keycloak
+                          </Title>
+                          <Grid hasGutter>
+                            <GridItem span={12}>
+                              <Checkbox
+                                id="onboard-keycloak-create-groups"
+                                label="Create Keycloak groups on bootstrap"
+                                isChecked={data.aap?.onboard?.keycloak?.create_groups !== false}
+                                onChange={(_, v) => set('aap.onboard.keycloak.create_groups', v === true)}
+                              />
+                            </GridItem>
+                            {data.aap?.onboard?.keycloak?.create_groups !== false && (
+                              <>
+                                <GridItem span={6}>
+                                  <FormGroup label="Keycloak base URL">
+                                    <TextInput
+                                      value={data.aap.onboard.keycloak.base_url || ''}
+                                      onChange={(_, v) => set('aap.onboard.keycloak.base_url', v)}
+                                      placeholder="https://keycloak.apps.ocp.prod.rhlab"
+                                    />
+                                  </FormGroup>
+                                </GridItem>
+                                <GridItem span={6}>
+                                  <FormGroup label="Realm">
+                                    <TextInput
+                                      value={data.aap.onboard.keycloak.realm || ''}
+                                      onChange={(_, v) => set('aap.onboard.keycloak.realm', v)}
+                                      placeholder="rhlab"
+                                    />
+                                  </FormGroup>
+                                </GridItem>
+                                <GridItem span={6}>
+                                  <FormGroup label="Admin username">
+                                    <TextInput
+                                      value={data.aap.onboard.keycloak.admin_username || 'admin'}
+                                      onChange={(_, v) => set('aap.onboard.keycloak.admin_username', v)}
+                                    />
+                                  </FormGroup>
+                                </GridItem>
+                                <GridItem span={6}>
+                                  <FormGroup label="Admin password">
+                                    <TextInput
+                                      type="password"
+                                      value={data.aap.onboard.keycloak.admin_password || ''}
+                                      onChange={(_, v) => set('aap.onboard.keycloak.admin_password', v)}
+                                    />
+                                  </FormGroup>
+                                </GridItem>
+                                <GridItem span={12}>
+                                  <Checkbox
+                                    id="onboard-keycloak-verify-ssl"
+                                    label="Verify TLS to Keycloak admin API"
+                                    isChecked={data.aap.onboard.keycloak.verify_ssl === true}
+                                    onChange={(_, v) => set('aap.onboard.keycloak.verify_ssl', v === true)}
+                                  />
+                                  <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '4px' }}>
+                                    Leave unchecked on lab clusters with self-signed ingress certs.
+                                  </div>
+                                </GridItem>
+                                <GridItem span={12}>
+                                  <Button
+                                    variant="secondary"
+                                    onClick={() => {
+                                      setData(prev => {
+                                        const copy = JSON.parse(JSON.stringify(prev));
+                                        if (!copy.aap.onboard) copy.aap.onboard = { tenants: [] };
+                                        copy.aap.onboard.keycloak = {
+                                          ...(copy.aap.onboard.keycloak || {}),
+                                          ...defaultOnboardKeycloak(copy.aap)
+                                        };
+                                        return copy;
+                                      });
+                                    }}
+                                  >
+                                    Fill from Add authentication → Keycloak URLs
+                                  </Button>
+                                </GridItem>
+                              </>
+                            )}
+                          </Grid>
+                        </CardBody>
+                      </Card>
+                      {data.aap?.auth?.keycloak_oidc?.enabled !== true && (
+                        <div style={{ color: '#8a6d3b', fontSize: '13px', marginBottom: '12px' }}>
+                          Enable Keycloak OIDC on Add authentication before bootstrap can apply onboard maps.
+                        </div>
+                      )}
+                      {(data.aap?.onboard?.tenants || []).map((tenant, index) => (
+                        <Card key={`onboard-tenant-${index}`} style={{ ...cardStyle, marginBottom: '12px' }}>
+                          <CardBody>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                              <Title headingLevel="h3" style={{ margin: 0, fontSize: '16px' }}>
+                                {tenant.organization || `Tenant ${index + 1}`}
+                              </Title>
+                              <Button
+                                variant="plain"
+                                aria-label="Remove onboard tenant"
+                                onClick={() => {
+                                  setData(prev => {
+                                    const copy = JSON.parse(JSON.stringify(prev));
+                                    if (!copy.aap.onboard) copy.aap.onboard = { tenants: [] };
+                                    copy.aap.onboard.tenants = (copy.aap.onboard.tenants || []).filter((_, i) => i !== index);
+                                    return copy;
+                                  });
+                                }}
+                              >
+                                Remove
+                              </Button>
+                            </div>
+                            <Grid hasGutter>
+                              <GridItem span={12}>
+                                <Checkbox
+                                  id={`onboard-tenant-enabled-${index}`}
+                                  label="Include this tenant on next bootstrap"
+                                  isChecked={tenant.enabled !== false}
+                                  onChange={(_, v) => {
+                                    setData(prev => {
+                                      const copy = JSON.parse(JSON.stringify(prev));
+                                      if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                      copy.aap.onboard.tenants[index].enabled = v === true;
+                                      return copy;
+                                    });
+                                  }}
+                                />
+                              </GridItem>
+                              <GridItem span={6}>
+                                <FormGroup label="AAP organization name" isRequired>
+                                  <TextInput
+                                    value={tenant.organization || ''}
+                                    onChange={(_, v) => {
+                                      setData(prev => {
+                                        const copy = JSON.parse(JSON.stringify(prev));
+                                        if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                        const row = copy.aap.onboard.tenants[index];
+                                        row.organization = v;
+                                        if (!String(row.description || '').trim() || row.description === `${row.organization || ''} tenant`) {
+                                          row.description = `${v} tenant`;
+                                        }
+                                        const slug = slugifyOnboardOrg(v);
+                                        if (!row.admin_groups || /^aap-.*-admins$/.test(String(row.admin_groups))) {
+                                          row.admin_groups = `aap-${slug}-admins`;
+                                        }
+                                        if (!row.developer_groups || /^aap-.*-developers$/.test(String(row.developer_groups))) {
+                                          row.developer_groups = `aap-${slug}-developers`;
+                                        }
+                                        if (!row.team_name || /-Developers$/.test(String(row.team_name))) {
+                                          row.team_name = `${v}-Developers`;
+                                        }
+                                        return copy;
+                                      });
+                                    }}
+                                    placeholder="Acme"
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={6}>
+                                <FormGroup label="Description">
+                                  <TextInput
+                                    value={tenant.description || ''}
+                                    onChange={(_, v) => {
+                                      setData(prev => {
+                                        const copy = JSON.parse(JSON.stringify(prev));
+                                        if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                        copy.aap.onboard.tenants[index].description = v;
+                                        return copy;
+                                      });
+                                    }}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={12}>
+                                <Checkbox
+                                  id={`onboard-create-keycloak-groups-${index}`}
+                                  label="Create admin/developer Keycloak groups for this tenant"
+                                  isChecked={
+                                    data.aap?.onboard?.keycloak?.create_groups !== false
+                                    && tenant.create_keycloak_groups !== false
+                                  }
+                                  isDisabled={data.aap?.onboard?.keycloak?.create_groups === false}
+                                  onChange={(_, v) => {
+                                    setData(prev => {
+                                      const copy = JSON.parse(JSON.stringify(prev));
+                                      if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                      copy.aap.onboard.tenants[index].create_keycloak_groups = v === true;
+                                      return copy;
+                                    });
+                                  }}
+                                />
+                              </GridItem>
+                              <GridItem span={12}>
+                                <Checkbox
+                                  id={`onboard-create-org-${index}`}
+                                  label="Create AAP organization on bootstrap"
+                                  isChecked={tenant.create_organization !== false}
+                                  onChange={(_, v) => {
+                                    setData(prev => {
+                                      const copy = JSON.parse(JSON.stringify(prev));
+                                      if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                      copy.aap.onboard.tenants[index].create_organization = v === true;
+                                      return copy;
+                                    });
+                                  }}
+                                />
+                              </GridItem>
+                              <GridItem span={6}>
+                                <FormGroup label="Admin Keycloak group(s)" isRequired>
+                                  <TextInput
+                                    value={tenant.admin_groups || ''}
+                                    onChange={(_, v) => {
+                                      setData(prev => {
+                                        const copy = JSON.parse(JSON.stringify(prev));
+                                        if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                        copy.aap.onboard.tenants[index].admin_groups = v;
+                                        return copy;
+                                      });
+                                    }}
+                                    placeholder="aap-acme-admins"
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={6}>
+                                <FormGroup label="Admin org role">
+                                  <select
+                                    value={tenant.admin_role || 'Organization Admin'}
+                                    onChange={e => {
+                                      setData(prev => {
+                                        const copy = JSON.parse(JSON.stringify(prev));
+                                        if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                        copy.aap.onboard.tenants[index].admin_role = e.target.value;
+                                        return copy;
+                                      });
+                                    }}
+                                    style={{ width: '100%', padding: '8px' }}
+                                  >
+                                    {AAP_ORG_ROLES.map(role => (
+                                      <option key={`admin-role-${role}`} value={role}>{role}</option>
+                                    ))}
+                                  </select>
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={6}>
+                                <FormGroup label="Developer Keycloak group(s)" isRequired>
+                                  <TextInput
+                                    value={tenant.developer_groups || ''}
+                                    onChange={(_, v) => {
+                                      setData(prev => {
+                                        const copy = JSON.parse(JSON.stringify(prev));
+                                        if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                        copy.aap.onboard.tenants[index].developer_groups = v;
+                                        return copy;
+                                      });
+                                    }}
+                                    placeholder="aap-acme-developers"
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={6}>
+                                <FormGroup label="Developer org role">
+                                  <select
+                                    value={tenant.developer_role || 'Organization Member'}
+                                    onChange={e => {
+                                      setData(prev => {
+                                        const copy = JSON.parse(JSON.stringify(prev));
+                                        if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                        copy.aap.onboard.tenants[index].developer_role = e.target.value;
+                                        return copy;
+                                      });
+                                    }}
+                                    style={{ width: '100%', padding: '8px' }}
+                                  >
+                                    {AAP_ORG_ROLES.map(role => (
+                                      <option key={`dev-role-${role}`} value={role}>{role}</option>
+                                    ))}
+                                  </select>
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={12}>
+                                <Checkbox
+                                  id={`onboard-create-team-${index}`}
+                                  label="Map developers to a team (for job execute access)"
+                                  isChecked={tenant.create_team !== false}
+                                  onChange={(_, v) => {
+                                    setData(prev => {
+                                      const copy = JSON.parse(JSON.stringify(prev));
+                                      if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                      copy.aap.onboard.tenants[index].create_team = v === true;
+                                      return copy;
+                                    });
+                                  }}
+                                />
+                              </GridItem>
+                              {tenant.create_team !== false && (
+                                <>
+                                  <GridItem span={6}>
+                                    <FormGroup label="Team name">
+                                      <TextInput
+                                        value={tenant.team_name || ''}
+                                        onChange={(_, v) => {
+                                          setData(prev => {
+                                            const copy = JSON.parse(JSON.stringify(prev));
+                                            if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                            copy.aap.onboard.tenants[index].team_name = v;
+                                            return copy;
+                                          });
+                                        }}
+                                        placeholder="Acme-Developers"
+                                      />
+                                    </FormGroup>
+                                  </GridItem>
+                                  <GridItem span={6}>
+                                    <FormGroup label="Team role">
+                                      <select
+                                        value={tenant.team_role || 'Execute'}
+                                        onChange={e => {
+                                          setData(prev => {
+                                            const copy = JSON.parse(JSON.stringify(prev));
+                                            if (!copy.aap.onboard?.tenants?.[index]) return copy;
+                                            copy.aap.onboard.tenants[index].team_role = e.target.value;
+                                            return copy;
+                                          });
+                                        }}
+                                        style={{ width: '100%', padding: '8px' }}
+                                      >
+                                        {AAP_TEAM_ROLES.map(role => (
+                                          <option key={`team-role-${role}`} value={role}>{role}</option>
+                                        ))}
+                                      </select>
+                                    </FormGroup>
+                                  </GridItem>
+                                </>
+                              )}
+                            </Grid>
+                          </CardBody>
+                        </Card>
+                      ))}
+                      <Button
+                        variant="secondary"
+                        onClick={() => {
+                          setData(prev => {
+                            const copy = JSON.parse(JSON.stringify(prev));
+                            if (!copy.aap.onboard) copy.aap.onboard = { enabled: false, tenants: [] };
+                            if (!Array.isArray(copy.aap.onboard.tenants)) copy.aap.onboard.tenants = [];
+                            copy.aap.onboard.enabled = true;
+                            copy.aap.onboard.tenants.push(defaultOnboardTenant(`Tenant-${copy.aap.onboard.tenants.length + 1}`));
+                            return copy;
+                          });
+                        }}
+                      >
+                        Add tenant organization
+                      </Button>
+                      </>
                       )}
                     </div>
                   )}
