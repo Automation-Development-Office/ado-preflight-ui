@@ -41,7 +41,7 @@ COPY docker/run_smoke_test.yml /opt/ado-ee/run_smoke_test.yml
 
 RUN set -eux; \
     mkdir -p /workspace /opt/ado-collections/extracted /opt/ado-ee; \
-    ado_archive="$(find /opt/ado-collections -maxdepth 1 -name 'infra-ado-*.tar.gz' | sort | tail -n 1)"; \
+    ado_archive="$(find /opt/ado-collections -maxdepth 1 -name 'infra-ado-*.tar.gz' | sort -V | tail -n 1)"; \
     if [ -n "$ado_archive" ]; then \
       tar -xzf "$ado_archive" -C /opt/ado-collections/extracted README.md roles docs galaxy.yml meta plugins || true; \
     fi; \
