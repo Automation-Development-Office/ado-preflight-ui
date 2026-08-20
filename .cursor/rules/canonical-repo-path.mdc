@@ -1,0 +1,24 @@
+---
+description: Canonical path for ADO preflight UI — never use the stale sibling copy
+alwaysApply: true
+---
+
+# ADO Preflight UI — canonical location
+
+**Always edit, build, and run from:**
+
+`/home/chelliot/openshift/git/github-ado/ado-preflight-ui`
+
+This is the git repo (`origin`: `Automation-Development-Office/ado-preflight-ui`).
+Run/rebuild with `./restart_pod.sh` from this directory (pod on `:8080`).
+
+**Never use:**
+
+`/home/chelliot/openshift/git/ado-preflight-ui`
+
+That path is a stale duplicate (not a git repo). Cursor workspace may list it by mistake;
+ignore it for all preflight UI work. Do not copy changes there — only to `github-ado/ado-preflight-ui`.
+
+Related ADO collection work stays in:
+
+`/home/chelliot/openshift/git/github-ado/ado`
