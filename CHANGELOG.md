@@ -9,6 +9,16 @@ changesets into `CHANGELOG.md` and open a PR that removes consumed files.
 
 Pending changes live in `.changeset/` until the next official GitHub Release.
 
+Notable pending items:
+
+- Thin **Airgap Architect** adapter (`POST /api/airgap-architect/map`) with Agent
+  Installer “Map to Airgap Architect” / handoff JSON download; optional
+  `AIRGAP_ARCHITECT_URL` remote generate.
+- Hub EE registry image default **`ado-ee`** (lowercase); Contoller EE name can
+  remain org-scoped (`ADO-ee`).
+- **GitLab** / **Grafana** standalone config panels (lab hostnames, passwords,
+  IP notes `192.168.0.65` / `.66`).
+
 ## 1.0.0 - 2026-07-11
 
 ### Added

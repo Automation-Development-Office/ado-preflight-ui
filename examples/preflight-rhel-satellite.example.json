@@ -1,0 +1,82 @@
+{
+  "environment": "prod",
+  "domain": "prod.rhlab",
+  "additional_environments": "",
+  "components": ["rhel"],
+  "component_apps": {
+    "openshift": [],
+    "rhel": ["rhel", "satellite"],
+    "patching": [],
+    "provision": []
+  },
+  "selected_component_apps": ["rhel", "satellite"],
+  "component_options": {
+    "rhel": ["compliance", "stig"],
+    "satellite": [
+      "satellite_server_install",
+      "satellite_client_tools",
+      "satellite_content_view",
+      "satellite_dynamic_inventory"
+    ]
+  },
+  "component_config": {
+    "rhel": {
+      "hostname": "rhel1.prod.rhlab",
+      "hosts": []
+    },
+    "satellite": {
+      "hostname": "https://satellite.prod.rhlab",
+      "organization": "ADO",
+      "activation_key": "rhel-ak",
+      "deployment_version": "6.19",
+      "location": "primary-dc",
+      "dynamic_inventory_enabled": true,
+      "validate_certs": false,
+      "service_account_username": "svc-satellite",
+      "service_account_password": "CHANGE_ME"
+    }
+  },
+  "aap": {
+    "enabled": true,
+    "hostname": "https://aap.prod.rhlab",
+    "version": "27",
+    "organization": "ADO",
+    "inventory": "ADO-inventory",
+    "project": "ADO-project",
+    "execution_environment": "ADO-ee",
+    "vault_credential_name": "ADO-vault",
+    "admin_username": "admin",
+    "admin_password": "CHANGE_ME",
+    "skip_tls_verify": true,
+    "machine_credential": {
+      "name": "ADO-machine",
+      "username": "cloud-user",
+      "ssh_key_data": "",
+      "ssh_key_unlock": "",
+      "become_method": "sudo",
+      "become_username": "root"
+    },
+    "vault_password": "CHANGE_ME"
+  },
+  "git": {
+    "scm_tool": "github",
+    "url": "https://github.com/example/ado-bootstrap.git",
+    "branch": "main",
+    "token": "",
+    "auto_push": false
+  },
+  "pre_installs": {
+    "install_aap": false,
+    "attach_aap_license": false,
+    "aap": {
+      "license_mode": "none"
+    }
+  },
+  "vault": {
+    "encrypt": true
+  },
+  "overwrite_generated": true,
+  "ansible": {
+    "extra_args": ""
+  }
+}

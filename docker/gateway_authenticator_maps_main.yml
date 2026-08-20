@@ -1,0 +1,32 @@
+---
+# Overlay: infra.aap_configuration 3.4.x uses async, but ansible.platform 2.7
+# authenticator_map action plugin does not support async.
+
+- name: Authenticator Map | Configuration # noqa fqcn[action-core]
+  ansible.platform.authenticator_map:
+    name: "{{ __gateway_authenticator_maps_item.name | mandatory }}"
+    new_name: "{{ __gateway_authenticator_maps_item.new_name | default(omit) }}"
+    authenticator: "{{ __gateway_authenticator_maps_item.authenticator | default(omit) }}"
+    new_authenticator: "{{ __gateway_authenticator_maps_item.new_authenticator | default(omit) }}"
+    revoke: "{{ __gateway_authenticator_maps_item.revoke | default(omit) }}"
+    map_type: "{{ __gateway_authenticator_maps_item.map_type | default(omit) }}"
+    team: "{{ __gateway_authenticator_maps_item.team | default(omit) }}"
+    organization: "{{ __gateway_authenticator_maps_item.organization | default(omit) }}"
+    role: "{{ __gateway_authenticator_maps_item.role | default(omit) }}"
+    triggers: "{{ __gateway_authenticator_maps_item.triggers | default(omit) }}"
+    order: "{{ __gateway_authenticator_maps_item.order | default(omit) }}"
+    state: "{{ __gateway_authenticator_maps_item.state | default(platform_state | default(omit, true)) }}"
+    gateway_hostname: "{{ aap_hostname | default(omit, true) }}"
+    gateway_username: "{{ aap_username | default(omit, true) }}"
+    gateway_password: "{{ aap_password | default(omit, true) }}"
+    gateway_token: "{{ aap_token | default(omit, true) }}"
+    gateway_request_timeout: "{{ aap_request_timeout | default(omit, true) }}"
+    gateway_validate_certs: "{{ aap_validate_certs | default(omit) }}"
+  loop: "{{ gateway_authenticator_maps }}"
+  loop_control:
+    loop_var: __gateway_authenticator_maps_item
+    label: "{{ __operation.verb }} AAP Platform Authenticator Maps {{ __gateway_authenticator_maps_item.name }}"
+    pause: "{{ gateway_authenticator_maps_loop_delay }}"
+  no_log: "{{ gateway_authenticator_maps_secure_logging }}"
+  vars:
+    __operation: "{{ operation_translate[__gateway_authenticator_maps_item.state | default(platform_state) | default('present')] }}"
