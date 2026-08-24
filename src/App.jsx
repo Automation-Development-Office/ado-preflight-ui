@@ -1105,19 +1105,6 @@ const defaults = {
       secret_access_key: '',
       session_token: ''
     },
-    ec2_ami_copy: {
-      source_region: 'us-east-1',
-      dest_region: 'us-west-2',
-      source_image_id: '',
-      name: '',
-      description: '',
-      wait: true,
-      wait_timeout: 600,
-      encrypted: false,
-      kms_key_id: '',
-      copy_image_tags: false,
-      tag_equality: false
-    },
     aws_instance: { hostname: '', storage: '', replicas: 1 },
     openshift_virt: {
       api_host: '',
@@ -2225,9 +2212,6 @@ function App() {
     if (component === 'aws') {
       return JSON.parse(JSON.stringify(defaults.component_config.aws));
     }
-    if (component === 'ec2_ami_copy') {
-      return JSON.parse(JSON.stringify(defaults.component_config.ec2_ami_copy));
-    }
 
     const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching'];
     const fallback = noReplicaComponents.includes(component)
@@ -2312,10 +2296,6 @@ function App() {
 
     if (components.includes('all') || components.includes('aws')) {
       allowedConfig.add('aws');
-      const awsAppsSelected = hydrated.component_apps?.aws || [];
-      if (components.includes('all') || awsAppsSelected.includes('ec2_ami_copy')) {
-        allowedConfig.add('ec2_ami_copy');
-      }
     }
 
     if (!hydrated.component_config) hydrated.component_config = {};
@@ -2622,10 +2602,6 @@ function App() {
     if (installAapRequested(payload)) allowedConfig.add('aap');
     if (selectedGroups.includes('all') || selectedGroups.includes('aws')) {
       allowedConfig.add('aws');
-      const awsAppsSelected = payload.component_apps?.aws || [];
-      if (selectedGroups.includes('all') || awsAppsSelected.includes('ec2_ami_copy')) {
-        allowedConfig.add('ec2_ami_copy');
-      }
     }
     const selectedConfig = {};
     const selectedOptions = {};
@@ -2903,7 +2879,7 @@ function App() {
         copy.component_config[component] || {}
       );
       if (copy.component_config[component].hostname === undefined) copy.component_config[component].hostname = '';
-      if (!['rhel', 'satellite', 'idm', 'compliance', 'stig', 'aws', 'ec2_ami_copy', 'openshift_virt'].includes(component) && copy.component_config[component].storage === undefined) {
+      if (!['rhel', 'satellite', 'idm', 'compliance', 'stig', 'aws', 'openshift_virt'].includes(component) && copy.component_config[component].storage === undefined) {
         copy.component_config[component].storage = '';
       }
       if (component === 'idm') {
@@ -4127,20 +4103,6 @@ function App() {
     accessKeyId: 'AWS access key ID stored in vault_aws.yml (shared across AWS bootstrap jobs).',
     secretAccessKey: 'AWS secret access key stored in vault_aws.yml.',
     sessionToken: 'Optional session token for temporary credentials (stored in vault_aws.yml).'
-  };
-
-  const ec2AmiCopyHelp = {
-    sourceRegion: 'Region that currently holds the AMI to copy. Example: us-east-1.',
-    destRegion: 'Region where the copied AMI will be created. Example: us-west-2.',
-    sourceImageId: 'Source AMI ID in the source region. Example: ami-0123456789abcdef0.',
-    name: 'Optional destination AMI name. Leave blank to reuse the source AMI name.',
-    description: 'Optional description for the copied AMI.',
-    wait: 'Wait until the copied AMI reaches the available state before the job completes.',
-    waitTimeout: 'Seconds to wait for AMI availability when wait is enabled (default 600).',
-    encrypted: 'Create an encrypted copy of the AMI.',
-    kmsKeyId: 'Optional KMS key ID for encrypted copies.',
-    copyImageTags: 'Copy tags from the source AMI to the destination AMI.',
-    tagEquality: 'Require tag equality when copying image tags.'
   };
 
   const openshiftHelp = {
@@ -5760,10 +5722,7 @@ echo $TOKEN
   };
 
   const renderAwsConfig = () => {
-    const ec2AmiCopyConfig = {
-      ...defaults.component_config.ec2_ami_copy,
-      ...(data.component_config?.ec2_ami_copy || {})
-    };
+    const ec2AmiCopySelected = (data.component_apps?.aws || []).includes('ec2_ami_copy');
 
     return (
       <>
@@ -5774,10 +5733,34 @@ echo $TOKEN
         )}
 
         <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '8px', marginBottom: '8px' }}>
-          Select <code>ec2_ami_copy</code> to create the AAP job template{' '}
+          Select <code>ec2_ami_copy</code> to scaffold the playbook and AAP job template{' '}
           <code>{(data.aap?.organization || 'ADO')} | Copy AMI between AWS regions</code>.
-          Search AAP for <code>Copy AMI</code>.
+          Source region, destination region, AMI ID, and other run-time options are collected
+          from the job template <strong>survey</strong> when an operator launches the job in AAP
+          (same pattern as patching job surveys).
         </div>
+
+        {ec2AmiCopySelected && (
+        <div
+          style={{
+            marginTop: '12px',
+            padding: '12px',
+            border: `1px solid ${borderColor}`,
+            borderRadius: '6px',
+            background: isDark ? '#1f1f1f' : '#fafafa'
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: '4px' }}>
+            Copy AMI job template survey
+          </div>
+          <div style={{ color: mutedTextColor, fontSize: '13px' }}>
+            Bootstrap seeds <code>vars_ec2_ami_copy.yml</code> with role defaults. Operators set
+            <code>ec2_ami_copy_source_region</code>, <code>ec2_ami_copy_dest_region</code>,
+            <code>ec2_ami_copy_source_image_id</code>, and optional name/wait fields in the
+            survey when launching the job.
+          </div>
+        </div>
+        )}
 
         <div
           style={{
@@ -5792,7 +5775,8 @@ echo $TOKEN
             Shared AWS Credentials
           </div>
           <div style={{ color: mutedTextColor, marginBottom: '14px' }}>
-            Credentials are written to shared <code>vault_aws.yml</code> and <code>vars_aws.yml</code> for all AWS bootstrap jobs.
+            Optional bootstrap values for <code>vault_aws.yml</code> and <code>vars_aws.yml</code>.
+            Required for the Copy AMI job (and other AWS jobs) to authenticate at run time.
           </div>
           <Grid hasGutter>
             {renderTextField('AWS Profile (optional)', 'component_config.aws.profile', 'text', awsHelp.profile)}
@@ -5825,74 +5809,6 @@ echo $TOKEN
             )}
           </Grid>
         </div>
-
-        {(data.component_apps?.aws || []).includes('ec2_ami_copy') && (
-        <div
-          style={{
-            marginTop: '18px',
-            padding: '14px',
-            border: `1px solid ${borderColor}`,
-            borderRadius: '6px',
-            background: isDark ? '#1f1f1f' : '#fafafa'
-          }}
-        >
-          <div style={{ fontWeight: 700, marginBottom: '4px' }}>
-            EC2 AMI Copy
-          </div>
-          <div style={{ color: mutedTextColor, marginBottom: '14px' }}>
-            Copy an AMI from one AWS region to another using infra.ado.ec2_ami_copy.
-          </div>
-          <Grid hasGutter>
-            {renderTextField('Source Region', 'component_config.ec2_ami_copy.source_region', 'text', ec2AmiCopyHelp.sourceRegion)}
-            {renderTextField('Destination Region', 'component_config.ec2_ami_copy.dest_region', 'text', ec2AmiCopyHelp.destRegion)}
-            {renderTextField('Source AMI ID', 'component_config.ec2_ami_copy.source_image_id', 'text', ec2AmiCopyHelp.sourceImageId)}
-            {renderTextField('Destination AMI Name (optional)', 'component_config.ec2_ami_copy.name', 'text', ec2AmiCopyHelp.name)}
-            {renderTextField('Description (optional)', 'component_config.ec2_ami_copy.description', 'text', ec2AmiCopyHelp.description)}
-            {renderTextField('KMS Key ID (optional)', 'component_config.ec2_ami_copy.kms_key_id', 'text', ec2AmiCopyHelp.kmsKeyId)}
-            {renderTextField('Wait Timeout (seconds)', 'component_config.ec2_ami_copy.wait_timeout', 'number', ec2AmiCopyHelp.waitTimeout)}
-            <GridItem span={6}>
-              <FormGroup label={labelWithHelp('Wait for AMI availability', ec2AmiCopyHelp.wait)}>
-                <Checkbox
-                  id="ec2-ami-copy-wait"
-                  label="Wait until the copied AMI is available"
-                  isChecked={ec2AmiCopyConfig.wait !== false}
-                  onChange={(_, v) => set('component_config.ec2_ami_copy.wait', v)}
-                />
-              </FormGroup>
-            </GridItem>
-            <GridItem span={6}>
-              <FormGroup label={labelWithHelp('Encrypted copy', ec2AmiCopyHelp.encrypted)}>
-                <Checkbox
-                  id="ec2-ami-copy-encrypted"
-                  label="Create an encrypted AMI copy"
-                  isChecked={ec2AmiCopyConfig.encrypted === true}
-                  onChange={(_, v) => set('component_config.ec2_ami_copy.encrypted', v)}
-                />
-              </FormGroup>
-            </GridItem>
-            <GridItem span={6}>
-              <FormGroup label={labelWithHelp('Copy image tags', ec2AmiCopyHelp.copyImageTags)}>
-                <Checkbox
-                  id="ec2-ami-copy-copy-tags"
-                  label="Copy tags from source AMI"
-                  isChecked={ec2AmiCopyConfig.copy_image_tags === true}
-                  onChange={(_, v) => set('component_config.ec2_ami_copy.copy_image_tags', v)}
-                />
-              </FormGroup>
-            </GridItem>
-            <GridItem span={6}>
-              <FormGroup label={labelWithHelp('Tag equality', ec2AmiCopyHelp.tagEquality)}>
-                <Checkbox
-                  id="ec2-ami-copy-tag-equality"
-                  label="Require tag equality when copying tags"
-                  isChecked={ec2AmiCopyConfig.tag_equality === true}
-                  onChange={(_, v) => set('component_config.ec2_ami_copy.tag_equality', v)}
-                />
-              </FormGroup>
-            </GridItem>
-          </Grid>
-        </div>
-        )}
       </>
     );
   };

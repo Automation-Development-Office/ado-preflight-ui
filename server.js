@@ -729,22 +729,6 @@ function defaultComponentConfig(component) {
     };
   }
 
-  if (component === 'ec2_ami_copy') {
-    return {
-      source_region: 'us-east-1',
-      dest_region: 'us-west-2',
-      source_image_id: '',
-      name: '',
-      description: '',
-      wait: true,
-      wait_timeout: 600,
-      encrypted: false,
-      kms_key_id: '',
-      copy_image_tags: false,
-      tag_equality: false
-    };
-  }
-
   const config = ['rhel', 'satellite', 'idm', 'compliance', 'stig'].includes(component)
     ? { hostname: '' }
     : { hostname: '', storage: '' };
