@@ -12,6 +12,7 @@ The automation lives in [`.github/workflows/release-container.yml`](../.github/w
 2. User-visible PRs include Changesets under [`.changeset/`](../.changeset/) (see [Adding a changeset](#adding-a-changeset-during-development)).
 3. You know whether this is a **full release** or a **pre-release**.
 4. You know the **exact tag name** you will use. For a full release, that tag must match what Changesets will bump `package.json` to (see [Version alignment](#version-alignment)).
+5. The **`ado-ee`** image is available on GHCR (`ghcr.io/<org>/ado-ee:latest`). The release workflow pulls it to build `vendor/ado-ee.docker.tar` (that file is gitignored and required by `Containerfile`).
 
 Current package version is in [`package.json`](../package.json). Pending Changesets determine the next bump (`patch` / `minor` / `major`).
 
