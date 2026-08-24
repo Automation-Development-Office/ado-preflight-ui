@@ -31,6 +31,7 @@ const openshiftApps = [
 ];
 const rhelApps = ['rhel', 'satellite', 'idm', 'aap', 'dirsrv', 'eck', 'gitlab', 'grafana', 'kafka', 'rhbk', 'compliance', 'stig'];
 const patchingApps = ['patching', 'satellite', 'idm'];
+const awsApps = ['ec2_ami_copy'];
 const provisionApps = ['aws_instance', 'openshift_virt'];
 const AAP_VERSION_NUMBER = {
   '2.4': '24',
@@ -633,11 +634,11 @@ function buildGitCloneArgs({
 
 function selectedComponentAppsFrom(data) {
   if (Array.isArray(data.components) && data.components.includes('all')) {
-    return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...provisionApps, 'jira'])];
+    return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...awsApps, ...provisionApps, 'jira'])];
   }
 
   const out = [];
-  const groups = ['openshift', 'rhel', 'patching', 'provision'];
+  const groups = ['openshift', 'rhel', 'patching', 'aws', 'provision'];
   const components = Array.isArray(data.components) ? data.components : [];
 
   for (const component of components) {
@@ -698,7 +699,7 @@ function selectedComponentAppsFrom(data) {
 }
 
 function pruneInactiveComponentApps(data) {
-  const groups = ['openshift', 'rhel', 'patching', 'provision'];
+  const groups = ['openshift', 'rhel', 'patching', 'aws', 'provision'];
   const components = Array.isArray(data.components) ? data.components : [];
   const allSelected = components.includes('all');
 
@@ -718,6 +719,32 @@ function pruneInactiveComponentApps(data) {
 }
 
 function defaultComponentConfig(component) {
+  if (component === 'aws') {
+    return {
+      profile: '',
+      default_region: 'us-east-1',
+      access_key_id: '',
+      secret_access_key: '',
+      session_token: ''
+    };
+  }
+
+  if (component === 'ec2_ami_copy') {
+    return {
+      source_region: 'us-east-1',
+      dest_region: 'us-west-2',
+      source_image_id: '',
+      name: '',
+      description: '',
+      wait: true,
+      wait_timeout: 600,
+      encrypted: false,
+      kms_key_id: '',
+      copy_image_tags: false,
+      tag_equality: false
+    };
+  }
+
   const config = ['rhel', 'satellite', 'idm', 'compliance', 'stig'].includes(component)
     ? { hostname: '' }
     : { hostname: '', storage: '' };
@@ -1033,6 +1060,9 @@ function hydrateSelectedComponentConfigs(data) {
 
   const hydrateList = new Set(selectedComponentApps);
   if (installAapRequested(data)) hydrateList.add('aap');
+  if (Array.isArray(data.components) && data.components.includes('aws')) {
+    hydrateList.add('aws');
+  }
 
   for (const component of hydrateList) {
     data.component_config[component] = {
