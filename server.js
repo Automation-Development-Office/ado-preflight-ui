@@ -1206,7 +1206,7 @@ function normalizePreflightPayload(input) {
     data.components = [];
     delete data.component;
     data.platform = [];
-    data.component_apps = { openshift: [], rhel: [], patching: [], provision: [] };
+    data.component_apps = { openshift: [], rhel: [], patching: [], aws: [], provision: [] };
     data.component_config = {};
     data.component_options = {};
   } else if (!Array.isArray(data.components) || data.components.length === 0) {
@@ -3169,6 +3169,12 @@ function pruneSelectedPayload(data, selectedComponentApps) {
     ...(Array.isArray(data.components) ? data.components : [])
   ]);
   if (installAapRequested(data)) allowedConfig.add('aap');
+  if (
+    Array.isArray(data.components)
+    && (data.components.includes('all') || data.components.includes('aws'))
+  ) {
+    allowedConfig.add('aws');
+  }
   const componentConfig = {};
   const componentOptions = {};
 
@@ -3312,9 +3318,9 @@ function ensureStarterFiles(repoDir, envName) {
     # Hub-only still applies Hub collection publish + EE push via bootstrap_controller.
     bootstrap_apply_aap_configs: "{{ not (bootstrap_hub_update_collection_only | default(false) | bool) }}"
 
-    bootstrap_generate_playbook_repo_git_mode: push
-    bootstrap_generate_playbook_repo_git_url: "{{ generate_playbook_repo_git_url }}"
-    bootstrap_generate_playbook_repo_git_branch: "{{ generate_playbook_repo_git_branch | default(aap_git_branch | default('main')) }}"
+    bootstrap_generate_playbook_repo_git_mode: "{{ bootstrap_generate_playbook_repo_git_mode | default(generate_playbook_repo_git_mode | default('manual')) }}"
+    bootstrap_generate_playbook_repo_git_url: "{{ bootstrap_generate_playbook_repo_git_url | default(generate_playbook_repo_git_url | default('')) }}"
+    bootstrap_generate_playbook_repo_git_branch: "{{ bootstrap_generate_playbook_repo_git_branch | default(generate_playbook_repo_git_branch | default(aap_git_branch | default('main'))) }}"
     bootstrap_generate_playbook_repo_git_message: "Generate ADO bootstrap content"
     bootstrap_generate_playbook_repo_write_galaxy_requirements: "{{ bootstrap_generate_playbook_repo_write_galaxy_requirements | default(false) | bool }}"
 
@@ -4872,6 +4878,10 @@ ansible-playbook \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_commit=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\
+  -e bootstrap_generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\
+  -e generate_playbook_repo_git_url=${JSON.stringify(repoUrl)} \\
+  -e bootstrap_generate_playbook_repo_git_url=${JSON.stringify(repoUrl)} \\
+  ${gitToken ? `-e generate_playbook_repo_git_token=${JSON.stringify(gitToken)} \\\n  -e bootstrap_generate_playbook_repo_git_token=${JSON.stringify(gitToken)} \\` : ''}
   -e generate_playbook_repo_git_ssl_verify=${gitSkipTlsVerify ? 'false' : 'true'} \\
   -e bootstrap_generate_playbook_repo_git_ssl_verify=${gitSkipTlsVerify ? 'false' : 'true'} \\
   -e generate_playbook_repo_git_auth_mode=${gitUsesBearerAuth ? 'bearer' : 'basic'} \\

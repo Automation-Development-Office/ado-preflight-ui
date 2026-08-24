@@ -2537,6 +2537,7 @@ function App() {
 
     if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
     if (!merged.git) merged.git = { ...defaults.git };
+    if (merged.git.auto_push === undefined) merged.git.auto_push = true;
     if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
     if (merged.git.overwrite_generated === undefined) merged.git.overwrite_generated = false;
     if (merged.additional_environments === undefined) merged.additional_environments = ['prod'];
@@ -2561,6 +2562,7 @@ function App() {
     setOpenshiftOpen(importedData.components.includes('all') || importedData.components.includes('openshift'));
     setRhelOpen(importedData.components.includes('all') || importedData.components.includes('rhel'));
     setPatchingOpen(importedData.components.includes('all') || importedData.components.includes('patching'));
+    setAwsOpen(importedData.components.includes('all') || importedData.components.includes('aws'));
     setProvisionOpen(importedData.components.includes('all') || importedData.components.includes('provision'));
     setActiveAapCredentialTab(importedData.aap?.additional_credentials?.[0]?.id || '');
   };
