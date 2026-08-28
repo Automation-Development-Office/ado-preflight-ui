@@ -105,6 +105,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare baked ADO EE archive for Containerfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          EE_IMAGE="${GHCR_IMAGE%/*}/ado-ee:latest"
+          mkdir -p vendor
+          echo "Pulling ${EE_IMAGE} for vendor/ado-ee.docker.tar (required by Containerfile since Aug 2026)."
+          docker pull "${EE_IMAGE}"
+          docker save "${EE_IMAGE}" -o vendor/ado-ee.docker.tar
+          test -s vendor/ado-ee.docker.tar
+          du -h vendor/ado-ee.docker.tar
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

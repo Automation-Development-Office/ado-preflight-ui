@@ -46,6 +46,7 @@ const rhelApps = [
 ];
 
 const patchingApps = ['patching','satellite','idm'];
+const awsApps = ['ec2_ami_copy'];
 const provisionApps = ['aws_instance','openshift_virt'];
 
 const AAP_VERSION_OPTIONS = [
@@ -476,7 +477,8 @@ const componentOptionLabels = {
   nist_800_53: 'NIST 800-53',
   cis: 'CIS',
   rhel_8_stig: 'RHEL 8 STIG',
-  rhel_9_stig: 'RHEL 9 STIG'
+  rhel_9_stig: 'RHEL 9 STIG',
+  ec2_ami_copy: 'EC2 AMI Copy'
 };
 
 const verbosityOptions = [
@@ -783,6 +785,7 @@ const defaults = {
     openshift: [],
     rhel: [],
     patching: [],
+    aws: [],
     provision: []
   },
 
@@ -1095,6 +1098,13 @@ const defaults = {
     },
     elastic: { hostname: '', storage: '', replicas: 1 },
     jira: { hostname: '', storage: '', replicas: 1 },
+    aws: {
+      profile: '',
+      default_region: 'us-east-1',
+      access_key_id: '',
+      secret_access_key: '',
+      session_token: ''
+    },
     aws_instance: { hostname: '', storage: '', replicas: 1 },
     openshift_virt: {
       api_host: '',
@@ -1114,7 +1124,8 @@ const defaults = {
     idm: [],
     rhel: [],
     compliance: [],
-    stig: []
+    stig: [],
+    aws: []
   },
 
   collections: {
@@ -1357,6 +1368,7 @@ function App() {
   const [rhelOpen, setRhelOpen] = useState(false);
   const [patchingOpen, setPatchingOpen] = useState(false);
   const [provisionOpen, setProvisionOpen] = useState(false);
+  const [awsOpen, setAwsOpen] = useState(false);
   const [activeMainTab, setActiveMainTab] = useState('core');
   const [consoleSearch, setConsoleSearch] = useState('');
   const [activeConfigPanel, setActiveConfigPanel] = useState('all');
@@ -1374,6 +1386,7 @@ function App() {
   const [keycloakPublicKeyBusy, setKeycloakPublicKeyBusy] = useState(false);
   const [keycloakPublicKeyMessage, setKeycloakPublicKeyMessage] = useState('');
   const [showIdmSecrets, setShowIdmSecrets] = useState(false);
+  const [showAwsSecrets, setShowAwsSecrets] = useState(false);
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
   const [additionalEnvOtherEnabled, setAdditionalEnvOtherEnabled] = useState(false);
@@ -2105,7 +2118,7 @@ function App() {
     });
   };
 
-  const groupComponents = ['openshift', 'rhel', 'patching', 'provision'];
+  const groupComponents = ['openshift', 'rhel', 'patching', 'aws', 'provision'];
 
   const selectedComponentAppsFrom = source => {
     if (Array.isArray(source.components) && source.components.includes('all')) {
@@ -2114,6 +2127,7 @@ function App() {
           ...openshiftApps,
           ...rhelApps,
           ...patchingApps,
+          ...awsApps,
           ...provisionApps,
           'jira'
         ])
@@ -2121,7 +2135,7 @@ function App() {
     }
 
     const out = [];
-    const expandableGroups = ['openshift', 'rhel', 'patching', 'provision'];
+    const expandableGroups = ['openshift', 'rhel', 'patching', 'aws', 'provision'];
     const components = Array.isArray(source.components) ? source.components : [];
 
     components.forEach(component => {
@@ -2195,6 +2209,10 @@ function App() {
   };
 
   const defaultComponentConfig = component => {
+    if (component === 'aws') {
+      return JSON.parse(JSON.stringify(defaults.component_config.aws));
+    }
+
     const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching'];
     const fallback = noReplicaComponents.includes(component)
       ? (component === 'patching' || component === 'rhel' ? { hostname: '', hosts: [] } : { hostname: '' })
@@ -2276,6 +2294,10 @@ function App() {
       allowedConfig.add('aap');
     }
 
+    if (components.includes('all') || components.includes('aws')) {
+      allowedConfig.add('aws');
+    }
+
     if (!hydrated.component_config) hydrated.component_config = {};
 
     [...allowedConfig].forEach(component => {
@@ -2329,6 +2351,25 @@ function App() {
       delete merged.component;
     } else {
       merged.component = merged.components.includes('all') ? 'all' : merged.components[0];
+    }
+
+    if (
+      Array.isArray(merged.components)
+      && merged.components.includes('ec2_ami_copy')
+      && !merged.components.includes('aws')
+    ) {
+      merged.components = [
+        ...merged.components.filter(component => component !== 'ec2_ami_copy'),
+        'aws'
+      ];
+      if (!merged.component_apps) merged.component_apps = {};
+      if (!Array.isArray(merged.component_apps.aws)) merged.component_apps.aws = [];
+      if (!merged.component_apps.aws.includes('ec2_ami_copy')) {
+        merged.component_apps.aws.push('ec2_ami_copy');
+      }
+      if (!merged.component_options) merged.component_options = {};
+      merged.component_options.aws = [...merged.component_apps.aws];
+      merged.component = merged.components[0];
     }
 
     if (!merged.component_apps) merged.component_apps = {};
@@ -2496,6 +2537,7 @@ function App() {
 
     if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
     if (!merged.git) merged.git = { ...defaults.git };
+    if (merged.git.auto_push === undefined) merged.git.auto_push = true;
     if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
     if (merged.git.overwrite_generated === undefined) merged.git.overwrite_generated = false;
     if (merged.additional_environments === undefined) merged.additional_environments = ['prod'];
@@ -2520,6 +2562,7 @@ function App() {
     setOpenshiftOpen(importedData.components.includes('all') || importedData.components.includes('openshift'));
     setRhelOpen(importedData.components.includes('all') || importedData.components.includes('rhel'));
     setPatchingOpen(importedData.components.includes('all') || importedData.components.includes('patching'));
+    setAwsOpen(importedData.components.includes('all') || importedData.components.includes('aws'));
     setProvisionOpen(importedData.components.includes('all') || importedData.components.includes('provision'));
     setActiveAapCredentialTab(importedData.aap?.additional_credentials?.[0]?.id || '');
   };
@@ -2559,6 +2602,9 @@ function App() {
     const selectedGroups = Array.isArray(payload.components) ? payload.components : [];
     const allowedConfig = new Set([...selectedApps, ...selectedGroups]);
     if (installAapRequested(payload)) allowedConfig.add('aap');
+    if (selectedGroups.includes('all') || selectedGroups.includes('aws')) {
+      allowedConfig.add('aws');
+    }
     const selectedConfig = {};
     const selectedOptions = {};
 
@@ -2835,7 +2881,7 @@ function App() {
         copy.component_config[component] || {}
       );
       if (copy.component_config[component].hostname === undefined) copy.component_config[component].hostname = '';
-      if (!['rhel', 'satellite', 'idm', 'compliance', 'stig'].includes(component) && copy.component_config[component].storage === undefined) {
+      if (!['rhel', 'satellite', 'idm', 'compliance', 'stig', 'aws', 'openshift_virt'].includes(component) && copy.component_config[component].storage === undefined) {
         copy.component_config[component].storage = '';
       }
       if (component === 'idm') {
@@ -2957,6 +3003,20 @@ function App() {
         }
       }
 
+      if (component === 'aws') {
+        if (!wasSelected) {
+          const currentApps = copy.component_apps.aws || [];
+          copy.component_apps.aws = currentApps.includes('ec2_ami_copy')
+            ? currentApps
+            : [...currentApps, 'ec2_ami_copy'];
+          if (!copy.component_options) copy.component_options = {};
+          copy.component_options.aws = [...copy.component_apps.aws];
+        } else {
+          copy.component_apps.aws = [];
+          if (copy.component_options) copy.component_options.aws = [];
+        }
+      }
+
       if (!copy.jira) copy.jira = {};
       copy.jira.enabled = next.includes('all') || next.includes('jira');
 
@@ -3009,6 +3069,11 @@ function App() {
 
       copy.components = nextComponents;
       copy.component = nextComponents.includes('all') ? 'all' : nextComponents[0];
+
+      if (group === 'aws') {
+        if (!copy.component_options) copy.component_options = {};
+        copy.component_options.aws = [...copy.component_apps[group]];
+      }
 
       if (!isSelected && componentOptionDefaults[app]) {
         if (!copy.component_options) copy.component_options = {};
@@ -4032,6 +4097,14 @@ function App() {
     apiToken: 'OpenShift token used to create the VM. Stored in generated vault files.',
     skipTls: 'Skip OpenShift API certificate validation for self-signed or lab certificates.',
     sshPublicKey: 'SSH public key (ssh-rsa / ssh-ed25519), not a private key. Attached to the VM job template and added to launch-time cloud-init.'
+  };
+
+  const awsHelp = {
+    profile: 'Optional AWS shared credentials profile name. Leave blank to use the default credential chain.',
+    defaultRegion: 'Default AWS region for shared vars (vars_aws.yml). Example: us-east-1.',
+    accessKeyId: 'AWS access key ID stored in vault_aws.yml (shared across AWS bootstrap jobs).',
+    secretAccessKey: 'AWS secret access key stored in vault_aws.yml.',
+    sessionToken: 'Optional session token for temporary credentials (stored in vault_aws.yml).'
   };
 
   const openshiftHelp = {
@@ -5418,6 +5491,7 @@ echo $TOKEN
     if (group === 'openshift') return openshiftApps;
     if (group === 'rhel') return rhelApps;
     if (group === 'patching') return patchingApps;
+    if (group === 'aws') return awsApps;
     if (group === 'provision') return provisionApps;
     return [];
   };
@@ -5426,6 +5500,7 @@ echo $TOKEN
     if (group === 'openshift') return 'OpenShift Applications';
     if (group === 'rhel') return 'RHEL Components';
     if (group === 'patching') return 'Patching Options';
+    if (group === 'aws') return 'AWS Applications';
     if (group === 'provision') return 'Provisioning Options';
     return group;
   };
@@ -5478,6 +5553,11 @@ echo $TOKEN
               const copy = JSON.parse(JSON.stringify(prev));
               if (!copy.component_apps) copy.component_apps = {};
               copy.component_apps[group] = v ? [...apps] : [];
+
+              if (group === 'aws') {
+                if (!copy.component_options) copy.component_options = {};
+                copy.component_options.aws = v ? [...apps] : [];
+              }
 
               let nextComponents = [...(copy.components || [])].filter(c => c !== 'all');
 
@@ -5643,6 +5723,98 @@ echo $TOKEN
     );
   };
 
+  const renderAwsConfig = () => {
+    const ec2AmiCopySelected = (data.component_apps?.aws || []).includes('ec2_ami_copy');
+
+    return (
+      <>
+        {renderGroupComponentOptions(
+          'aws',
+          'AWS Applications',
+          'Select which AWS bootstrap jobs to include.'
+        )}
+
+        <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '8px', marginBottom: '8px' }}>
+          Select <code>ec2_ami_copy</code> to scaffold the playbook and AAP job template{' '}
+          <code>{(data.aap?.organization || 'ADO')} | Copy AMI between AWS regions</code>.
+          Source region, destination region, AMI ID, and other run-time options are collected
+          from the job template <strong>survey</strong> when an operator launches the job in AAP
+          (same pattern as patching job surveys).
+        </div>
+
+        {ec2AmiCopySelected && (
+        <div
+          style={{
+            marginTop: '12px',
+            padding: '12px',
+            border: `1px solid ${borderColor}`,
+            borderRadius: '6px',
+            background: isDark ? '#1f1f1f' : '#fafafa'
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: '4px' }}>
+            Copy AMI job template survey
+          </div>
+          <div style={{ color: mutedTextColor, fontSize: '13px' }}>
+            Bootstrap seeds <code>vars_ec2_ami_copy.yml</code> with role defaults. Operators set
+            <code>ec2_ami_copy_source_region</code>, <code>ec2_ami_copy_dest_region</code>,
+            <code>ec2_ami_copy_source_image_id</code>, and optional name/wait fields in the
+            survey when launching the job.
+          </div>
+        </div>
+        )}
+
+        <div
+          style={{
+            marginTop: '18px',
+            padding: '14px',
+            border: `1px solid ${borderColor}`,
+            borderRadius: '6px',
+            background: isDark ? '#1f1f1f' : '#fafafa'
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: '4px' }}>
+            Shared AWS Credentials
+          </div>
+          <div style={{ color: mutedTextColor, marginBottom: '14px' }}>
+            Optional bootstrap values for <code>vault_aws.yml</code> and <code>vars_aws.yml</code>.
+            Required for the Copy AMI job (and other AWS jobs) to authenticate at run time.
+          </div>
+          <Grid hasGutter>
+            {renderTextField('AWS Profile (optional)', 'component_config.aws.profile', 'text', awsHelp.profile)}
+            {renderTextField('Default Region', 'component_config.aws.default_region', 'text', awsHelp.defaultRegion)}
+            <GridItem span={12}>
+              <Checkbox
+                id="show-aws-secrets"
+                label="Show AWS credential fields"
+                isChecked={showAwsSecrets}
+                onChange={(_, v) => setShowAwsSecrets(v)}
+              />
+            </GridItem>
+            {renderTextField(
+              'Access Key ID',
+              'component_config.aws.access_key_id',
+              showAwsSecrets ? 'text' : 'password',
+              awsHelp.accessKeyId
+            )}
+            {renderTextField(
+              'Secret Access Key',
+              'component_config.aws.secret_access_key',
+              showAwsSecrets ? 'text' : 'password',
+              awsHelp.secretAccessKey
+            )}
+            {renderTextField(
+              'Session Token (optional)',
+              'component_config.aws.session_token',
+              showAwsSecrets ? 'text' : 'password',
+              awsHelp.sessionToken
+            )}
+          </Grid>
+        </div>
+      </>
+    );
+  };
+
   const renderProvisionConfig = () => {
     const openshiftVirtConfig = {
       ...defaults.component_config.openshift_virt,
@@ -5722,6 +5894,7 @@ echo $TOKEN
           'OpenShift',
           'RHEL',
           'Patching',
+          'AWS',
           'Provision',
           'Grafana',
           'RHBK (Keycloak)',
@@ -7286,6 +7459,8 @@ echo $TOKEN
         return renderRhelConfig();
       case 'patching':
         return renderPatchingConfig();
+      case 'aws':
+        return renderAwsConfig();
       case 'provision':
         return renderProvisionConfig();
       case 'jira':
@@ -7490,6 +7665,7 @@ ${vaultYaml}
         'rhel',
         'patching',
         'provision',
+        'aws',
         'grafana',
         'rhbk',
         'satellite',
@@ -7551,6 +7727,10 @@ ${vaultYaml}
       return ['provision'];
     }
 
+    if (selected.includes('aws')) {
+      return ['aws'];
+    }
+
     return selected.filter(component => !groupComponents.includes(component));
   };
 
@@ -7564,6 +7744,7 @@ ${vaultYaml}
     if (tab === 'console_banner') return 'Console Banner';
     if (tab === 'rhel') return 'RHEL';
     if (tab === 'patching') return 'Patching';
+    if (tab === 'aws') return 'AWS';
     if (tab === 'provision') return 'Provision';
     if (tab === 'rhbk') return 'RHBK (Keycloak)';
     if (tab === 'idm') return 'IDM';
@@ -8419,6 +8600,7 @@ ${vaultYaml}
                         {renderExpandableComponent('openshift', openshiftOpen, setOpenshiftOpen, openshiftApps)}
                         {renderExpandableComponent('rhel', rhelOpen, setRhelOpen, rhelApps)}
                         {renderExpandableComponent('patching', patchingOpen, setPatchingOpen, patchingApps)}
+                        {renderExpandableComponent('aws', awsOpen, setAwsOpen, awsApps)}
                         {renderExpandableComponent('provision', provisionOpen, setProvisionOpen, provisionApps)}
                       </GridItem>
 

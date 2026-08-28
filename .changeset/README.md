@@ -26,6 +26,8 @@ Short description of the change.
 
 Bump types: `patch`, `minor`, or `major`.
 
+The package name must match [`package.json`](../../package.json) exactly: `"ado-preflight-ui"` (not `@ado/preflight-ui` or other aliases). Wrong names break `changeset version` during release.
+
 ## Release flow
 
 See the full walkthrough: [docs/RELEASING.md](../docs/RELEASING.md).
