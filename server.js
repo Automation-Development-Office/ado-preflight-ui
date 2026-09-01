@@ -14,6 +14,188 @@ const port = 8080;
 const workRoot = '/workspace';
 const collectionDir = '/opt/ado-collections';
 
+let pty;
+try {
+  pty = require('node-pty');
+} catch (err) {
+  pty = null;
+}
+
+function terminalEnabled() {
+  if (process.env.ADO_PREFLIGHT_TERMINAL_ENABLED === 'false') {
+    return false;
+  }
+  return Boolean(pty) || process.env.ADO_PREFLIGHT_TERMINAL_PIPE !== 'false';
+}
+
+function terminalFallbackHelp(repoDir) {
+  const podName = process.env.HOSTNAME || '<pod-or-container-name>';
+  return [
+    'Podman/local container:',
+    `  podman exec -it ${podName} /bin/bash`,
+    '',
+    'OpenShift/Kubernetes pod:',
+    `  oc rsh pod/${podName}`,
+    `  oc exec -it pod/${podName} -- /bin/bash`,
+    '',
+    'Useful paths:',
+    `  ${repoDir}`,
+    '  /workspace/collections',
+    '  /opt/ado-collections'
+  ];
+}
+
+function getTerminalStatus(repoDir = path.join(workRoot, 'bootstrap-sample')) {
+  if (process.env.ADO_PREFLIGHT_TERMINAL_ENABLED === 'false') {
+    return {
+      available: false,
+      reason: 'Browser terminal disabled (ADO_PREFLIGHT_TERMINAL_ENABLED=false).',
+      fallback: terminalFallbackHelp(repoDir)
+    };
+  }
+
+  if (!pty && process.env.ADO_PREFLIGHT_TERMINAL_PIPE === 'false') {
+    return {
+      available: false,
+      reason: 'node-pty is not available and pipe fallback is disabled (ADO_PREFLIGHT_TERMINAL_PIPE=false).',
+      fallback: terminalFallbackHelp(repoDir)
+    };
+  }
+
+  return {
+    available: true,
+    shell: process.env.SHELL || '/bin/bash',
+    cwd: workRoot,
+    podName: process.env.HOSTNAME || 'unknown',
+    mode: pty ? 'pty' : 'pipe'
+  };
+}
+
+function buildTerminalEnv() {
+  return {
+    ...process.env,
+    TERM: pty ? 'xterm-color' : 'dumb',
+    COLORTERM: pty ? 'truecolor' : '',
+    PS1: pty
+      ? '\\[\\033[01;32m\\]ado-preflight\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]$ '
+      : 'ado-preflight:\\w$ '
+  };
+}
+
+function spawnTerminalSession(cols = 80, rows = 24) {
+  const shell = process.env.SHELL || '/bin/bash';
+  const env = buildTerminalEnv();
+
+  if (pty) {
+    return pty.spawn(shell, ['-l'], {
+      name: 'xterm-color',
+      cols,
+      rows,
+      cwd: workRoot,
+      env
+    });
+  }
+
+  const child = spawn(shell, ['-l'], {
+    cwd: workRoot,
+    env,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+
+  const listeners = [];
+  const session = {
+    onData(callback) {
+      const handler = chunk => callback(chunk.toString());
+      child.stdout.on('data', handler);
+      child.stderr.on('data', handler);
+      listeners.push(['stdout', handler], ['stderr', handler]);
+    },
+    write(data) {
+      if (!child.killed && child.stdin.writable) {
+        child.stdin.write(data);
+      }
+    },
+    resize() {
+      // Pipe mode has no TTY resize support.
+    },
+    kill() {
+      if (!child.killed) {
+        child.kill();
+      }
+    },
+    onExit(callback) {
+      child.on('exit', (code, signal) => callback({ exitCode: code, signal }));
+    }
+  };
+
+  return session;
+}
+
+function attachTerminalWebSocket(ws) {
+  if (!terminalEnabled()) {
+    ws.close(4403, 'Terminal disabled');
+    return null;
+  }
+
+  let session = spawnTerminalSession();
+  let closed = false;
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      session.kill();
+    } catch (err) {
+      // ignore
+    }
+  };
+
+  session.onData(data => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(data);
+    }
+  });
+
+  session.onExit(() => {
+    if (ws.readyState === ws.OPEN) {
+      ws.close(1000, 'Shell exited');
+    }
+    cleanup();
+  });
+
+  ws.on('message', message => {
+    let payload;
+    try {
+      payload = JSON.parse(String(message));
+    } catch (err) {
+      session.write(String(message));
+      return;
+    }
+
+    if (payload.type === 'input' && typeof payload.data === 'string') {
+      session.write(payload.data);
+      return;
+    }
+
+    if (payload.type === 'resize') {
+      const cols = Number.parseInt(payload.cols, 10);
+      const rows = Number.parseInt(payload.rows, 10);
+      if (cols > 0 && rows > 0) {
+        try {
+          session.resize(cols, rows);
+        } catch (err) {
+          // ignore invalid resize
+        }
+      }
+    }
+  });
+
+  ws.on('close', cleanup);
+  ws.on('error', cleanup);
+
+  return session;
+}
+
 function hasAnsiblePlatformCollection() {
   try {
     return fs.readdirSync(collectionDir).some(f => /^ansible-platform-.*\.tar\.gz$/.test(f));
@@ -25,8 +207,8 @@ const uiDir = path.join(__dirname, 'dist');
 const packageJson = require('./package.json');
 
 const openshiftApps = [
-  'aap', 'acs', 'acm', 'bookstack', 'cert_manager', 'console', 'devspaces',
-  'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'netbox',
+  'aap', 'acs', 'acm', 'bookstack', 'cert_manager', 'console', 'devspaces', 'dev_hub',
+  'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio', 'netbox',
   'oadp', 'openshift', 'pega', 'quay', 'rhbk'
 ];
 const rhelApps = ['rhel', 'satellite', 'idm', 'aap', 'dirsrv', 'eck', 'gitlab', 'grafana', 'kafka', 'rhbk', 'compliance', 'stig'];
@@ -204,9 +386,26 @@ const openshiftOptionApps = {
   ldap_auth: 'openshift_ldap_auth',
   oauth_rhbk: 'openshift_oauth_rhbk',
   discover_routes_print: 'openshift_discover_routes_print',
-  discover_routes_alt: 'openshift_discover_routes_alt',
   update_pull_secret: 'openshift_update_pull_secret'
 };
+
+function pushAlternateRouteApps(data, out) {
+  const options = data.component_options?.openshift || [];
+  if (!options.includes('alternate_routes') && !options.includes('discover_routes_alt')) {
+    return;
+  }
+  const alt = data.openshift?.alternate_routes || {};
+  const legacy = options.includes('discover_routes_alt') && !options.includes('alternate_routes');
+  if (legacy || alt.print_alt_routes !== false) {
+    out.push('openshift_print_alt_routes');
+  }
+  if (legacy || alt.add_alt_routes) {
+    out.push('openshift_add_alt_routes');
+  }
+  if (alt.add_ingress_with_route) {
+    out.push('openshift_add_ingress_with_route');
+  }
+}
 const rhbkOptionApps = {
   standalone: 'rhbk_standalone',
   realm: 'rhbk_realm',
@@ -221,8 +420,20 @@ const gitlabOptionApps = {
   standalone: 'gitlab_standalone'
 };
 const grafanaOptionApps = {
-  standalone: 'grafana_standalone'
+  standalone: 'grafana_standalone',
+  oidc: 'grafana_oidc',
+  email: 'grafana_email',
+  datasources: 'grafana_datasources',
+  folders: 'grafana_folders',
+  dashboards: 'grafana_dashboards',
+  alternate_route: 'grafana_alternate_route'
 };
+const quayOptionApps = { oidc: 'quay_oidc' };
+const minioOptionApps = { oidc: 'minio_oidc' };
+const devHubOptionApps = { oidc: 'dev_hub_oidc' };
+const bookstackOptionApps = { oidc: 'bookstack_oidc' };
+const netboxOptionApps = { oidc: 'netbox_oidc' };
+const zabbixOptionApps = { saml: 'zabbix_saml' };
 const DEFAULT_HUB_EE_IMAGE_NAME = 'ado-ee';
 
 app.use(express.json({ limit: '100mb' }));
@@ -231,6 +442,12 @@ app.use('/examples', express.static(path.join(__dirname, 'examples')));
 
 let latestLog = '';
 let latestEvents = '';
+let bootstrapRunning = false;
+let bootstrapStartedAt = null;
+let deployOpenshiftRunning = false;
+let latestDeployLog = '';
+let latestDeployEvents = '';
+let latestDeployResult = null;
 let latestDebug = {
   repoDir: '',
   preflightPath: '',
@@ -259,6 +476,89 @@ function append(msg) {
   latestLog += msg;
   latestLog = capText(latestLog, 500000);
   process.stdout.write(msg);
+}
+
+function deployEvent(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  latestDeployEvents += line;
+  latestDeployEvents = capText(latestDeployEvents, 200000);
+  process.stdout.write(`[deploy] ${line}`);
+}
+
+function appendDeploy(msg) {
+  latestDeployLog += msg;
+  latestDeployLog = capText(latestDeployLog, 500000);
+  process.stdout.write(msg);
+}
+
+function deployOpenshiftEnabled() {
+  return process.env.ADO_PREFLIGHT_DEPLOY_OPENSHIFT_ENABLED !== 'false';
+}
+
+function resolveOpenshiftDeployEnv(data) {
+  const openshift = data?.openshift || {};
+  const apiHost = String(openshift.api_host || openshift.apiHost || '').trim();
+  const token = String(openshift.token || '').trim();
+  const appsDomain = String(openshift.apps_domain || openshift.appsDomain || '').trim();
+  const namespace = String(
+    openshift.preflight_namespace
+    || openshift.deploy_namespace
+    || process.env.ADO_PREFLIGHT_DEPLOY_NAMESPACE
+    || 'ado-portal'
+  ).trim();
+  const routeHost = String(openshift.preflight_route_host || openshift.route_host || '').trim();
+  const skipBuild = data?.deploy?.skip_build === true
+    || process.env.ADO_PREFLIGHT_DEPLOY_SKIP_BUILD === 'true';
+  const image = String(data?.deploy?.image || process.env.ADO_PREFLIGHT_DEPLOY_IMAGE || '').trim();
+  const terminalEnabled = data?.deploy?.terminal_enabled !== false;
+
+  if (!apiHost || !token) {
+    throw new Error('OpenShift API host and token are required (OpenShift section of the form).');
+  }
+
+  return {
+    OPENSHIFT_API: apiHost,
+    OPENSHIFT_TOKEN: token,
+    OPENSHIFT_APPS_DOMAIN: appsDomain,
+    NAMESPACE: namespace,
+    ROUTE_HOST: routeHost,
+    SKIP_BUILD: skipBuild ? '1' : '0',
+    IMAGE: image,
+    ADO_PREFLIGHT_TERMINAL_ENABLED: terminalEnabled ? 'true' : 'false',
+    ADO_PREFLIGHT_DEPLOY_OPENSHIFT_ENABLED: 'true'
+  };
+}
+
+async function runOpenshiftDeploy(data) {
+  const deployEnv = resolveOpenshiftDeployEnv(data);
+  const deployScript = path.join(__dirname, 'deploy', 'deploy.sh');
+
+  if (!fs.existsSync(deployScript)) {
+    throw new Error(`Deploy script missing: ${deployScript}`);
+  }
+
+  deployEvent('OpenShift deploy started');
+  appendDeploy('=== ADO Preflight — Deploy to OpenShift ===\n\n');
+
+  await new Promise((resolve, reject) => {
+    const child = spawn('bash', [deployScript], {
+      cwd: __dirname,
+      env: { ...process.env, ...deployEnv },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    child.stdout.on('data', chunk => appendDeploy(chunk.toString()));
+    child.stderr.on('data', chunk => appendDeploy(chunk.toString()));
+
+    child.on('error', err => reject(err));
+    child.on('close', code => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`deploy.sh exited ${code}`));
+      }
+    });
+  });
 }
 
 function redactSecrets(value) {
@@ -373,9 +673,22 @@ function listGeneratedConfigFiles(repoDir) {
 
 function buildDebugPayload(kind) {
   const repoDir = latestDebug.repoDir || path.join(workRoot, 'bootstrap-sample');
+  const tabGuide = [
+    '=== ADO Bootstrap Console — debug tabs ===',
+    '',
+    'Events        Bootstrap server timeline for this run (not K8s pod events).',
+    'Summary       Paths, selected components, result object, log sizes.',
+    'Preflight JSON  Normalized JSON on disk (ado-preflight-<env>.json) → -e preflight_json=…',
+    'Extra Vars    Debug snapshot (ado-extra-vars.json); not full ansible -e list.',
+    'Repo Tree     Local git clone on the pod (/workspace/bootstrap-sample), not GitLab remote.',
+    'Generated Configs  configs/, playbooks/, group_vars/ contents from this run.',
+    'Runtime       Preflight container/image info (not bootstrap duration).',
+    'Terminal Help Browser shell in pod (or oc/podman fallback when disabled).',
+    ''
+  ].join('\n');
 
   if (kind === 'summary') {
-    return JSON.stringify({
+    return `${tabGuide}${JSON.stringify({
       repoDir,
       preflightPath: latestDebug.preflightPath,
       extraVarsPath: latestDebug.extraVarsPath,
@@ -384,51 +697,68 @@ function buildDebugPayload(kind) {
       result: latestDebug.result,
       logBytes: latestLog.length,
       eventBytes: latestEvents.length
-    }, null, 2);
+    }, null, 2)}`;
   }
 
   if (kind === 'preflight') {
+    const header = [
+      '# Preflight JSON — written to the bootstrap clone; passed to Ansible as preflight_json.',
+      `# Path: ${latestDebug.preflightPath || path.join(repoDir, 'ado-preflight-<env>.json')}`,
+      '# Display is redacted; on-disk file retains secrets needed for vault encrypt.',
+      ''
+    ].join('\n');
     const text = readTextFile(latestDebug.preflightPath);
-    if (text) return JSON.stringify(redactSecrets(JSON.parse(text)), null, 2);
-    return JSON.stringify(redactSecrets(latestDebug.normalizedPayload || {}), null, 2);
+    if (text) return `${header}${JSON.stringify(redactSecrets(JSON.parse(text)), null, 2)}`;
+    return `${header}${JSON.stringify(redactSecrets(latestDebug.normalizedPayload || {}), null, 2)}`;
   }
 
   if (kind === 'extra-vars') {
+    const header = [
+      '# Extra Vars — debug snapshot only (ado-extra-vars.json).',
+      '# Derived flags for troubleshooting; see Logs for full ansible-playbook -e extras.',
+      `# Path: ${latestDebug.extraVarsPath || path.join(repoDir, 'ado-extra-vars.json')}`,
+      ''
+    ].join('\n');
     const text = readTextFile(latestDebug.extraVarsPath, 'ado-extra-vars.json has not been written yet.\n');
     try {
-      return JSON.stringify(redactSecrets(JSON.parse(text)), null, 2);
+      return `${header}${JSON.stringify(redactSecrets(JSON.parse(text)), null, 2)}`;
     } catch (err) {
-      return text;
+      return `${header}${text}`;
     }
   }
 
   if (kind === 'tree') {
     if (!fs.existsSync(repoDir)) {
-      return `Generated repository does not exist yet: ${repoDir}\n`;
+      return `${tabGuide}Generated repository does not exist yet: ${repoDir}\n`;
     }
 
-    return [`Repository: ${repoDir}`, '', ...walkFiles(repoDir, { maxEntries: 700, maxDepth: 8 })].join('\n');
+    return `${tabGuide}# Local clone on pod (not GitLab remote until git push)\nRepository: ${repoDir}\n\n${walkFiles(repoDir, { maxEntries: 700, maxDepth: 8 }).join('\n')}`;
   }
 
   if (kind === 'configs') {
     if (!fs.existsSync(repoDir)) {
-      return `Generated repository does not exist yet: ${repoDir}\n`;
+      return `${tabGuide}Generated repository does not exist yet: ${repoDir}\n`;
     }
 
     const files = listGeneratedConfigFiles(repoDir).slice(0, 80);
     if (files.length === 0) {
-      return `No generated config files found under ${repoDir}/configs, playbooks, or group_vars yet.\n`;
+      return `${tabGuide}No generated config files found under ${repoDir}/configs, playbooks, or group_vars yet.\n`;
     }
 
-    return files.map(filePath => {
+    return `${tabGuide}${files.map(filePath => {
       const rel = path.relative(repoDir, filePath);
       const body = readTextFile(filePath).slice(0, 12000);
       return `===== ${rel} =====\n${body}`;
-    }).join('\n\n');
+    }).join('\n\n')}`;
   }
 
   if (kind === 'runtime') {
-    return JSON.stringify({
+    const header = [
+      '# Runtime — preflight container/pod environment (image, paths, collections).',
+      '# Bootstrap duration and pass/fail: status banner above and Logs recap (Runtime: …).',
+      ''
+    ].join('\n');
+    return `${header}${JSON.stringify({
       uiVersion: process.env.ADO_PREFLIGHT_UI_VERSION || packageJson.version || 'unknown',
       image: process.env.ADO_PREFLIGHT_UI_IMAGE || process.env.IMAGE_NAME || 'ado-preflight-ui',
       imageTag: process.env.ADO_PREFLIGHT_UI_IMAGE_TAG || process.env.IMAGE_TAG || packageJson.version || 'latest',
@@ -445,35 +775,39 @@ function buildDebugPayload(kind) {
         ADO_PREFLIGHT_UI_README: process.env.ADO_PREFLIGHT_UI_README || '',
         ADO_COLLECTION_README: process.env.ADO_COLLECTION_README || ''
       }
-    }, null, 2);
+    }, null, 2)}`;
   }
 
   if (kind === 'terminal') {
-    const podName = process.env.HOSTNAME || '<pod-or-container-name>';
-    return [
-      'Embedded shell access is intentionally not exposed in the browser.',
+    const status = getTerminalStatus(repoDir);
+    const lines = [
+      tabGuide,
+      status.available
+        ? 'Embedded pod terminal is enabled — use the Pod Terminal tab above the console.'
+        : 'Embedded pod terminal is not available in this environment.',
       '',
-      'Use one of these from your workstation or cluster shell:',
+      `Shell: ${status.shell || process.env.SHELL || '/bin/bash'}`,
+      `Working directory: ${status.cwd || workRoot}`,
+      `Pod/container: ${status.podName || process.env.HOSTNAME || 'unknown'}`,
+      ''
+    ];
+
+    if (!status.available) {
+      lines.push(status.reason || 'Terminal disabled.', '');
+    }
+
+    lines.push(
+      'Fallback from your workstation or cluster shell:',
       '',
-      'Podman/local container:',
-      `  podman exec -it ${podName} /bin/bash`,
-      '  podman logs -f <container-name>',
-      '',
-      'OpenShift/Kubernetes pod:',
-      `  oc rsh pod/${podName}`,
-      `  oc exec -it pod/${podName} -- /bin/bash`,
-      `  oc logs -f pod/${podName}`,
-      '',
-      'Useful paths inside the container:',
-      `  ${repoDir}`,
-      '  /workspace/collections',
-      '  /opt/ado-collections',
+      ...terminalFallbackHelp(repoDir),
       '',
       'Useful files after a run:',
       `  ${latestDebug.preflightPath || path.join(repoDir, 'ado-preflight-<env>.json')}`,
       `  ${latestDebug.extraVarsPath || path.join(repoDir, 'ado-extra-vars.json')}`,
       `  ${path.join(repoDir, '.vault_pass')}`
-    ].join('\n');
+    );
+
+    return lines.join('\n');
   }
 
   return `Unknown debug tab: ${kind}\n`;
@@ -653,10 +987,14 @@ function selectedComponentAppsFrom(data) {
 
   if (components.includes('openshift')) {
     for (const option of data.component_options?.openshift || []) {
+      if (option === 'alternate_routes' || option === 'discover_routes_alt') {
+        continue;
+      }
       if (openshiftOptionApps[option]) {
         out.push(openshiftOptionApps[option]);
       }
     }
+    pushAlternateRouteApps(data, out);
   }
 
   if (components.includes('rhbk') || (data.component_apps?.openshift || []).includes('rhbk')) {
@@ -684,6 +1022,21 @@ function selectedComponentAppsFrom(data) {
       if (grafanaOptionApps[option]) out.push(grafanaOptionApps[option]);
     }
   }
+
+  const pushAppOptions = (appName, optionMap) => {
+    const selected = components.includes(appName)
+      || (data.component_apps?.openshift || []).includes(appName);
+    if (!selected) return;
+    for (const option of data.component_options?.[appName] || []) {
+      if (optionMap[option]) out.push(optionMap[option]);
+    }
+  };
+  pushAppOptions('quay', quayOptionApps);
+  pushAppOptions('minio', minioOptionApps);
+  pushAppOptions('dev_hub', devHubOptionApps);
+  pushAppOptions('bookstack', bookstackOptionApps);
+  pushAppOptions('netbox', netboxOptionApps);
+  pushAppOptions('zabbix', zabbixOptionApps);
 
   const derived = [...new Set(out.filter(Boolean))];
 
@@ -839,8 +1192,7 @@ function defaultComponentConfig(component) {
 
   if (component === 'acm') {
     Object.assign(config, {
-      namespace: 'open-cluster-management',
-      channel: 'release-2.14'
+      channel: 'release-2.17'
     });
   }
 
@@ -1209,6 +1561,10 @@ function normalizePreflightPayload(input) {
     data.component_apps = { openshift: [], rhel: [], patching: [], aws: [], provision: [] };
     data.component_config = {};
     data.component_options = {};
+    if (!data.git) data.git = {};
+    data.git.vars_only = false;
+    // Hub/AAP-tabs-only never git-pushes — JSON may still say auto_push: true.
+    data.git.auto_push = false;
   } else if (!Array.isArray(data.components) || data.components.length === 0) {
     if (Array.isArray(data.platform) && data.platform.length > 0) {
       data.components = data.platform.includes('all') ? ['all'] : data.platform;
@@ -1235,9 +1591,12 @@ function normalizePreflightPayload(input) {
   pruneInactiveComponentApps(data);
 
   if (!data.git) data.git = {};
-  if (data.git.auto_push === undefined) data.git.auto_push = true;
+  if (!hubUpdateCollectionOnly && data.git.auto_push === undefined) {
+    data.git.auto_push = true;
+  }
   if (data.git.skip_tls_verify === undefined) data.git.skip_tls_verify = true;
   if (data.git.overwrite_generated === undefined) data.git.overwrite_generated = false;
+  if (data.git.vars_only === undefined) data.git.vars_only = false;
   if (data.git.token === undefined) data.git.token = '';
 
   // Normalize additional environments for survey choices (never create group_vars dirs).
@@ -1644,6 +2003,18 @@ function normalizePreflightPayload(input) {
   if (data.openshift.banner_location === undefined) data.openshift.banner_location = 'BannerTop';
   if (data.openshift.banner_background_color === undefined) data.openshift.banner_background_color = '#1f7a1f';
   if (data.openshift.banner_text_color === undefined) data.openshift.banner_text_color = '#ffffff';
+  if (!data.openshift.oauth_rhbk || typeof data.openshift.oauth_rhbk !== 'object') {
+    data.openshift.oauth_rhbk = { idp_name: 'Keycloak' };
+  }
+  if (!String(data.openshift.oauth_rhbk.idp_name || '').trim()) {
+    data.openshift.oauth_rhbk.idp_name = 'Keycloak';
+  }
+  if (!data.openshift.ldap_auth || typeof data.openshift.ldap_auth !== 'object') {
+    data.openshift.ldap_auth = { idp_name: 'LDAP_IDM' };
+  }
+  if (!String(data.openshift.ldap_auth.idp_name || '').trim()) {
+    data.openshift.ldap_auth.idp_name = 'LDAP_IDM';
+  }
   data.openshift.agent_installer = normalizeAgentInstaller(data.openshift.agent_installer || {});
 
   if (!data.component_config.cert_manager) data.component_config.cert_manager = {};
@@ -1820,6 +2191,44 @@ function normalizePreflightPayload(input) {
   }
 
   stripInactiveAapSections(data);
+
+  const appsDomain = String(data.openshift?.apps_domain || '').trim();
+  if (
+    data.component_config?.acs
+    && !String(data.component_config.acs.hostname || '').trim()
+    && appsDomain
+  ) {
+    data.component_config.acs.hostname = `central.${appsDomain}`;
+  }
+
+  if (!data.openshift) data.openshift = {};
+  if (!data.openshift.discover_routes) {
+    data.openshift.discover_routes = { scope: 'all', namespaces: '' };
+  }
+  if (!data.openshift.alternate_routes) {
+    data.openshift.alternate_routes = {
+      print_alt_routes: true,
+      add_alt_routes: false,
+      add_ingress_with_route: false,
+      route_name_suffix: '-alt',
+      route_labels: [],
+      ingress_controller_name: 'default',
+      force_replace: false
+    };
+  }
+  if (Array.isArray(data.component_options?.openshift)) {
+    if (data.component_options.openshift.includes('discover_routes_alt')) {
+      data.component_options.openshift = [
+        ...data.component_options.openshift.filter(option => option !== 'discover_routes_alt'),
+        ...(data.component_options.openshift.includes('alternate_routes') ? [] : ['alternate_routes'])
+      ];
+      data.openshift.alternate_routes = {
+        ...data.openshift.alternate_routes,
+        print_alt_routes: data.openshift.alternate_routes.print_alt_routes ?? true,
+        add_alt_routes: data.openshift.alternate_routes.add_alt_routes ?? true
+      };
+    }
+  }
 
   return data;
 }
@@ -3324,10 +3733,15 @@ function ensureStarterFiles(repoDir, envName) {
     bootstrap_generate_playbook_repo_git_message: "Generate ADO bootstrap content"
     bootstrap_generate_playbook_repo_write_galaxy_requirements: "{{ bootstrap_generate_playbook_repo_write_galaxy_requirements | default(false) | bool }}"
 
-  vars_files:
-    - "group_vars/all/{{ env }}/aap_config_vars.yml"
-    - "group_vars/all/{{ env }}/aap_vault.yml"
-    - "group_vars/all/{{ env }}/vault_machine_cred.yml"
+  pre_tasks:
+    - name: Load env var files when present (optional for hub-only / vars refresh)
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/{{ item }}"
+      loop:
+        - "group_vars/all/{{ env }}/aap_config_vars.yml"
+        - "group_vars/all/{{ env }}/aap_vault.yml"
+        - "group_vars/all/{{ env }}/vault_machine_cred.yml"
+      when: (playbook_dir ~ '/' ~ item) is file
 
   roles:
     - role: infra.ado.bootstrap_controller
@@ -3667,7 +4081,24 @@ function readFirstConfigName(files, fallback = 'not configured') {
   return names[0] || fallback;
 }
 
-function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
+function formatBootstrapRuntime(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return 'unknown';
+  }
+  const totalSec = Math.round(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const min = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
+  if (hours > 0) {
+    return `${hours}h ${min}m ${sec}s (${totalSec}s total)`;
+  }
+  if (min > 0) {
+    return `${min}m ${sec}s (${totalSec}s total)`;
+  }
+  return `${sec}s`;
+}
+
+function buildBootstrapRecap(data, repoDir, selectedComponentApps, runtimeMs) {
   const controllerDir = path.join(repoDir, 'configs', 'controller');
   const jobTemplatesDir = path.join(repoDir, 'configs', 'job_templates');
   const workflowsDir = path.join(repoDir, 'configs', 'workflows');
@@ -3678,6 +4109,7 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
   const lines = [
     '',
     '=== ADO Bootstrap Recap ===',
+    `Runtime: ${formatBootstrapRuntime(runtimeMs)}`,
     `AAP Server: ${data?.aap?.hostname || 'not configured'}`,
     `AAP Version: ${aapDottedVersion(
       installAapRequested(data)
@@ -3706,6 +4138,7 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps) {
     }`,
     `AAP Hub force update: ${data?.aap?.hub_force_ado_collection_update ? 'yes' : 'no'}`,
     `AAP standalone run: ${aapStandaloneRun(data) ? 'yes (AAP tabs only — skip component playbooks/full Contoller scaffolding)' : 'no'}`,
+    `Vars/vault only: ${data?.git?.vars_only === true ? 'yes (group_vars only — skip playbooks and Controller apply)' : 'no'}`,
     `AAP Hub hostname: ${data?.aap?.hub_hostname || data?.hub?.hostname || 'defaults to AAP hostname'}`,
     `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`,
     `AAP Hub EE push: ${data?.aap?.hub_push_ee ? 'yes' : 'no (optional; default off)'}`,
@@ -3839,6 +4272,117 @@ app.get('/api/events', (req, res) => {
   res.type('text/plain').send(latestEvents);
 });
 
+app.get('/api/bootstrap/result', (req, res) => {
+  if (bootstrapRunning && !latestDebug.result) {
+    return res.status(202).json({
+      status: 'running',
+      message: 'Bootstrap in progress'
+    });
+  }
+  if (!latestDebug.result) {
+    return res.status(404).json({
+      status: 'idle',
+      message: 'Bootstrap not started'
+    });
+  }
+  res.json(latestDebug.result);
+});
+
+app.get('/api/deploy/openshift/status', (req, res) => {
+  res.json({
+    enabled: deployOpenshiftEnabled(),
+    running: deployOpenshiftRunning,
+    hasResult: Boolean(latestDeployResult)
+  });
+});
+
+app.get('/api/deploy/openshift/logs', (req, res) => {
+  res.type('text/plain').send(latestDeployLog || 'No OpenShift deploy logs yet.\n');
+});
+
+app.get('/api/deploy/openshift/events', (req, res) => {
+  res.type('text/plain').send(latestDeployEvents || 'No OpenShift deploy events yet.\n');
+});
+
+app.get('/api/deploy/openshift/result', (req, res) => {
+  if (deployOpenshiftRunning && !latestDeployResult) {
+    return res.status(202).json({
+      status: 'running',
+      message: 'OpenShift deploy in progress'
+    });
+  }
+  if (!latestDeployResult) {
+    return res.status(404).json({
+      status: 'idle',
+      message: 'OpenShift deploy not started'
+    });
+  }
+  res.json(latestDeployResult);
+});
+
+app.post('/api/deploy/openshift', async (req, res) => {
+  if (!deployOpenshiftEnabled()) {
+    return res.status(403).json({
+      error: 'OpenShift deploy disabled (ADO_PREFLIGHT_DEPLOY_OPENSHIFT_ENABLED=false).'
+    });
+  }
+  if (deployOpenshiftRunning) {
+    return res.status(409).json({
+      status: 'running',
+      error: 'OpenShift deploy already in progress. Poll /api/deploy/openshift/logs.'
+    });
+  }
+  if (bootstrapRunning) {
+    return res.status(409).json({
+      error: 'Bootstrap is running. Wait for bootstrap to finish before deploying to OpenShift.'
+    });
+  }
+
+  let deployEnv;
+  try {
+    const data = normalizePreflightPayload(req.body || {});
+    deployEnv = resolveOpenshiftDeployEnv(data);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  latestDeployLog = '';
+  latestDeployEvents = '';
+  latestDeployResult = null;
+  deployOpenshiftRunning = true;
+  const startedAt = Date.now();
+
+  res.status(202).json({
+    status: 'running',
+    message: 'OpenShift deploy started. Poll /api/deploy/openshift/logs and /api/deploy/openshift/result.'
+  });
+
+  try {
+    const data = normalizePreflightPayload(req.body || {});
+    await runOpenshiftDeploy(data);
+    latestDeployResult = {
+      status: 'complete',
+      exitCode: 0,
+      runtimeMs: Date.now() - startedAt,
+      namespace: deployEnv.NAMESPACE,
+      routeHost: deployEnv.ROUTE_HOST || null
+    };
+    appendDeploy('\n=== OpenShift deploy complete ===\n');
+    deployEvent('OpenShift deploy finished exitCode=0');
+  } catch (err) {
+    latestDeployResult = {
+      status: 'failed',
+      exitCode: 1,
+      runtimeMs: Date.now() - startedAt,
+      error: err.message
+    };
+    appendDeploy(`\n=== OpenShift deploy failed ===\n${err.message}\n`);
+    deployEvent(`OpenShift deploy failed: ${err.message}`);
+  } finally {
+    deployOpenshiftRunning = false;
+  }
+});
+
 app.get('/api/debug/:kind', (req, res) => {
   try {
     const kind = String(req.params.kind || 'summary');
@@ -3847,6 +4391,10 @@ app.get('/api/debug/:kind', (req, res) => {
     event(`Failed reading debug ${req.params.kind}: ${err.message}`);
     res.status(500).type('text/plain').send(`Failed reading debug data: ${err.message}\n`);
   }
+});
+
+app.get('/api/terminal/status', (req, res) => {
+  res.json(getTerminalStatus(latestDebug.repoDir || path.join(workRoot, 'bootstrap-sample')));
 });
 
 app.get('/api/logs/raw', (req, res) => {
@@ -4113,6 +4661,13 @@ app.post('/api/keycloak/realm-public-key', async (req, res) => {
 });
 
 app.post('/api/bootstrap', async (req, res) => {
+  if (bootstrapRunning) {
+    return res.status(409).json({
+      status: 'running',
+      error: 'Bootstrap already in progress. Poll /api/logs and /api/bootstrap/result.'
+    });
+  }
+
   latestLog = '';
   latestEvents = '';
   latestDebug = {
@@ -4342,9 +4897,17 @@ app.post('/api/bootstrap', async (req, res) => {
   latestDebug.selectedComponents = selectedComponents;
   latestDebug.selectedComponentApps = selectedComponentApps;
 
-  const autoGitPush = data?.git?.auto_push !== false;
-  const overwriteGenerated = data?.git?.overwrite_generated === true;
-  const ansibleVerbosity = normalizeVerbosity(data?.ansible?.verbosity ?? data?.verbosity ?? 0);
+  const autoGitPush = hubUpdateCollectionOnly
+    ? false
+    : (data?.git?.auto_push !== false);
+  const varsOnly = data?.git?.vars_only === true && !hubUpdateCollectionOnly;
+  const overwriteGenerated = !varsOnly && data?.git?.overwrite_generated === true;
+  // UI dropdown (ansible.verbosity in POST body) is authoritative — never fall back
+  // to legacy top-level verbosity from imported JSON.
+  if (!data.ansible) data.ansible = {};
+  data.ansible.verbosity = normalizeVerbosity(data.ansible.verbosity);
+  delete data.verbosity;
+  const ansibleVerbosity = data.ansible.verbosity;
   const ansibleVerbosityFlag = verbosityFlag(ansibleVerbosity);
   const ansibleExtraArgsRaw = String(data?.ansible?.extra_args || '').trim();
   const ansibleExtraArgsShell = formatAnsibleExtraArgsForShell(ansibleExtraArgsRaw);
@@ -4356,6 +4919,7 @@ app.post('/api/bootstrap', async (req, res) => {
   append(`\nSelected Components: ${selectedComponents}\n`);
   append(`Selected Component Apps: ${selectedComponentApps.join(',')}\n`);
   append(`Auto Git Push: ${autoGitPush}\n`);
+  append(`Vars/Vault Only: ${varsOnly}\n`);
   append(`Overwrite Generated Content: ${overwriteGenerated}\n`);
   append(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}\n`);
   append(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}\n`);
@@ -4371,6 +4935,7 @@ app.post('/api/bootstrap', async (req, res) => {
   event(`Selected components: ${selectedComponents}`);
   event(`Selected component apps: ${selectedComponentApps.join(',')}`);
   event(`Auto Git Push: ${autoGitPush}`);
+  event(`Vars/Vault Only: ${varsOnly}`);
   event(`Overwrite Generated Content: ${overwriteGenerated}`);
   event(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}`);
   event(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}`);
@@ -4383,7 +4948,7 @@ app.post('/api/bootstrap', async (req, res) => {
   event(`Configure Contoller (Using AAP): ${configureAap}`);
   event(`Encrypt vault files: ${encryptVaultFiles}`);
 
-  const willTalkToAap = configureAap
+  const willTalkToAap = (configureAap && !varsOnly)
     || hubPublishRequested
     || hubPushEeRequested
     || hubUpdateCollectionOnly;
@@ -4403,6 +4968,14 @@ app.post('/api/bootstrap', async (req, res) => {
     }
   }
 
+  bootstrapRunning = true;
+  bootstrapStartedAt = Date.now();
+  res.status(202).json({
+    status: 'started',
+    message: 'Bootstrap running. Poll /api/logs, /api/events, and /api/bootstrap/result until complete.'
+  });
+
+  try {
   const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
   const gitUsesBearerAuth = usesBearerGitAuth(scmTool);
 
@@ -4784,6 +5357,7 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     git_auto_push: autoGitPush,
     git_overwrite_generated: overwriteGenerated,
     git_skip_tls_verify: gitSkipTlsVerify,
+    git_vars_only: varsOnly,
     scm_tool: scmTool,
     git_auth_mode: gitUsesBearerAuth ? 'bearer' : 'basic',
     aap_enabled: configureAap,
@@ -4793,7 +5367,8 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     ansible_verbosity_flag: ansibleVerbosityFlag,
     ansible_extra_args: ansibleExtraArgsRaw,
     encrypt_vault_files: encryptVaultFiles,
-    bootstrap_hub_update_collection_only: hubUpdateCollectionOnly
+    bootstrap_hub_update_collection_only: hubUpdateCollectionOnly,
+    bootstrap_controller_vars_only: varsOnly
   }, null, 2));
 
   event('Writing vault password file');
@@ -4803,6 +5378,7 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
   );
 
   const code = await runStream('bash', ['-lc', `
+set -euo pipefail
 export ANSIBLE_COLLECTIONS_PATH=/workspace/collections:/usr/share/ansible/collections
 export ANSIBLE_COLLECTIONS_PATHS=/workspace/collections:/usr/share/ansible/collections
 export ANSIBLE_HOST_KEY_CHECKING=false
@@ -4816,6 +5392,7 @@ export PYTHONHTTPSVERIFY=0
 ${gitSkipTlsVerify ? 'export GIT_SSL_NO_VERIFY=true' : 'unset GIT_SSL_NO_VERIFY || true'}
 
 cd ${repoDir}
+export ANSIBLE_VAULT_PASSWORD_FILE=.vault_pass
 
 ${gitSkipTlsVerify
   ? 'git config --local http.sslVerify false || true'
@@ -4868,11 +5445,13 @@ ansible-playbook \\
   -e skip_tls_verify=${skipTlsVerify ? 'true' : 'false'} \\
   -e ansible_tls_verify=${skipTlsVerify ? 'false' : 'true'} \\
   -e bootstrap_hub_update_collection_only=${hubUpdateCollectionOnly ? 'true' : 'false'} \\
-  -e generate_playbooks=${hubUpdateCollectionOnly ? 'false' : 'true'} \\
-  -e generate_aap_configs=${configureAap && !hubUpdateCollectionOnly ? 'true' : 'false'} \\
-  -e apply_aap_configs=${configureAap ? 'true' : 'false'} \\
-  -e bootstrap_apply_aap_configs=${configureAap && !hubUpdateCollectionOnly ? 'true' : 'false'} \\
-  -e bootstrap_controller_apply_aap_configs=${configureAap ? 'true' : 'false'} \\
+  -e bootstrap_controller_vars_only=${varsOnly ? 'true' : 'false'} \\
+  -e bootstrap_vars_only=${varsOnly ? 'true' : 'false'} \\
+  -e generate_playbooks=${(hubUpdateCollectionOnly || varsOnly) ? 'false' : 'true'} \\
+  -e generate_aap_configs=${configureAap && !hubUpdateCollectionOnly && !varsOnly ? 'true' : 'false'} \\
+  -e apply_aap_configs=${configureAap && !varsOnly ? 'true' : 'false'} \\
+  -e bootstrap_apply_aap_configs=${configureAap && !hubUpdateCollectionOnly && !varsOnly ? 'true' : 'false'} \\
+  -e bootstrap_controller_apply_aap_configs=${configureAap && !varsOnly ? 'true' : 'false'} \\
   -e generate_env_vars_use_aap=${configureAap ? 'true' : 'false'} \\
   -e generate_playbook_repo_pause_for_push=false \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
@@ -4880,8 +5459,9 @@ ansible-playbook \\
   -e generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\
   -e bootstrap_generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\
   -e generate_playbook_repo_git_url=${JSON.stringify(repoUrl)} \\
-  -e bootstrap_generate_playbook_repo_git_url=${JSON.stringify(repoUrl)} \\
-  ${gitToken ? `-e generate_playbook_repo_git_token=${JSON.stringify(gitToken)} \\\n  -e bootstrap_generate_playbook_repo_git_token=${JSON.stringify(gitToken)} \\` : ''}
+  -e bootstrap_generate_playbook_repo_git_url=${JSON.stringify(repoUrl)}${gitToken ? ` \\
+  -e generate_playbook_repo_git_token=${JSON.stringify(gitToken)} \\
+  -e bootstrap_generate_playbook_repo_git_token=${JSON.stringify(gitToken)}` : ''} \\
   -e generate_playbook_repo_git_ssl_verify=${gitSkipTlsVerify ? 'false' : 'true'} \\
   -e bootstrap_generate_playbook_repo_git_ssl_verify=${gitSkipTlsVerify ? 'false' : 'true'} \\
   -e generate_playbook_repo_git_auth_mode=${gitUsesBearerAuth ? 'bearer' : 'basic'} \\
@@ -4895,24 +5475,30 @@ ansible-playbook \\
   -e bootstrap_generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
   -e bootstrap_generate_env_vars_vault_password_file=.vault_pass \\
   -e bootstrap_generate_playbook_repo_write_galaxy_requirements=${hubPublishRequested ? 'true' : 'false'} \\
-  --vault-password-file .vault_pass${ansibleExtraArgsShell ? ` \\\n  ${ansibleExtraArgsShell}` : ''}
+  --vault-password-file .vault_pass${ansibleExtraArgsShell ? ` \\
+  ${ansibleExtraArgsShell}` : ''}
 `], workRoot, 'Running ansible-playbook', bootstrapEnv);
 
+  const runtimeMs = bootstrapStartedAt ? Date.now() - bootstrapStartedAt : null;
   const bootstrapRecap = buildBootstrapRecap(
     data,
     repoDir,
-    selectedComponentApps
+    selectedComponentApps,
+    runtimeMs
   );
   event(`Bootstrap finished exitCode=${code}`);
 
   latestDebug.result = {
     status: code === 0 ? 'complete' : 'failed',
     exitCode: code,
+    bootstrapRuntimeMs: runtimeMs,
+    bootstrapRuntime: formatBootstrapRuntime(runtimeMs),
     repoDir,
     preflightFile,
     selectedComponents,
     selectedComponentApps,
     autoGitPush,
+    varsOnly,
     overwriteGenerated,
     ansibleVerbosity,
     ansibleVerbosityFlag,
@@ -4924,13 +5510,45 @@ ansible-playbook \\
     gitTokenProvided: Boolean(gitToken)
   };
 
-  res.json(latestDebug.result);
+  append(`\n\nRESULT:\n${JSON.stringify(latestDebug.result, null, 2)}${bootstrapRecap}\n`);
+  } catch (err) {
+    event(`Bootstrap failed: ${err.message}`);
+    append(`\nFATAL: ${err.message}\n`);
+    const runtimeMs = bootstrapStartedAt ? Date.now() - bootstrapStartedAt : null;
+    latestDebug.result = {
+      status: 'failed',
+      exitCode: 2,
+      error: err.message,
+      bootstrapRuntimeMs: runtimeMs,
+      bootstrapRuntime: formatBootstrapRuntime(runtimeMs)
+    };
+    append(`\n\nRESULT:\n${JSON.stringify(latestDebug.result, null, 2)}\n`);
+  } finally {
+    bootstrapRunning = false;
+    bootstrapStartedAt = null;
+  }
 });
 
 app.use((req, res) => {
   res.sendFile(path.join(uiDir, 'index.html'));
 });
 
-app.listen(port, '0.0.0.0', () => {
+const server = http.createServer(app);
+let terminalWss;
+
+try {
+  const { WebSocketServer } = require('ws');
+  terminalWss = new WebSocketServer({ server, path: '/api/terminal/ws' });
+  terminalWss.on('connection', ws => {
+    attachTerminalWebSocket(ws);
+  });
+  event(terminalEnabled()
+    ? 'Pod terminal WebSocket enabled at /api/terminal/ws'
+    : 'Pod terminal WebSocket registered but unavailable (disabled or node-pty missing)');
+} catch (err) {
+  event(`Pod terminal WebSocket setup failed: ${err.message}`);
+}
+
+server.listen(port, '0.0.0.0', () => {
   event(`ADO Preflight UI listening on ${port}`);
 });

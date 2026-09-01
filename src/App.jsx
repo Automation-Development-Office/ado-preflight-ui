@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@patternfly/react-core/dist/styles/base.css';
+import PodTerminal from './PodTerminal.jsx';
 import {
   Page,
   PageSection,
@@ -34,8 +35,8 @@ import {
 import adoLogo from '../ado-logo-redhat.png';
 
 const openshiftApps = [
-  'aap','acs','acm','bookstack','cert_manager','console','devspaces',
-  'dirsrv','eck','gitops','gitlab','grafana','kafka','netbox',
+  'aap','acs','acm','bookstack','cert_manager','console','devspaces','dev_hub',
+  'dirsrv','eck','gitops','gitlab','grafana','kafka','minio','netbox',
   'oadp','openshift','pega','quay','rhbk'
 ];
 
@@ -83,6 +84,129 @@ function hostnameFromUrl(value) {
   } catch {
     return raw.replace(/^https?:\/\//i, '').split('/')[0].trim();
   }
+}
+
+function syncDevHubGitlabTokenFromGit(source, { force = false } = {}) {
+  const copy = source;
+  const gitToken = String(copy?.git?.token || '').trim();
+  if (!gitToken) return copy;
+  if (!copy.component_config) copy.component_config = {};
+  if (!copy.component_config.dev_hub) copy.component_config.dev_hub = {};
+  const current = String(copy.component_config.dev_hub.gitlab_token || '').trim();
+  if (force || !current) {
+    copy.component_config.dev_hub.gitlab_token = gitToken;
+  }
+  return copy;
+}
+
+function isRhbkSelected(source) {
+  const components = Array.isArray(source?.components) ? source.components : [];
+  if (components.includes('all') || components.includes('rhbk')) return true;
+  const openshiftApps = source?.component_apps?.openshift || [];
+  return openshiftApps.includes('rhbk');
+}
+
+function isGrafanaSelected(source) {
+  const components = Array.isArray(source?.components) ? source.components : [];
+  if (components.includes('all') || components.includes('grafana')) return true;
+  const openshiftApps = source?.component_apps?.openshift || [];
+  const rhelApps = source?.component_apps?.rhel || [];
+  return openshiftApps.includes('grafana') || rhelApps.includes('grafana');
+}
+
+function defaultRhbkRealm(source) {
+  const realm = String(source?.component_config?.rhbk?.realm || '').trim();
+  if (realm) return realm;
+  const env = String(source?.environment || 'prod').trim().toLowerCase();
+  if (env === 'dev') return 'Dev';
+  if (env === 'prod') return 'rhlab';
+  return env ? env.charAt(0).toUpperCase() + env.slice(1) : 'rhlab';
+}
+
+function buildRhbkIssuerUrl(source) {
+  const rhbk = source?.component_config?.rhbk || {};
+  const host = hostnameFromUrl(rhbk.hostname || rhbk.rhbk_hostname || '');
+  const appsDomain = String(source?.openshift?.apps_domain || '').trim();
+  const hostClean = host || (appsDomain ? `keycloak.${appsDomain}` : '');
+  const realm = defaultRhbkRealm(source);
+  if (!hostClean || !realm) return '';
+  return `https://${hostClean}/realms/${realm}`;
+}
+
+function resolveGrafanaRhbkClientId(source) {
+  const clients = source?.component_config?.rhbk?.clients;
+  if (Array.isArray(clients)) {
+    for (const client of clients) {
+      if (!client || typeof client !== 'object') continue;
+      const id = String(client.id || client.client_id || '').trim();
+      if (id && /grafana/i.test(id)) return id;
+    }
+    for (const client of clients) {
+      if (!client || typeof client !== 'object') continue;
+      const name = String(client.name || '').trim();
+      const id = String(client.id || client.client_id || '').trim();
+      if (/grafana/i.test(name) && id) return id;
+    }
+  }
+  return 'grafana-client';
+}
+
+/** When RHBK + Grafana are selected, fill OIDC client/issuer from RHBK; secret fetched at deploy. */
+function syncGrafanaOidcFromRhbk(source, { force = false } = {}) {
+  const copy = source;
+  if (!isRhbkSelected(copy) || !isGrafanaSelected(copy)) return copy;
+  const grafanaOpts = copy?.component_options?.grafana || [];
+  if (grafanaOpts.includes('standalone')) return copy;
+
+  if (!copy.component_options) copy.component_options = {};
+  if (!copy.component_options.grafana) copy.component_options.grafana = [];
+  if (!copy.component_options.grafana.includes('oidc')) {
+    copy.component_options.grafana.push('oidc');
+  }
+
+  if (!copy.component_config) copy.component_config = {};
+  if (!copy.component_config.grafana) copy.component_config.grafana = {};
+  if (!copy.component_config.grafana.oidc) copy.component_config.grafana.oidc = {};
+
+  const oidc = copy.component_config.grafana.oidc;
+  const issuer = buildRhbkIssuerUrl(copy);
+  const clientId = resolveGrafanaRhbkClientId(copy);
+
+  oidc.enabled = oidc.enabled !== false;
+  if (force || !String(oidc.client_id || '').trim()) {
+    oidc.client_id = clientId;
+  }
+  if (force || !String(oidc.issuer || '').trim()) {
+    if (issuer) oidc.issuer = issuer;
+  }
+  if (!oidc.client_secret_manual) {
+    oidc.client_secret = '';
+    oidc.fetch_secret_from_rhbk = true;
+  }
+  if (!Array.isArray(oidc.scopes) || oidc.scopes.length === 0) {
+    oidc.scopes = ['openid', 'profile', 'email', 'groups'];
+  } else if (!oidc.scopes.includes('groups')) {
+    oidc.scopes = [...oidc.scopes, 'groups'];
+  }
+  if (!Array.isArray(oidc.role_map) || oidc.role_map.length === 0) {
+    oidc.role_map = [
+      { group: 'ocp-cluster-admin', role: 'GrafanaAdmin' },
+      { group: 'ocp-cluster-devel', role: 'Viewer' },
+      { group: 'ocp-cluster-ops', role: 'Editor' },
+      { group: 'ocp-cluster-readonly', role: 'Viewer' }
+    ];
+  }
+  if (!String(oidc.default_role || '').trim()) {
+    oidc.default_role = 'Viewer';
+  }
+  if (!copy.component_options.rhbk) copy.component_options.rhbk = [];
+  if (!copy.component_options.rhbk.includes('client_scopes')) {
+    copy.component_options.rhbk.push('client_scopes');
+  }
+  if (!copy.component_options.rhbk.includes('client')) {
+    copy.component_options.rhbk.push('client');
+  }
+  return copy;
 }
 
 function attachAapLicenseRequested(source) {
@@ -238,6 +362,51 @@ function syncAapStandaloneFields(aap) {
     aap.standalone_run = aap.hub_update_collection_only === true;
   }
   aap.hub_update_collection_only = aap.standalone_run === true;
+}
+
+function formatBootstrapRuntime(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return 'unknown';
+  }
+  const totalSec = Math.round(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const min = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
+  if (hours > 0) {
+    return `${hours}h ${min}m ${sec}s (${totalSec}s total)`;
+  }
+  if (min > 0) {
+    return `${min}m ${sec}s (${totalSec}s total)`;
+  }
+  return `${sec}s`;
+}
+
+function extractBootstrapRuntime(result, logText) {
+  if (result?.bootstrapRuntime) {
+    return String(result.bootstrapRuntime);
+  }
+  if (Number.isFinite(result?.bootstrapRuntimeMs) && result.bootstrapRuntimeMs >= 0) {
+    return formatBootstrapRuntime(result.bootstrapRuntimeMs);
+  }
+  const recapBlock = String(logText || '').match(
+    /=== ADO Bootstrap Recap ===[\s\S]*?^Runtime:\s*(.+)$/m
+  );
+  if (recapBlock) {
+    return recapBlock[1].trim();
+  }
+  const runtimeLine = String(logText || '').match(/^Runtime:\s*(.+)$/m);
+  if (runtimeLine) {
+    return runtimeLine[1].trim();
+  }
+  return '';
+}
+
+function resolveBootstrapExitCode(result, eventsText) {
+  if (result?.exitCode !== undefined && result?.exitCode !== null) {
+    return result.exitCode;
+  }
+  const match = String(eventsText || '').match(/Bootstrap finished exitCode=(\d+)/);
+  return match ? Number.parseInt(match[1], 10) : undefined;
 }
 
 function clearStandaloneWhenComponentsSelected(copy) {
@@ -404,10 +573,16 @@ const componentOptionDefaults = {
     'ldap_auth',
     'oauth_rhbk',
     'discover_routes_print',
-    'discover_routes_alt',
+    'alternate_routes',
     'update_pull_secret'
   ],
-  grafana: ['standalone', 'datasources', 'folders', 'dashboards', 'email', 'oidc'],
+  grafana: ['standalone', 'datasources', 'folders', 'dashboards', 'alternate_route', 'email', 'oidc'],
+  quay: ['oidc'],
+  minio: ['oidc'],
+  dev_hub: ['oidc'],
+  bookstack: ['oidc'],
+  netbox: ['oidc'],
+  zabbix: ['saml'],
   gitlab: ['standalone'],
   rhbk: ['standalone', 'realm', 'client', 'idp', 'federation', 'group_mapper', 'client_scopes', 'client_mappers'],
   acs: ['acs_report'],
@@ -441,13 +616,15 @@ const componentOptionLabels = {
   oauth_rhbk: 'Configure OAuth/RHBK (Keycloak) in OpenShift',
   rhbk: 'RHBK (Keycloak)',
   discover_routes_print: 'Discover Routes and Print',
-  discover_routes_alt: 'Discover Routes and Add Alternative Route',
+  alternate_routes: 'Alternate Routes',
   update_pull_secret: 'Update Pull Secret',
+  oidc: 'OIDC Auth',
+  saml: 'SAML SSO',
   datasources: 'Datasources',
   folders: 'Folders',
   dashboards: 'Dashboards',
+  alternate_route: 'Deploy Grafana Alternate Route',
   email: 'Email / SMTP',
-  oidc: 'OIDC Auth',
   standalone: 'Standalone (RHEL VM install)',
   realm: 'Realm',
   client: 'Client',
@@ -478,6 +655,8 @@ const componentOptionLabels = {
   cis: 'CIS',
   rhel_8_stig: 'RHEL 8 STIG',
   rhel_9_stig: 'RHEL 9 STIG',
+  dev_hub: 'Dev Hub',
+  minio: 'MinIO',
   ec2_ami_copy: 'EC2 AMI Copy'
 };
 
@@ -776,6 +955,9 @@ const defaults = {
     // When false (default), regenerate only group_vars/all/<environment>.
     // When true, wipe all group_vars (+ playbooks/configs) before scaffolding.
     overwrite_generated: false,
+    // When true: only refresh group_vars (vars/vault) + optional git push.
+    // Skips playbook regeneration and Controller org/project/JT/workflow apply.
+    vars_only: false,
     token: ''
   },
 
@@ -841,10 +1023,12 @@ const defaults = {
         from_name: 'Grafana'
       },
       oidc: {
-        enabled: false,
+        enabled: true,
         client_id: 'grafana-client',
         client_secret: '',
-        issuer: ''
+        issuer: '',
+        fetch_secret_from_rhbk: true,
+        client_secret_manual: false
       },
       alerts_enabled: false,
       standalone_hostname: 'grafana-ado.server.lab',
@@ -860,16 +1044,11 @@ const defaults = {
       standalone_rhn_activation_key: ''
     },
     acm: {
-      hostname: '',
-      storage: '',
-      replicas: 1,
-      namespace: 'open-cluster-management',
-      channel: 'release-2.14'
+      channel: 'release-2.17'
     },
     acs: {
       hostname: '',
       storage: '',
-      replicas: 1,
       namespace: 'stackrox',
       policies_source_type: 'git',
       policies_source: '',
@@ -899,14 +1078,14 @@ const defaults = {
       idp_name: '',
       idp_alias: '',
       idp_provider: 'oidc',
-      federation_name: '',
+      federation_name: 'LDAP',
       federation_provider: 'ldap',
       federation_ldap_url: '',
       federation_bind_dn: '',
       federation_bind_password: '',
       group_mapper_name: '',
       group_mapper_claim: 'groups',
-      client_scope_name: '',
+      client_scope_name: 'groups',
       client_scope_protocol: 'openid-connect',
       client_mapper_name: '',
       client_mapper_claim: ''
@@ -1032,6 +1211,18 @@ const defaults = {
       che_image_tag: '',
       dashboard_image: '',
       customize_workspace: false
+    },
+    dev_hub: {
+      hostname: '',
+      storage: '',
+      replicas: 1,
+      instance_name: 'chad-lab',
+      gitlab_host: '',
+      catalog_url: '',
+      keycloak_realm: 'rhlab',
+      keycloak_client_id: 'rhdh',
+      gitlab_token: '',
+      oidc_client_secret: ''
     },
     dirsrv: { hostname: '', storage: '', replicas: 1 },
     eck: { hostname: '', storage: '', replicas: 1 },
@@ -1252,6 +1443,25 @@ const defaults = {
     banner_background_color: '#1f7a1f',
     banner_text_color: '#ffffff',
     token: '',
+    oauth_rhbk: {
+      idp_name: 'Keycloak'
+    },
+    ldap_auth: {
+      idp_name: 'LDAP_IDM'
+    },
+    discover_routes: {
+      scope: 'all',
+      namespaces: ''
+    },
+    alternate_routes: {
+      print_alt_routes: true,
+      add_alt_routes: false,
+      add_ingress_with_route: false,
+      route_name_suffix: '-alt',
+      route_labels: [],
+      ingress_controller_name: 'default',
+      force_replace: false
+    },
     agent_installer: agentInstallerDefaults
   },
 
@@ -1405,6 +1615,10 @@ function App() {
   const [importStatus, setImportStatus] = useState('');
   const [focusSection, setFocusSection] = useState('');
   const [runFinished, setRunFinished] = useState(false);
+  const [bootstrapStatus, setBootstrapStatus] = useState('idle');
+  const [bootstrapRuntime, setBootstrapRuntime] = useState('');
+  const [deployStatus, setDeployStatus] = useState('idle');
+  const [deployRuntime, setDeployRuntime] = useState('');
   const [showRawOutput, setShowRawOutput] = useState(false);
   const [consoleFontSize, setConsoleFontSize] = useState(13);
   const [agentInstallerResult, setAgentInstallerResult] = useState(null);
@@ -1623,8 +1837,59 @@ function App() {
     tree: 'Repo Tree',
     configs: 'Generated Configs',
     runtime: 'Runtime',
-    terminal: 'Terminal Help'
+    terminal: 'Pod Terminal'
   }[tab] || tab);
+
+  /** What each Events / Debug sub-tab shows (for troubleshooting). */
+  const debugTabHelp = {
+    events: {
+      title: 'Events',
+      body: 'Timeline from the preflight server during this bootstrap run (git clone, collection install, '
+        + 'writing JSON, ansible-playbook milestones). This is not OpenShift/Kubernetes pod events — use '
+        + 'Pod Terminal or oc logs if you need the container log from outside the UI.'
+    },
+    summary: {
+      title: 'Summary',
+      body: 'Quick index for the current run: local clone path on the pod, paths to preflight/extra-vars files, '
+        + 'selected components, final result object (exit code, runtime), and how large the Logs/Events buffers are.'
+    },
+    preflight: {
+      title: 'Preflight JSON',
+      body: 'The normalized JSON file written into the bootstrap clone on the pod (ado-preflight-<env>.json) '
+        + 'and passed to Ansible as -e preflight_json=…. Same contract CLI uses when you run bootstrap by hand. '
+        + 'Secrets are redacted here; the on-disk file in the repo still has vault passwords for encrypt.'
+    },
+    extraVars: {
+      title: 'Extra Vars',
+      body: 'Debug snapshot only (ado-extra-vars.json): derived flags the server computed (hub-only, git push, '
+        + 'component lists, verbosity). Helpful to compare UI intent vs what you would pass on CLI. '
+        + 'Not the full ansible-playbook -e list — see Logs for the actual command extras.'
+    },
+    tree: {
+      title: 'Repo Tree',
+      body: 'Directory listing of the bootstrap git clone on the pod (/workspace/bootstrap-sample), not GitLab. '
+        + 'Shows generated group_vars, playbooks, and configs after env generation. GitLab remote is unchanged '
+        + 'until auto-push succeeds (hub-only runs skip push by default).'
+    },
+    configs: {
+      title: 'Generated Configs',
+      body: 'File contents from the local clone: configs/controller, configs/job_templates, configs/workflows, '
+        + 'playbooks/, and group_vars/ — what infra.ado scaffolding produced this run. Use to verify JT/workflow '
+        + 'seeds and vars before pushing to Git or syncing Controller.'
+    },
+    runtime: {
+      title: 'Runtime',
+      body: 'Preflight container environment: UI/collection image version, pod hostname, work directories, '
+        + 'collection tarball paths. Bootstrap duration and pass/fail are in the status banner above and Logs recap '
+        + '(Runtime: …), not this tab.'
+    },
+    terminal: {
+      title: 'Pod Terminal',
+      body: 'Interactive shell inside the preflight pod/container (/workspace). Same environment as bootstrap '
+        + '(vault files, bootstrap clone, collections). Full access to secrets on disk — disable with '
+        + 'ADO_PREFLIGHT_TERMINAL_ENABLED=false on shared deployments. Reconnect by switching tabs if the session closes.'
+    }
+  };
 
   const debugEndpoint = tab => ({
     summary: 'summary',
@@ -1653,10 +1918,31 @@ function App() {
   };
 
   useEffect(() => {
-    if (activeTab === 'events' && debugTab !== 'events') {
+    if (activeTab === 'events' && debugTab !== 'events' && debugTab !== 'terminal') {
       fetchDebugTab(debugTab);
     }
   }, [activeTab, debugTab, runFinished]);
+
+  useEffect(() => {
+    if (!isRhbkSelected(data) || !isGrafanaSelected(data)) return;
+    setData(prev => {
+      const next = JSON.parse(JSON.stringify(prev));
+      const before = JSON.stringify(next.component_config?.grafana?.oidc || {});
+      syncGrafanaOidcFromRhbk(next, { force: false });
+      const after = JSON.stringify(next.component_config?.grafana?.oidc || {});
+      return before === after ? prev : next;
+    });
+  }, [
+    data.components,
+    data.component_apps?.openshift,
+    data.component_apps?.rhel,
+    data.component_options?.grafana,
+    data.component_config?.rhbk?.hostname,
+    data.component_config?.rhbk?.realm,
+    data.component_config?.rhbk?.clients,
+    data.openshift?.apps_domain,
+    data.environment
+  ]);
 
   const set = (path, value) => {
     setData(prev => {
@@ -1896,6 +2182,10 @@ function App() {
         copy.selected_component_apps = [];
         copy.component_config = {};
         copy.component_options = {};
+        if (!copy.git) copy.git = {};
+        copy.git.vars_only = false;
+        // Hub/AAP-tabs-only: publish to Hub — do not git-push bootstrap repo unless re-enabled on Git card.
+        copy.git.auto_push = false;
       }
       return copy;
     });
@@ -2320,6 +2610,31 @@ function App() {
       Object.entries(hydrated.component_config).filter(([component]) => allowedConfig.has(component))
     );
 
+    if (selectedApps.includes('grafana') && selectedApps.includes('rhbk')) {
+      syncGrafanaOidcFromRhbk(hydrated, { force: false });
+    }
+
+    const rhbkAuthApps = ['quay', 'minio', 'dev_hub', 'bookstack', 'netbox'];
+    if (selectedApps.includes('rhbk')) {
+      rhbkAuthApps.forEach(app => {
+        if (!selectedApps.includes(app)) return;
+        if (!hydrated.component_options[app]) hydrated.component_options[app] = [];
+        if (!hydrated.component_options[app].includes('oidc')) {
+          hydrated.component_options[app].push('oidc');
+        }
+      });
+      if (selectedApps.includes('zabbix')) {
+        if (!hydrated.component_options.zabbix) hydrated.component_options.zabbix = [];
+        if (!hydrated.component_options.zabbix.includes('saml')) {
+          hydrated.component_options.zabbix.push('saml');
+        }
+      }
+    }
+
+    if (selectedApps.includes('dev_hub')) {
+      syncDevHubGitlabTokenFromGit(hydrated);
+    }
+
     return hydrated;
   };
 
@@ -2386,6 +2701,28 @@ function App() {
     }
     merged = hydrateSelectedComponentConfigs(merged);
     if (!merged.component_options) merged.component_options = {};
+    if (Array.isArray(merged.component_options.openshift)) {
+      if (merged.component_options.openshift.includes('discover_routes_alt')) {
+        merged.component_options.openshift = [
+          ...merged.component_options.openshift.filter(option => option !== 'discover_routes_alt'),
+          ...(merged.component_options.openshift.includes('alternate_routes') ? [] : ['alternate_routes'])
+        ];
+        if (!merged.openshift) merged.openshift = {};
+        merged.openshift.alternate_routes = {
+          ...(defaults.openshift?.alternate_routes || {}),
+          ...(merged.openshift.alternate_routes || {}),
+          print_alt_routes: merged.openshift?.alternate_routes?.print_alt_routes ?? true,
+          add_alt_routes: merged.openshift?.alternate_routes?.add_alt_routes ?? true
+        };
+      }
+    }
+    if (!merged.openshift) merged.openshift = {};
+    if (!merged.openshift.discover_routes) {
+      merged.openshift.discover_routes = { ...(defaults.openshift?.discover_routes || {}) };
+    }
+    if (!merged.openshift.alternate_routes) {
+      merged.openshift.alternate_routes = { ...(defaults.openshift?.alternate_routes || {}) };
+    }
     if (!merged.aap) merged.aap = {};
     if (!Array.isArray(merged.aap.additional_credentials)) merged.aap.additional_credentials = [];
     merged.aap.additional_credentials = merged.aap.additional_credentials.map((credential, index) => ({
@@ -2540,6 +2877,7 @@ function App() {
     if (merged.git.auto_push === undefined) merged.git.auto_push = true;
     if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
     if (merged.git.overwrite_generated === undefined) merged.git.overwrite_generated = false;
+    if (merged.git.vars_only === undefined) merged.git.vars_only = false;
     if (merged.additional_environments === undefined) merged.additional_environments = ['prod'];
     merged.additional_environments = parseAdditionalEnvironmentsList(merged.additional_environments);
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
@@ -2548,6 +2886,11 @@ function App() {
     if (!merged.tools) merged.tools = { ...defaults.tools };
     if (!merged.jira) merged.jira = { ...defaults.jira };
     merged.jira.enabled = merged.components.includes('all') || merged.components.includes('jira') || merged.jira.enabled === true;
+
+    if (merged.aap?.standalone_run === true) {
+      merged.git.vars_only = false;
+      merged.git.auto_push = false;
+    }
 
     return merged;
   };
@@ -2868,6 +3211,23 @@ function App() {
 
     stripInactiveAapSections(payload);
 
+    // Form controls win over imported JSON — only ansible.verbosity is used at runtime.
+    payload.ansible = payload.ansible || {};
+    payload.ansible.verbosity = Number.parseInt(payload.ansible.verbosity, 10);
+    if (Number.isNaN(payload.ansible.verbosity) || payload.ansible.verbosity < 0) {
+      payload.ansible.verbosity = 0;
+    }
+    if (payload.ansible.verbosity > 6) {
+      payload.ansible.verbosity = 6;
+    }
+    delete payload.verbosity;
+
+    if (payload.aap?.standalone_run === true) {
+      if (!payload.git) payload.git = {};
+      payload.git.vars_only = false;
+      payload.git.auto_push = false;
+    }
+
     return payload;
   };
 
@@ -3081,6 +3441,10 @@ function App() {
       }
 
       clearStandaloneWhenComponentsSelected(copy);
+
+      if (!isSelected && app === 'dev_hub') {
+        syncDevHubGitlabTokenFromGit(copy);
+      }
 
       return copy;
     });
@@ -3496,7 +3860,7 @@ function App() {
 
   const openDebugTab = key => {
     setDebugTab(key);
-    if (key !== 'events') {
+    if (key !== 'events' && key !== 'terminal') {
       fetchDebugTab(key);
     }
   };
@@ -3556,14 +3920,60 @@ function App() {
 
   const runBootstrapInsideContainer = async () => {
     setRunFinished(false);
+    setBootstrapStatus('running');
+    setBootstrapRuntime('');
     setShowRawOutput(false);
     setActiveTab('logs');
     setPreview('Starting bootstrap inside container...\n');
     setEvents('Starting bootstrap request...\n');
 
     let keepPolling = true;
+    let poller = null;
 
-    const poller = setInterval(async () => {
+    const finishRun = (previewText, eventsText, status = 'idle', runtime = '') => {
+      if (previewText !== undefined) setPreview(previewText);
+      if (eventsText !== undefined) setEvents(eventsText);
+      keepPolling = false;
+      if (poller) clearInterval(poller);
+      setBootstrapStatus(status);
+      setBootstrapRuntime(runtime || '');
+      setRunFinished(true);
+    };
+
+    const fetchBootstrapResult = async () => {
+      const response = await fetch('/api/bootstrap/result');
+      if (response.status === 202) return null;
+      if (!response.ok) return null;
+      return response.json().catch(() => null);
+    };
+
+    const showCompletedOutput = async (logText, result) => {
+      const text = logText ?? await fetch('/api/logs').then(r => r.text()).catch(() => '');
+      const eventsText = await fetch('/api/events').then(r => r.text()).catch(() => '');
+      const exitCode = resolveBootstrapExitCode(result, eventsText);
+      const runtime = extractBootstrapRuntime(result, text);
+      const status = exitCode === 0 || exitCode === '0'
+        ? 'complete'
+        : (result?.status === 'failed' || (exitCode !== undefined && exitCode !== 0) ? 'failed' : 'complete');
+
+      if (String(text).includes('=== ADO Bootstrap Recap ===')) {
+        finishRun(text, eventsText || 'No events were returned.', status, runtime);
+        return;
+      }
+      if (result?.bootstrapRecap) {
+        const recap = `\n${result.bootstrapRecap}`;
+        finishRun(
+          `${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}${recap}`,
+          eventsText || 'No events were returned.',
+          status,
+          runtime
+        );
+        return;
+      }
+      finishRun(text, eventsText || 'No events were returned.', status, runtime);
+    };
+
+    poller = setInterval(async () => {
       if (!keepPolling) return;
 
       try {
@@ -3574,6 +3984,14 @@ function App() {
         const eventsResp = await fetch('/api/events');
         const eventsText = await eventsResp.text();
         setEvents(eventsText || 'No events yet.');
+
+        if (
+          String(text).includes('=== ADO Bootstrap Recap ===')
+          || String(eventsText).includes('Bootstrap finished exitCode=')
+        ) {
+          const result = await fetchBootstrapResult();
+          await showCompletedOutput(text, result);
+        }
       } catch (err) {
         setPreview(`ERROR reading logs:\n${err.message}`);
       }
@@ -3586,23 +4004,120 @@ function App() {
         body: JSON.stringify(buildPreflightPayload())
       });
 
-      const result = await response.json();
+      if (response.status === 409) {
+        setPreview('Bootstrap already running on server — showing live logs...\n');
+        return;
+      }
 
-      const logs = await fetch('/api/logs');
-      const text = await logs.text();
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        finishRun(
+          `ERROR:\n${errBody.error || response.statusText}`,
+          await fetch('/api/events').then(r => r.text()).catch(() => ''),
+          'failed'
+        );
+        return;
+      }
 
-      const eventsResp = await fetch('/api/events');
-      const eventsText = await eventsResp.text();
+      if (response.status === 202) {
+        setPreview('Bootstrap started — streaming logs from server...\n');
+        return;
+      }
 
-      const recap = result.bootstrapRecap ? `\n${result.bootstrapRecap}` : '';
-      setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}${recap}`);
-      setEvents(eventsText || 'No events were returned.');
+      const result = await response.json().catch(() => null);
+      const text = await fetch('/api/logs').then(r => r.text()).catch(() => '');
+      await showCompletedOutput(text, result);
     } catch (err) {
-      setPreview(`ERROR:\n${err.message}`);
-    } finally {
+      setPreview(
+        `NOTE: could not confirm bootstrap start (${err.message}). Polling server logs...\n`
+      );
+    }
+  };
+
+  const runDeployToOpenShift = async () => {
+    setActionsOpen(false);
+    setRunFinished(false);
+    setDeployStatus('running');
+    setDeployRuntime('');
+    setShowRawOutput(false);
+    setActiveTab('logs');
+    setPreview('Starting OpenShift deploy...\n');
+    setEvents('OpenShift deploy request started...\n');
+
+    let keepPolling = true;
+    let poller = null;
+
+    const finishDeploy = (previewText, eventsText, status = 'idle', runtime = '') => {
+      if (previewText !== undefined) setPreview(previewText);
+      if (eventsText !== undefined) setEvents(eventsText);
       keepPolling = false;
-      clearInterval(poller);
+      if (poller) clearInterval(poller);
+      setDeployStatus(status);
+      setDeployRuntime(runtime || '');
       setRunFinished(true);
+    };
+
+    const formatDeployRuntime = ms => {
+      if (!ms && ms !== 0) return '';
+      const sec = Math.round(Number(ms) / 1000);
+      if (sec < 60) return `${sec}s`;
+      return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+    };
+
+    poller = setInterval(async () => {
+      if (!keepPolling) return;
+      try {
+        const logs = await fetch('/api/deploy/openshift/logs');
+        const text = await logs.text();
+        setPreview(text || 'Deploy running...');
+        const eventsResp = await fetch('/api/deploy/openshift/events');
+        const eventsText = await eventsResp.text();
+        setEvents(eventsText || 'No deploy events yet.');
+
+        const resultResp = await fetch('/api/deploy/openshift/result');
+        if (resultResp.status === 202) return;
+        if (!resultResp.ok) return;
+        const result = await resultResp.json().catch(() => null);
+        if (!result || result.status === 'running') return;
+        const runtime = formatDeployRuntime(result.runtimeMs);
+        finishDeploy(
+          text,
+          eventsText,
+          result.status === 'complete' ? 'complete' : 'failed',
+          runtime
+        );
+      } catch (err) {
+        setPreview(`ERROR reading deploy logs:\n${err.message}`);
+      }
+    }, 1500);
+
+    try {
+      const response = await fetch('/api/deploy/openshift', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildPreflightPayload())
+      });
+
+      if (response.status === 409) {
+        setPreview('OpenShift deploy already running — showing live logs...\n');
+        return;
+      }
+
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        finishDeploy(
+          `ERROR:\n${errBody.error || response.statusText}`,
+          await fetch('/api/deploy/openshift/events').then(r => r.text()).catch(() => ''),
+          'failed'
+        );
+        return;
+      }
+
+      if (response.status === 202) {
+        setPreview('OpenShift deploy started — streaming logs...\n');
+      }
+    } catch (err) {
+      setPreview(`NOTE: could not confirm deploy start (${err.message}). Polling logs...\n`);
     }
   };
 
@@ -4169,15 +4684,55 @@ echo $TOKEN
         <p>Default is SSL verification disabled.</p>
         <p>When checked, local git uses <code>http.sslVerify=false</code>.</p>
       </>
+    ),
+    varsOnly: (
+      <>
+        <p><strong>Vars / Vault only:</strong> refresh generated vars and vault for selected components — no playbooks or Controller objects.</p>
+        <p>Regenerates <code>group_vars/all/&lt;env&gt;/vars_*.yml</code> and vault files from your component config.</p>
+        <p>Skips playbooks, job templates, workflows, and Controller apply. Git push still runs if enabled on the Git card.</p>
+        <p>Mutually exclusive with <strong>Run AAP tabs only</strong>.</p>
+      </>
     )
   };
 
+  const aapHelp = {
+    standaloneRun: (
+      <>
+        <p><strong>Run AAP tabs only:</strong> Hub, Galaxy, authentication, or Onboard work with no OpenShift/RHEL components. Git push is off by default (Hub publish only).</p>
+        <p>Hub / Galaxy / Add authentication / Onboard-only — no OpenShift/RHEL component playbooks or full Controller scaffolding.</p>
+        <p>Does not git-push the bootstrap repo (clone still runs). Re-enable push on Git Configuration if needed.</p>
+        <p>Mutually exclusive with <strong>Vars / Vault files only</strong>.</p>
+      </>
+    ),
+    deployToOpenShift: (
+      <>
+        <p>Build the preflight UI image and apply <code>deploy/preflight.yaml</code> on the OpenShift cluster using API host/token from OpenShift Configuration.</p>
+        <p>Use this to run preflight on the cluster portal (not the local pod). Poll logs in the console after starting.</p>
+        <p>Local testing: <code>./restart_pod.sh</code> runs bootstrap in a pod on this machine instead.</p>
+      </>
+    )
+  };
+
+  const bootstrapRunModeHelp = (
+    <>
+      <p>Choose a limited bootstrap path, or select platform components above for a full bootstrap.</p>
+      <p>Selecting any component disables both limited modes and runs full scaffolding instead.</p>
+    </>
+  );
+
   const renderDefaultComponentConfig = component => (
-    <Grid hasGutter>
-      {renderTextField('Hostname', `component_config.${component}.hostname`, 'text', defaultComponentHelp.hostname)}
-      {renderStorageClassField('Storage', `component_config.${component}.storage`, defaultComponentHelp.storage)}
-      {renderTextField('Replicas', `component_config.${component}.replicas`, 'number', 'Workload replicas. Default is the component default (usually 1).')}
-    </Grid>
+    <>
+      {renderComponentOptions(
+        component,
+        `${componentOptionLabels[component] || component} Options`,
+        `Optional workflow steps for ${component}. Auth steps run only when selected and RHBK/Keycloak is available.`
+      )}
+      <Grid hasGutter>
+        {renderTextField('Hostname', `component_config.${component}.hostname`, 'text', defaultComponentHelp.hostname)}
+        {renderStorageClassField('Storage', `component_config.${component}.storage`, defaultComponentHelp.storage)}
+        {renderTextField('Replicas', `component_config.${component}.replicas`, 'number', 'Workload replicas. Default is the component default (usually 1).')}
+      </Grid>
+    </>
   );
 
   const renderGrafanaConfig = () => {
@@ -4192,6 +4747,14 @@ echo $TOKEN
           ...(copy.component_config.grafana.folders[index] || {}),
           [key]: value
         };
+        return copy;
+      });
+    };
+    const removeGrafanaFolder = index => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config?.grafana?.folders) return copy;
+        copy.component_config.grafana.folders = copy.component_config.grafana.folders.filter((_, i) => i !== index);
         return copy;
       });
     };
@@ -4247,7 +4810,19 @@ echo $TOKEN
           </GridItem>
           {folders.map((folder, index) => (
             <GridItem span={12} key={`grafana-folder-${index}`}>
-              <Grid hasGutter style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
+              <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <Tooltip content="Remove folder">
+                    <Button
+                      variant="plain"
+                      onClick={() => removeGrafanaFolder(index)}
+                      aria-label={`Remove folder ${folder.name || index + 1}`}
+                    >
+                      X
+                    </Button>
+                  </Tooltip>
+                </div>
+                <Grid hasGutter>
                 <GridItem span={3}>
                   <FormGroup label="Folder name">
                     <TextInput value={folder.name || ''} onChange={(_, v) => updateFolder(index, 'name', v)} />
@@ -4276,7 +4851,8 @@ echo $TOKEN
                     <TextInput value={folder.alerts_path || 'alerts'} onChange={(_, v) => updateFolder(index, 'alerts_path', v)} />
                   </FormGroup>
                 </GridItem>
-              </Grid>
+                </Grid>
+              </div>
             </GridItem>
           ))}
           <GridItem span={12}>
@@ -4308,11 +4884,58 @@ echo $TOKEN
           <GridItem span={12}>
             <Checkbox id="grafana-oidc-enabled" label="Enable Grafana OIDC" isChecked={!!oidc.enabled} onChange={(_, v) => set('component_config.grafana.oidc.enabled', v)} />
           </GridItem>
+          {oidc.enabled && isRhbkSelected(data) && !(data.component_options?.grafana || []).includes('standalone') && (
+            <GridItem span={12}>
+              <p style={{ color: mutedTextColor, margin: '0 0 8px 0', fontSize: '13px' }}>
+                Client ID and issuer are filled from your RHBK settings. The client secret is
+                not stored here — the Grafana OIDC job fetches it from Keycloak at deploy time
+                (same pattern as OpenShift OAuth).
+              </p>
+            </GridItem>
+          )}
           {oidc.enabled && (
             <>
-              {renderTextField('OIDC Client ID', 'component_config.grafana.oidc.client_id')}
-              {renderTextField('OIDC Client Secret', 'component_config.grafana.oidc.client_secret', 'password')}
-              {renderTextField('OIDC Issuer URL', 'component_config.grafana.oidc.issuer')}
+              {renderTextField(
+                'OIDC Client ID',
+                'component_config.grafana.oidc.client_id',
+                'text',
+                isRhbkSelected(data) ? 'From RHBK client list (grafana*) or default grafana-client.' : undefined
+              )}
+              {(!isRhbkSelected(data) || oidc.client_secret_manual) && (
+                renderTextField(
+                  'OIDC Client Secret',
+                  'component_config.grafana.oidc.client_secret',
+                  'password',
+                  isRhbkSelected(data) ? 'Optional override — leave empty to fetch from Keycloak at deploy.' : undefined
+                )
+              )}
+              {isRhbkSelected(data) && !(data.component_options?.grafana || []).includes('standalone') && (
+                <GridItem span={12}>
+                  <Checkbox
+                    id="grafana-oidc-secret-manual"
+                    label="Enter client secret manually (optional override)"
+                    isChecked={!!oidc.client_secret_manual}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.component_config?.grafana?.oidc) return copy;
+                        copy.component_config.grafana.oidc.client_secret_manual = v;
+                        if (!v) {
+                          copy.component_config.grafana.oidc.client_secret = '';
+                          copy.component_config.grafana.oidc.fetch_secret_from_rhbk = true;
+                        }
+                        return copy;
+                      });
+                    }}
+                  />
+                </GridItem>
+              )}
+              {renderTextField(
+                'OIDC Issuer URL',
+                'component_config.grafana.oidc.issuer',
+                'text',
+                isRhbkSelected(data) ? 'https://<keycloak-host>/realms/<realm> from RHBK hostname + realm.' : undefined
+              )}
             </>
           )}
         </Grid>
@@ -4351,16 +4974,35 @@ echo $TOKEN
             return copy;
           });
         };
+        const removeRhbkClient = index => {
+          setData(prev => {
+            const copy = JSON.parse(JSON.stringify(prev));
+            if (!copy.component_config?.rhbk?.clients) return copy;
+            copy.component_config.rhbk.clients = copy.component_config.rhbk.clients.filter((_, i) => i !== index);
+            const firstClient = copy.component_config.rhbk.clients[0];
+            copy.component_config.rhbk.client = firstClient?.id || '';
+            return copy;
+          });
+        };
         return (
           <Grid hasGutter>
             {clients.map((client, index) => (
               <GridItem span={12} key={`rhbk-client-${index}`}>
-                <Grid hasGutter style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
-                  <GridItem span={3}><FormGroup label="Client ID"><TextInput value={client.id || ''} onChange={(_, v) => updateClient(index, 'id', v)} /></FormGroup></GridItem>
-                  <GridItem span={3}><FormGroup label="Client Name"><TextInput value={client.name || ''} onChange={(_, v) => updateClient(index, 'name', v)} /></FormGroup></GridItem>
-                  <GridItem span={3}><FormGroup label="Redirect URIs"><TextInput value={client.redirect_uris || ''} onChange={(_, v) => updateClient(index, 'redirect_uris', v)} /></FormGroup></GridItem>
-                  <GridItem span={3}><FormGroup label="Web Origins"><TextInput value={client.web_origins || ''} onChange={(_, v) => updateClient(index, 'web_origins', v)} /></FormGroup></GridItem>
-                </Grid>
+                <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <Tooltip content="Remove client">
+                      <Button variant="plain" onClick={() => removeRhbkClient(index)} aria-label={`Remove client ${index + 1}`}>
+                        X
+                      </Button>
+                    </Tooltip>
+                  </div>
+                  <Grid hasGutter>
+                    <GridItem span={3}><FormGroup label="Client ID"><TextInput value={client.id || ''} onChange={(_, v) => updateClient(index, 'id', v)} /></FormGroup></GridItem>
+                    <GridItem span={3}><FormGroup label="Client Name"><TextInput value={client.name || ''} onChange={(_, v) => updateClient(index, 'name', v)} /></FormGroup></GridItem>
+                    <GridItem span={3}><FormGroup label="Redirect URIs"><TextInput value={client.redirect_uris || ''} onChange={(_, v) => updateClient(index, 'redirect_uris', v)} /></FormGroup></GridItem>
+                    <GridItem span={3}><FormGroup label="Web Origins"><TextInput value={client.web_origins || ''} onChange={(_, v) => updateClient(index, 'web_origins', v)} /></FormGroup></GridItem>
+                  </Grid>
+                </div>
               </GridItem>
             ))}
             <GridItem span={12}>
@@ -6808,47 +7450,329 @@ echo $TOKEN
     </>
   );
 
+  const defaultAcsCentralHostname = () => {
+    const appsDomain = String(data.openshift?.apps_domain || '').trim();
+    return appsDomain ? `central.${appsDomain}` : '';
+  };
+
   const renderAcmConfig = () => (
-    <Grid hasGutter>
-      {renderTextField('Hostname', 'component_config.acm.hostname')}
-      {renderStorageClassField('Storage Class', 'component_config.acm.storage')}
-      {renderTextField('Replicas', 'component_config.acm.replicas', 'number')}
-      {renderTextField('Namespace', 'component_config.acm.namespace')}
-      {renderTextField('Operator Channel', 'component_config.acm.channel')}
-    </Grid>
+    <>
+      <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+        Installs the ACM operator and MultiClusterHub into namespace{' '}
+        <code>open-cluster-management</code>. Operator channel is the only
+        preflight setting; other values use collection defaults.
+      </p>
+      <Grid hasGutter>
+        {renderTextField(
+          'Operator Channel',
+          'component_config.acm.channel',
+          'text',
+          'Catalog channel for advanced-cluster-management. Lab default: release-2.17.'
+        )}
+      </Grid>
+    </>
   );
 
-  const renderAcsConfig = () => (
-    <Grid hasGutter>
-      {renderComponentOptions(
-        'acs',
-        'ACS Options',
-        'Deploy RHACS vulnerability report job templates and workflow (Red Hat source, raw, age).'
-      )}
-      {renderTextField('Hostname', 'component_config.acs.hostname')}
-      {renderStorageClassField('Storage Class', 'component_config.acs.storage')}
-      {renderTextField('Replicas', 'component_config.acs.replicas', 'number')}
-      {renderTextField('Namespace', 'component_config.acs.namespace')}
-      <GridItem span={6}>
-        <FormGroup label="Policies source type">
-          <select value={data.component_config.acs.policies_source_type || 'git'} onChange={e => set('component_config.acs.policies_source_type', e.target.value)} style={{ width: '100%', height: '36px' }}>
-            <option value="git">git</option>
-            <option value="path">path</option>
-          </select>
-        </FormGroup>
-      </GridItem>
-      {renderTextField('Policies source (git URL or path)', 'component_config.acs.policies_source')}
-      <GridItem span={6}>
-        <FormGroup label="Reports source type">
-          <select value={data.component_config.acs.reports_source_type || 'git'} onChange={e => set('component_config.acs.reports_source_type', e.target.value)} style={{ width: '100%', height: '36px' }}>
-            <option value="git">git</option>
-            <option value="path">path</option>
-          </select>
-        </FormGroup>
-      </GridItem>
-      {renderTextField('Reports source (git URL or path)', 'component_config.acs.reports_source')}
-    </Grid>
+  const renderAcsConfig = () => {
+    const acsHostnameHelp = defaultAcsCentralHostname()
+      ? `Central route hostname. Default when empty: ${defaultAcsCentralHostname()}`
+      : 'Central route hostname (set OpenShift apps domain for a default).';
+
+    return (
+      <>
+        {renderComponentOptions(
+          'acs',
+          'ACS Options',
+          'Optional RHACS vulnerability report job templates and workflow (Red Hat source, raw, age, CVE enriched).'
+        )}
+        <Grid hasGutter>
+          {renderTextField(
+            'Central Route Hostname',
+            'component_config.acs.hostname',
+            'text',
+            acsHostnameHelp
+          )}
+          {renderStorageClassField(
+            'Storage Class',
+            'component_config.acs.storage',
+            'Storage class for Central PVCs (central-db, central-pvc).'
+          )}
+          <GridItem span={6}>
+            <FormGroup label={labelWithHelp('Namespace', 'Operand namespace for RHACS Central. Default: stackrox.')}>
+              <TextInput
+                value={data.component_config?.acs?.namespace || 'stackrox'}
+                isReadOnly
+              />
+            </FormGroup>
+          </GridItem>
+        </Grid>
+        <div style={{ marginTop: '16px' }}>
+          <Title headingLevel="h4">Optional policy/report upload</Title>
+          <p style={{ color: mutedTextColor, marginBottom: '8px' }}>
+            Leave sources blank to skip upload during Deploy ACS. Set git URL or local path to import policies/reports after Central is up.
+          </p>
+          <Grid hasGutter>
+            <GridItem span={6}>
+              <FormGroup label="Policies source type">
+                <select value={data.component_config.acs.policies_source_type || 'git'} onChange={e => set('component_config.acs.policies_source_type', e.target.value)} style={{ width: '100%', height: '36px' }}>
+                  <option value="git">git</option>
+                  <option value="path">path</option>
+                </select>
+              </FormGroup>
+            </GridItem>
+            {renderTextField('Policies source (git URL or path)', 'component_config.acs.policies_source')}
+            <GridItem span={6}>
+              <FormGroup label="Reports source type">
+                <select value={data.component_config.acs.reports_source_type || 'git'} onChange={e => set('component_config.acs.reports_source_type', e.target.value)} style={{ width: '100%', height: '36px' }}>
+                  <option value="git">git</option>
+                  <option value="path">path</option>
+                </select>
+              </FormGroup>
+            </GridItem>
+            {renderTextField('Reports source (git URL or path)', 'component_config.acs.reports_source')}
+          </Grid>
+        </div>
+      </>
+    );
+  };
+
+  const renderOpenShiftOAuthRhbkConfig = () => (
+    <>
+      <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+        Name shown in the OpenShift login screen for the Keycloak/RHBK OIDC identity provider.
+        Requires RHBK deployed and an OpenShift client configured in the realm.
+      </p>
+      <Grid hasGutter>
+        {renderTextField(
+          'OAuth IdP display name',
+          'openshift.oauth_rhbk.idp_name',
+          'text',
+          'Identity provider name in OAuth cluster config. Example: Keycloak, RH-SSO.'
+        )}
+      </Grid>
+    </>
   );
+
+  const renderOpenShiftLdapAuthConfig = () => (
+    <>
+      <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+        Name shown in the OpenShift login screen for the LDAP identity provider.
+        Bind DN and LDAP URL come from vault <code>ldap_config</code> unless overridden in generated vars.
+      </p>
+      <Grid hasGutter>
+        {renderTextField(
+          'LDAP IdP display name',
+          'openshift.ldap_auth.idp_name',
+          'text',
+          'Identity provider name in OAuth cluster config. Example: LDAP_IDM, IdM.'
+        )}
+      </Grid>
+    </>
+  );
+
+  const renderOpenShiftDiscoverRoutesConfig = () => {
+    const scope = data.openshift?.discover_routes?.scope || 'all';
+    return (
+      <>
+        <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+          Control which Routes appear in the final OpenShift workflow print step.
+          Leave scope as <strong>All</strong> to list every application route, or narrow to namespaces
+          or to namespaces for selected OpenShift apps.
+        </p>
+        <Grid hasGutter>
+          <GridItem span={6}>
+            <FormGroup label="Route scope">
+              <select
+                value={scope}
+                onChange={e => set('openshift.discover_routes.scope', e.target.value)}
+                style={selectStyle}
+              >
+                <option value="all">All application routes</option>
+                <option value="namespaces">Selected namespaces</option>
+                <option value="selected_apps">Namespaces from selected OpenShift apps</option>
+              </select>
+            </FormGroup>
+          </GridItem>
+          {scope === 'namespaces' && (
+            <GridItem span={12}>
+              <FormGroup
+                label={labelWithHelp(
+                  'Namespaces',
+                  'Comma- or newline-separated namespace list (e.g. grafana, gitlab-system, stackrox).'
+                )}
+              >
+                <textarea
+                  value={data.openshift?.discover_routes?.namespaces || ''}
+                  onChange={e => set('openshift.discover_routes.namespaces', e.target.value)}
+                  rows={4}
+                  style={{ width: '100%', fontFamily: 'monospace' }}
+                />
+              </FormGroup>
+            </GridItem>
+          )}
+          {scope === 'selected_apps' && (
+            <GridItem span={12}>
+              <p style={{ color: mutedTextColor, margin: 0 }}>
+                Uses namespaces mapped from your selected OpenShift applications on the main form
+                (for example grafana → <code>grafana</code>, gitlab → <code>gitlab-system</code>).
+              </p>
+            </GridItem>
+          )}
+        </Grid>
+      </>
+    );
+  };
+
+  const setAlternateRouteLabel = (index, field, value) => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.openshift) copy.openshift = {};
+      if (!copy.openshift.alternate_routes) copy.openshift.alternate_routes = {};
+      const labels = Array.isArray(copy.openshift.alternate_routes.route_labels)
+        ? [...copy.openshift.alternate_routes.route_labels]
+        : [];
+      while (labels.length <= index) {
+        labels.push({ key: '', value: '' });
+      }
+      labels[index] = { ...labels[index], [field]: value };
+      copy.openshift.alternate_routes.route_labels = labels;
+      return copy;
+    });
+  };
+
+  const addAlternateRouteLabel = () => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.openshift) copy.openshift = {};
+      if (!copy.openshift.alternate_routes) copy.openshift.alternate_routes = {};
+      const labels = Array.isArray(copy.openshift.alternate_routes.route_labels)
+        ? [...copy.openshift.alternate_routes.route_labels]
+        : [];
+      labels.push({ key: '', value: '' });
+      copy.openshift.alternate_routes.route_labels = labels;
+      return copy;
+    });
+  };
+
+  const removeAlternateRouteLabel = index => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      const labels = [...(copy.openshift?.alternate_routes?.route_labels || [])];
+      labels.splice(index, 1);
+      if (!copy.openshift) copy.openshift = {};
+      if (!copy.openshift.alternate_routes) copy.openshift.alternate_routes = {};
+      copy.openshift.alternate_routes.route_labels = labels;
+      return copy;
+    });
+  };
+
+  const renderOpenShiftAlternateRoutesConfig = () => {
+    const alt = data.openshift?.alternate_routes || {};
+    const labels = Array.isArray(alt.route_labels) ? alt.route_labels : [];
+    const toggleAltOption = (field, checked) => {
+      set(`openshift.alternate_routes.${field}`, checked);
+    };
+
+    return (
+      <>
+        <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+          Optional <strong>Alt Routes Workflow</strong> steps. Print shows alternate-domain candidates;
+          Add creates <code>-alt</code> Routes; Ingress binds routes to a named ingress controller via
+          the <code>haproxy.router.openshift.io/router</code> label.
+        </p>
+        <Grid hasGutter>
+          <GridItem span={4}>
+            <Checkbox
+              label="Print Alternate Routes"
+              isChecked={alt.print_alt_routes !== false}
+              onChange={(_, checked) => toggleAltOption('print_alt_routes', checked)}
+            />
+          </GridItem>
+          <GridItem span={4}>
+            <Checkbox
+              label="Add Alternate Route"
+              isChecked={!!alt.add_alt_routes}
+              onChange={(_, checked) => toggleAltOption('add_alt_routes', checked)}
+            />
+          </GridItem>
+          <GridItem span={4}>
+            <Checkbox
+              label="Add Ingress with Route"
+              isChecked={!!alt.add_ingress_with_route}
+              onChange={(_, checked) => toggleAltOption('add_ingress_with_route', checked)}
+            />
+          </GridItem>
+        </Grid>
+
+        {(alt.add_alt_routes || alt.add_ingress_with_route) && (
+          <Grid hasGutter style={{ marginTop: '12px' }}>
+            {renderTextField(
+              'Alternate route name suffix',
+              'openshift.alternate_routes.route_name_suffix',
+              'text',
+              'Appended to the primary route name (default: -alt). Example route grafana-alt.'
+            )}
+            <GridItem span={6}>
+              <Checkbox
+                label="Force replace existing alternate routes"
+                isChecked={!!alt.force_replace}
+                onChange={(_, checked) => set('openshift.alternate_routes.force_replace', checked)}
+              />
+            </GridItem>
+          </Grid>
+        )}
+
+        {(alt.add_alt_routes || alt.add_ingress_with_route) && (
+          <div style={{ marginTop: '16px' }}>
+            <Title headingLevel="h4">Route labels</Title>
+            <p style={{ color: mutedTextColor, marginBottom: '8px' }}>
+              Optional metadata labels applied to created alternate routes.
+            </p>
+            {labels.length === 0 && (
+              <p style={{ color: mutedTextColor }}>No custom labels — click Add label to define one.</p>
+            )}
+            {labels.map((row, index) => (
+              <Grid hasGutter key={`alt-route-label-${index}`} style={{ marginBottom: '8px' }}>
+                <GridItem span={5}>
+                  <TextInput
+                    value={row.key || ''}
+                    placeholder="label key"
+                    onChange={(_event, value) => setAlternateRouteLabel(index, 'key', value)}
+                  />
+                </GridItem>
+                <GridItem span={5}>
+                  <TextInput
+                    value={row.value || ''}
+                    placeholder="label value"
+                    onChange={(_event, value) => setAlternateRouteLabel(index, 'value', value)}
+                  />
+                </GridItem>
+                <GridItem span={2}>
+                  <Button variant="link" onClick={() => removeAlternateRouteLabel(index)}>
+                    Remove
+                  </Button>
+                </GridItem>
+              </Grid>
+            ))}
+            <Button variant="secondary" onClick={addAlternateRouteLabel}>
+              Add label
+            </Button>
+          </div>
+        )}
+
+        {alt.add_ingress_with_route && (
+          <Grid hasGutter style={{ marginTop: '16px' }}>
+            {renderTextField(
+              'Ingress controller name',
+              'openshift.alternate_routes.ingress_controller_name',
+              'text',
+              'IngressController name for haproxy.router.openshift.io/router (default: default).'
+            )}
+          </Grid>
+        )}
+      </>
+    );
+  };
 
   const setInstallAap = checked => {
     setData(prev => {
@@ -7266,7 +8190,9 @@ echo $TOKEN
               {' '}
               (project Git URL is under Ansible Automation Platform Configuration on that tab).
             </div>
-            {!String(data.git?.token || '').trim() && data.git?.auto_push !== false && (
+            {!standaloneRun
+              && !String(data.git?.token || '').trim()
+              && data.git?.auto_push !== false && (
               <div style={{ color: '#8a6d3b', fontSize: '13px', marginTop: '8px' }}>
                 Auto-push is on, but no Git token is set. Add it on Git Configuration or turn auto-push off.
               </div>
@@ -7371,6 +8297,93 @@ echo $TOKEN
     );
   };
 
+  const renderDevHubConfig = () => {
+    const devHub = data.component_config?.dev_hub || {};
+    const appsDomain = String(data.openshift?.apps_domain || '').trim();
+    const instanceName = String(devHub.instance_name || 'chad-lab').trim() || 'chad-lab';
+    const defaultHostname = appsDomain
+      ? `backstage-${instanceName}-rhdh.${appsDomain}`
+      : '';
+    const defaultGitlabHost = appsDomain ? `gitlab-git.${appsDomain}` : '';
+    const gitToken = String(data.git?.token || '').trim();
+
+    return (
+      <Grid hasGutter>
+        {renderTextField(
+          'Route hostname',
+          'component_config.dev_hub.hostname',
+          'text',
+          defaultHostname
+            ? `Developer Hub route. Default: ${defaultHostname}`
+            : 'Developer Hub route hostname (set OpenShift apps domain for a default).'
+        )}
+        {renderStorageClassField('Storage class', 'component_config.dev_hub.storage', defaultComponentHelp.storage)}
+        {renderTextField('Replicas', 'component_config.dev_hub.replicas', 'number')}
+        {renderTextField(
+          'Instance name',
+          'component_config.dev_hub.instance_name',
+          'text',
+          'Backstage CR name. Example: chad-lab'
+        )}
+        {renderTextField(
+          'GitLab host',
+          'component_config.dev_hub.gitlab_host',
+          'text',
+          defaultGitlabHost
+            ? `GitLab hostname for catalog integration. Default: ${defaultGitlabHost}`
+            : 'GitLab hostname for catalog/scaffolder integration.'
+        )}
+        {renderTextField(
+          'Catalog location URL',
+          'component_config.dev_hub.catalog_url',
+          'text',
+          'Optional catalog-info.yaml URL in GitLab.'
+        )}
+        {renderTextField('Keycloak realm', 'component_config.dev_hub.keycloak_realm', 'text', 'Example: rhlab')}
+        {renderTextField('Keycloak client ID', 'component_config.dev_hub.keycloak_client_id', 'text', 'Default: rhdh')}
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp(
+            'GitLab token (catalog)',
+            'GitLab personal/group access token for Developer Hub catalog and scaffolder. '
+            + 'Defaults to the Git bootstrap token below when empty.'
+          )}>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <TextInput
+                type="password"
+                value={devHub.gitlab_token || ''}
+                onChange={(_, v) => set('component_config.dev_hub.gitlab_token', v)}
+                placeholder={gitToken ? 'Using Git bootstrap token' : 'glpat-…'}
+              />
+              <Button
+                variant="secondary"
+                isDisabled={!gitToken}
+                onClick={() => {
+                  setData(prev => {
+                    const copy = JSON.parse(JSON.stringify(prev));
+                    return syncDevHubGitlabTokenFromGit(copy, { force: true });
+                  });
+                }}
+              >
+                Use Git token
+              </Button>
+            </div>
+            {gitToken && !(devHub.gitlab_token || '').trim() && (
+              <div style={{ color: mutedTextColor, fontSize: '12px', marginTop: '6px' }}>
+                Will use Git bootstrap token on export/bootstrap unless you enter a different token here.
+              </div>
+            )}
+          </FormGroup>
+        </GridItem>
+        {renderTextField(
+          'OIDC client secret (optional)',
+          'component_config.dev_hub.oidc_client_secret',
+          'password',
+          'Leave empty to fetch from Keycloak after Deploy RHBK Client.'
+        )}
+      </Grid>
+    );
+  };
+
   const renderGitlabConfig = () => {
     const selectStyle = {
       width: '100%',
@@ -7449,8 +8462,18 @@ echo $TOKEN
         return renderOpenShiftAdminHtpasswdConfig();
       case 'console_banner':
         return renderOpenShiftConsoleBannerConfig();
+      case 'oauth_rhbk':
+        return renderOpenShiftOAuthRhbkConfig();
+      case 'ldap_auth':
+        return renderOpenShiftLdapAuthConfig();
+      case 'discover_routes_print':
+        return renderOpenShiftDiscoverRoutesConfig();
+      case 'alternate_routes':
+        return renderOpenShiftAlternateRoutesConfig();
       case 'devspaces':
         return renderDevspacesConfig();
+      case 'dev_hub':
+        return renderDevHubConfig();
       case 'acm':
         return renderAcmConfig();
       case 'acs':
@@ -7684,7 +8707,14 @@ ${vaultYaml}
     if (selected.includes('openshift')) {
       const tabs = ['openshift'];
       (data.component_options?.openshift || []).forEach(option => {
-        const optionTabs = ['admin_htpasswd', 'console_banner'];
+        const optionTabs = [
+          'admin_htpasswd',
+          'console_banner',
+          'oauth_rhbk',
+          'ldap_auth',
+          'discover_routes_print',
+          'alternate_routes'
+        ];
         if (!optionTabs.includes(option)) {
           return;
         }
@@ -7693,7 +8723,7 @@ ${vaultYaml}
         }
       });
       (data.component_apps?.openshift || []).forEach(app => {
-        if (['acm', 'acs', 'devspaces'].includes(app) && !tabs.includes(app)) {
+        if (['acm', 'acs', 'devspaces', 'dev_hub'].includes(app) && !tabs.includes(app)) {
           tabs.push(app);
         }
         if (simpleComponents.includes(app) && !tabs.includes(app)) {
@@ -7738,9 +8768,14 @@ ${vaultYaml}
     if (tab === 'all') return 'All';
     if (tab === 'openshift') return 'OpenShift';
     if (tab === 'admin_htpasswd') return 'Admin HTPasswd';
+    if (tab === 'oauth_rhbk') return 'OAuth / RHBK';
+    if (tab === 'ldap_auth') return 'LDAP Auth';
+    if (tab === 'discover_routes_print') return 'Discover Routes';
+    if (tab === 'alternate_routes') return 'Alternate Routes';
     if (tab === 'acm') return 'ACM';
     if (tab === 'acs') return 'ACS';
     if (tab === 'devspaces') return 'Dev Spaces';
+    if (tab === 'dev_hub') return 'Dev Hub';
     if (tab === 'console_banner') return 'Console Banner';
     if (tab === 'rhel') return 'RHEL';
     if (tab === 'patching') return 'Patching';
@@ -8670,8 +9705,14 @@ ${vaultYaml}
                   <Checkbox
                     label="Automatically commit and push generated content to Git"
                     isChecked={data.git.auto_push}
+                    isDisabled={standaloneRun}
                     onChange={(_, v) => set('git.auto_push', v)}
                   />
+                  {standaloneRun && (
+                    <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
+                      Auto-push is off for Run AAP tabs only (Hub/Galaxy/auth). Re-enable here if you need a git push.
+                    </p>
+                  )}
 
                   <br />
 
@@ -8679,8 +9720,14 @@ ${vaultYaml}
                     id="git-overwrite-generated"
                     label={labelWithHelp('Overwrite all generated content (all environments)', gitHelp.overwriteGenerated)}
                     isChecked={data.git.overwrite_generated === true}
+                    isDisabled={data.git.vars_only === true}
                     onChange={(_, v) => set('git.overwrite_generated', v)}
                   />
+                  {data.git.vars_only === true && (
+                    <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
+                      Overwrite-all is disabled while Vars / Vault files only is checked.
+                    </p>
+                  )}
 
                   <br />
 
@@ -8710,7 +9757,24 @@ ${vaultYaml}
                       <TextInput
                         type={showGitToken ? 'text' : 'password'}
                         value={data.git.token}
-                        onChange={(_, v) => set('git.token', v)}
+                        onChange={(_, v) => {
+                          setData(prev => {
+                            const copy = JSON.parse(JSON.stringify(prev));
+                            copy.git.token = v;
+                            const devHubSelected = (copy.component_apps?.openshift || []).includes('dev_hub')
+                              || selectedComponentAppsFrom(copy).includes('dev_hub');
+                            if (devHubSelected) {
+                              if (!copy.component_config) copy.component_config = {};
+                              if (!copy.component_config.dev_hub) copy.component_config.dev_hub = {};
+                              const cur = String(copy.component_config.dev_hub.gitlab_token || '').trim();
+                              const prevGit = String(prev.git?.token || '').trim();
+                              if (!cur || cur === prevGit) {
+                                copy.component_config.dev_hub.gitlab_token = v;
+                              }
+                            }
+                            return copy;
+                          });
+                        }}
                       />
                       <Button variant="secondary" onClick={() => setShowGitToken(!showGitToken)}>
                         {showGitToken ? 'Hide' : 'Show'}
@@ -8948,17 +10012,48 @@ ${vaultYaml}
                         </FormGroup>
                       </GridItem>
                       <GridItem span={12}>
-                        <FormGroup label="Standalone AAP run">
-                          <Checkbox
-                            id="aap-standalone-run"
-                            label="Run AAP tabs only (skip OpenShift/RHEL component playbooks and full Contoller scaffolding)"
-                            isChecked={standaloneRun}
-                            onChange={(_, v) => setAapStandaloneRun(v)}
-                          />
-                          <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 0' }}>
-                            Off by default. Check this for Hub/Galaxy/Add authentication/Onboard-only runs with no
-                            OpenShift/RHEL components selected. Selecting any component above automatically
-                            turns this off and runs a full bootstrap instead.
+                        <FormGroup label={labelWithHelp('Bootstrap run mode', bootstrapRunModeHelp)}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: '16px 24px',
+                              alignItems: 'flex-start'
+                            }}
+                          >
+                            <Checkbox
+                              id="git-vars-only"
+                              label={labelWithHelp(
+                                'Vars / Vault files only (build group_vars/env/{var|vault}.yml)',
+                                gitHelp.varsOnly
+                              )}
+                              isChecked={data.git?.vars_only === true}
+                              isDisabled={standaloneRun}
+                              onChange={(_, v) => {
+                                setData(prev => {
+                                  const copy = JSON.parse(JSON.stringify(prev));
+                                  if (!copy.git) copy.git = {};
+                                  copy.git.vars_only = v === true;
+                                  if (v === true) {
+                                    copy.git.overwrite_generated = false;
+                                    if (!copy.aap) copy.aap = {};
+                                    copy.aap.standalone_run = false;
+                                    copy.aap.hub_update_collection_only = false;
+                                  }
+                                  return copy;
+                                });
+                              }}
+                            />
+                            <Checkbox
+                              id="aap-standalone-run"
+                              label={labelWithHelp(
+                                'Run AAP tabs only (skip OpenShift/RHEL component playbooks and full Controller scaffolding)',
+                                aapHelp.standaloneRun
+                              )}
+                              isChecked={standaloneRun}
+                              isDisabled={data.git?.vars_only === true}
+                              onChange={(_, v) => setAapStandaloneRun(v)}
+                            />
                           </div>
                           {standaloneRun && !aapStandaloneWorkSelected(data) && (
                             <div style={{ color: '#f0ab00', fontSize: '13px', margin: '6px 0 0' }}>
@@ -8967,11 +10062,12 @@ ${vaultYaml}
                             </div>
                           )}
                           {!standaloneRun
+                            && data.git?.vars_only !== true
                             && data.aap?.enabled !== false
                             && (!Array.isArray(data.components) || data.components.length === 0) && (
                             <div style={{ color: '#f0ab00', fontSize: '13px', margin: '6px 0 0' }}>
-                              No components selected — check Standalone AAP run for Hub/Galaxy/Keycloak-only
-                              work, or select components above for a full bootstrap.
+                              No components selected — check a Bootstrap run mode option above, or select
+                              components for a full bootstrap.
                             </div>
                           )}
                         </FormGroup>
@@ -10267,6 +11363,39 @@ ${vaultYaml}
                     ⊕ Run Bootstrap
                   </Button>
 
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                    <Button
+                      variant="secondary"
+                      onClick={runDeployToOpenShift}
+                      isDisabled={deployStatus === 'running' || bootstrapStatus === 'running'}
+                      style={{ borderRadius: '18px', fontWeight: 600 }}
+                    >
+                      Deploy to OpenShift
+                    </Button>
+                    <Popover
+                      headerContent="Deploy to OpenShift"
+                      bodyContent={<div style={{ maxWidth: '320px' }}>{aapHelp.deployToOpenShift}</div>}
+                      triggerAction="click"
+                      appendTo={() => document.body}
+                    >
+                      <button
+                        type="button"
+                        aria-label="Deploy to OpenShift help"
+                        style={{
+                          border: 'none',
+                          background: 'transparent',
+                          color: isDark ? '#73bcf7' : '#0066cc',
+                          cursor: 'pointer',
+                          fontWeight: 700,
+                          padding: '0 2px',
+                          lineHeight: 1
+                        }}
+                      >
+                        ?
+                      </button>
+                    </Popover>
+                  </span>
+
                   <select
                     value={data.ansible.verbosity}
                     onChange={e => set('ansible.verbosity', Number(e.target.value))}
@@ -10301,6 +11430,12 @@ ${vaultYaml}
                         Download scrubbed JSON
                       </DropdownItem>
                       <DropdownItem onClick={resetOutput}>Reset</DropdownItem>
+                      <DropdownItem
+                        onClick={runDeployToOpenShift}
+                        description="Build/push image and apply deploy/preflight.yaml using OpenShift creds from the form"
+                      >
+                        Deploy to OpenShift
+                      </DropdownItem>
                     </DropdownList>
                   </Dropdown>
 
@@ -10337,6 +11472,98 @@ ${vaultYaml}
               </div>
 
               <div style={{ marginTop: '12px' }}>
+                {bootstrapStatus === 'running' && (
+                  <div style={{
+                    padding: '10px 14px',
+                    marginBottom: '10px',
+                    borderRadius: '6px',
+                    backgroundColor: '#1f3a5f',
+                    color: '#73bcf7',
+                    border: '1px solid #2b9af3'
+                  }}>
+                    Bootstrap running — logs update automatically until recap appears.
+                  </div>
+                )}
+                {bootstrapStatus === 'complete' && (
+                  <div style={{
+                    padding: '10px 14px',
+                    marginBottom: '10px',
+                    borderRadius: '6px',
+                    backgroundColor: '#1e3a1e',
+                    color: '#8bc34a',
+                    border: '1px solid #8bc34a'
+                  }}>
+                    <div>Bootstrap complete — see PLAY RECAP and recap below.</div>
+                    {bootstrapRuntime && (
+                      <div style={{ marginTop: '6px', fontWeight: 600 }}>
+                        Runtime: {bootstrapRuntime}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {bootstrapStatus === 'failed' && (
+                  <div style={{
+                    padding: '10px 14px',
+                    marginBottom: '10px',
+                    borderRadius: '6px',
+                    backgroundColor: '#3a1e1e',
+                    color: '#ff6b6b',
+                    border: '1px solid #ff6b6b'
+                  }}>
+                    <div>Bootstrap failed — check logs for fatal errors and PLAY RECAP.</div>
+                    {bootstrapRuntime && (
+                      <div style={{ marginTop: '6px', fontWeight: 600 }}>
+                        Runtime: {bootstrapRuntime}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {deployStatus === 'running' && (
+                  <div style={{
+                    padding: '10px 14px',
+                    marginBottom: '10px',
+                    borderRadius: '6px',
+                    backgroundColor: '#1f3a5f',
+                    color: '#73bcf7',
+                    border: '1px solid #2b9af3'
+                  }}>
+                    OpenShift deploy running — build, push, and rollout logs stream below.
+                  </div>
+                )}
+                {deployStatus === 'complete' && (
+                  <div style={{
+                    padding: '10px 14px',
+                    marginBottom: '10px',
+                    borderRadius: '6px',
+                    backgroundColor: '#1e3a1e',
+                    color: '#8bc34a',
+                    border: '1px solid #8bc34a'
+                  }}>
+                    <div>OpenShift deploy complete.</div>
+                    {deployRuntime && (
+                      <div style={{ marginTop: '6px', fontWeight: 600 }}>
+                        Runtime: {deployRuntime}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {deployStatus === 'failed' && (
+                  <div style={{
+                    padding: '10px 14px',
+                    marginBottom: '10px',
+                    borderRadius: '6px',
+                    backgroundColor: '#3a1e1e',
+                    color: '#ff6b6b',
+                    border: '1px solid #ff6b6b'
+                  }}>
+                    <div>OpenShift deploy failed — see logs for deploy.sh output.</div>
+                    {deployRuntime && (
+                      <div style={{ marginTop: '6px', fontWeight: 600 }}>
+                        Runtime: {deployRuntime}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <Tabs activeKey={activeTab} onSelect={(_, key) => setActiveTab(key)}>
                   <Tab eventKey="logs" title="Logs" />
                   <Tab eventKey="events" title="Events / Debug" />
@@ -10351,13 +11578,33 @@ ${vaultYaml}
                       <Tab eventKey="tree" title="Repo Tree" />
                       <Tab eventKey="configs" title="Generated Configs" />
                       <Tab eventKey="runtime" title="Runtime" />
-                      <Tab eventKey="terminal" title="Terminal Help" />
+                      <Tab eventKey="terminal" title="Pod Terminal" />
                     </Tabs>
+                    {debugTabHelp[debugTab] && (
+                      <div
+                        style={{
+                          marginTop: '8px',
+                          padding: '10px 12px',
+                          borderRadius: '4px',
+                          backgroundColor: isDark ? '#1f1f1f' : '#f0f0f0',
+                          border: `1px solid ${isDark ? '#3c3c3c' : '#d2d2d2'}`,
+                          color: mutedTextColor,
+                          fontSize: '13px',
+                          lineHeight: 1.45
+                        }}
+                      >
+                        <strong style={{ color: isDark ? '#e0e0e0' : '#151515' }}>
+                          {debugTabHelp[debugTab].title}:
+                        </strong>{' '}
+                        {debugTabHelp[debugTab].body}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
 
 
+              {!(activeTab === 'events' && debugTab === 'terminal') && (
               <div style={{ marginTop: '12px', marginBottom: '8px', display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <FormGroup label="Search logs / events" style={{ flex: 1, marginBottom: 0 }}>
                   <TextInput
@@ -10373,24 +11620,31 @@ ${vaultYaml}
                   Clear
                 </Button>
               </div>
+              )}
               <div
                 ref={outputRef}
                 style={{
                   height: '650px',
-                  overflowY: 'auto',
+                  overflowY: activeTab === 'events' && debugTab === 'terminal' ? 'hidden' : 'auto',
                   backgroundColor: '#151515',
                   color: '#f0f0f0',
                   padding: '14px',
                   fontFamily: 'monospace',
-                  whiteSpace: 'pre-wrap',
+                  whiteSpace: activeTab === 'events' && debugTab === 'terminal' ? 'normal' : 'pre-wrap',
                   borderRadius: '0 0 6px 6px',
                   border: '1px solid #3c3c3c',
                   borderTop: 'none',
                   fontSize: `${consoleFontSize}px`,
-                  lineHeight: '1.45'
+                  lineHeight: '1.45',
+                  display: activeTab === 'events' && debugTab === 'terminal' ? 'flex' : 'block',
+                  flexDirection: 'column'
                 }}
               >
-                {renderConsoleContent()}
+                {activeTab === 'events' && debugTab === 'terminal' ? (
+                  <PodTerminal fontSize={consoleFontSize} />
+                ) : (
+                  renderConsoleContent()
+                )}
               </div>
             </CardBody>
           </Card>
