@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ado-portal
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: ado-preflight-ui
+  namespace: ado-portal
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ado-preflight-ui-workspace
+  namespace: ado-portal
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ado-preflight-ui
+  namespace: ado-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ado-preflight-ui
+  template:
+    metadata:
+      labels:
+        app: ado-preflight-ui
+    spec:
+      containers:
+        - name: preflight
+          image: ${ADO_PREFLIGHT_IMAGE}
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: ADO_PREFLIGHT_TERMINAL_ENABLED
+              value: "${ADO_PREFLIGHT_TERMINAL_ENABLED:-true}"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+          readinessProbe:
+            httpGet:
+              path: /api/ui-version
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/ui-version
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: ado-preflight-ui-workspace
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ado-preflight-ui
+  namespace: ado-portal
+spec:
+  selector:
+    app: ado-preflight-ui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ado-preflight-ui
+  namespace: ado-portal
+  annotations:
+    haproxy.router.openshift.io/timeout: 15m
+spec:
+  host: ${ADO_PREFLIGHT_ROUTE_HOST}
+  to:
+    kind: Service
+    name: ado-preflight-ui
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
