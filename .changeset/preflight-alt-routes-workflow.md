@@ -1,6 +1,7 @@
 ---
-"Preflight Alternate Routes workflow": minor
+"ado-preflight-ui": minor
 ---
+
 - **Discover Routes and Print** — optional scope: all routes, explicit namespaces, or namespaces derived from selected OpenShift apps.
 - **Alternate Routes** — replaces “Discover Routes and Add Alternative Route”; enables **Alt Routes Workflow** with:
   - Print Alternate Routes
