@@ -1,5 +1,66 @@
 # ADO Preflight UI Changelog
 
+## 1.2.0
+
+### Minor Changes
+
+- 7dac493: Git overwrite and Skip TLS help moved to `?` popovers; optional Nodes Form modal for Agent Installer; Additional Environments survey field; scoped `group_vars` refresh unless overwrite is enabled; Not using AAP shows the local ansible-playbook the pod will run and accepts additional CLI options (`ansible.extra_args`); bootstrap honors `aap.enabled=false` by disabling AAP apply/config generation.
+- 4701038: ACS form option to deploy RHACS vulnerability report job templates and workflow (`acs_report`).
+- 4701038: Add a thin Airgap Architect adapter (`POST /api/airgap-architect/map` plus Agent Installer handoff buttons), default Hub EE image name to registry-safe `ado-ee` (Contoller EE can stay `ADO-ee`), and GitLab/Grafana standalone config panels with lab hostname/IP/password defaults.
+- 7c77efa: Add AWS platform component with EC2 AMI copy bootstrap configuration (shared AWS credentials, ec2_ami_copy job options, and component_apps/component_options wiring).
+- 976eb1b: Add **Deploy to OpenShift** (Actions menu): `deploy/deploy.sh` + `deploy/preflight.yaml`, async `POST /api/deploy/openshift`. Mounts kubeconfig/podman socket in `restart_pod.sh` for local testing.
+- adc9db0: AAP Hostname URL now keeps Hub Galaxy credential Server URLs (and the Hub container registry host when unset) in sync; Hub EE push gains an optional remote pull from GitHub Container Registry (`hub_ee_pull`) instead of requiring a local-only image.
+- 4701038: Clarify Galaxy tab (separate Contoller user vs admin; Shared token falls back to General). Add org Galaxy credential order controls. Name downloads hub-galaxycreds when Galaxy is enabled. Ship infra.ado 1.1.2 so hub-only applies Galaxy credentials before stop.
+- 4701038: Hub-only / EE push now always ensures the General Contoller org exists and creates/attaches a Container Registry credential so ADO-ee pulls stop ImagePullBackOff. Checking collection publish, Push EE, or Run Hub updates only also enables Galaxy/registry credential setup.
+- bb8955a: Git TLS skip control, Bitbucket Bearer git auth, optional Hub EE push and Galaxy credential setup, Satellite manifest upload, Credentials card, Hub collection force/update-only modes, provision/OpenShift Virt fixes, Changesets-based release notes, and GHCR tagging that always uses the release tag and only applies `:latest` for non-prerelease stable X.Y.Z versions.
+- 976eb1b: Add embedded **Pod Terminal** under Events / Debug (xterm.js + WebSocket shell in `/workspace`). Disable with `ADO_PREFLIGHT_TERMINAL_ENABLED=false`.
+- 976eb1b: - ACM tab: operator channel only (drop unused hostname/replicas/namespace/storage).
+  - ACS tab: editable Central route hostname, storage class, optional policy/report sources; namespace read-only.
+  - OpenShift OAuth/RHBK and LDAP options get config tabs with IdP display name fields.
+- 976eb1b: - **Discover Routes and Print** — optional scope: all routes, explicit namespaces, or namespaces derived from selected OpenShift apps.
+
+  - **Alternate Routes** — replaces “Discover Routes and Add Alternative Route”; enables **Alt Routes Workflow** with:
+    - Print Alternate Routes
+    - Add Alternate Route (suffix, labels, force replace)
+    - Add Ingress with Route (ingress controller name + router label)
+
+  Legacy exports using `discover_routes_alt` are migrated to `alternate_routes` on import.
+
+### Patch Changes
+
+- 4701038: Add AAP 2.7 to the version selector, pass `aap_version=27` into bootstrap, and map Install AAP operator channel to `stable-2.7-cluster-scoped`.
+- 4701038: Default AAP version to 2.7 and warn that Install AAP reuses an existing cluster-scoped operator instead of creating a second OperatorGroup.
+- 4701038: Add an Install AAP operator scope control (all namespaces vs namespaced) and show it in the bootstrap recap.
+- 4701038: Fix Install AAP RHN licensing: optional subscription ID field and wiring so bootstrap attaches a pool after install instead of leaving the AAP wizard unlicensed.
+- 4701038: License tab warns to populate General → AAP Hostname and Admin password before attach; Download JSON uses `attach-aap-license` instead of `install-aap-ocp` for license-only runs.
+- 851ac2a: AWS EC2 AMI copy: scaffold only in preflight UI; run-time copy options stay on the AAP job template survey (patching-style).
+- 976eb1b: Split Quay, MinIO, Dev Hub, BookStack, NetBox, and Zabbix auth into optional workflow steps (Grafana pattern). Preflight checkboxes gate generation; RHBK co-selection auto-enables OIDC/SAML options.
+- 976eb1b: Add per-tab help text under Events / Debug and header comments in debug API responses explaining what each troubleshooting view shows.
+- 4701038: Name Download JSON `ado-preflight-<env>-install-aap-ocp.json` when Install AAP on OpenShift is selected, instead of a bare env filename.
+- 4701038: Add Actions → Download scrubbed JSON that redacts passwords, tokens, kubeconfig, manifests, and base64 blobs for safe sharing.
+- 8008840: Add prod to Additional Environments (default checked), stop leftover Install AAP JT when Install AAP is off, move collection install to a script file so logs no longer dump ERROR! script text, and warn when Hub collection update is disabled.
+- 976eb1b: Fixed hub-only / prod bootstrap regression when Git token is empty: `ansible-playbook` line continuation dropped `--vault-password-file` (vault decrypt failed, exit 127 `-e: command not found`). Optional env `group_vars` load when overwrite refreshes a single env dir.
+- 8008840: Generated Controller `collections/requirements.yml` now pins `infra.ado` to the preflight tarball version (currently 1.0.10) instead of stale 1.0.3, so project sync can install the collection Hub actually has.
+- 8008840: Fix Contoller/patching bootstrap wrongly requiring OpenShift auth when Install AAP was sticky or selected, preserve OpenShift token when Install AAP is on without an OpenShift component, fail fast with a clear message, and only stage ado-source when Hub publish is requested.
+- 8008840: Fixed a React crash on Satellite Client Tools / Satellite Config when `component_config.satellite` was missing (`validate_certs` on undefined). The form now hydrates satellite defaults when those options are selected.
+- 8008840: Fixed bootstrap failing with `--vault-password-file: command not found` when Ansible extra args were empty (line continuation dropped the vault password file off `ansible-playbook`).
+- 4701038: Fix hub-only Galaxy credentials: reload aap_config_vars before apply (stale configs/controller was skipping create/attach). Clarify per-cred org attach checkbox. Ship infra.ado 1.1.3 + updated docker overlays.
+- 4701038: Add Grafana option to deploy a shared Openshift folder with K8S Prod/Dev datasource dropdown alongside OpenshiftProd and OpenshiftDev folders.
+- 976eb1b: Autofill Grafana OIDC client ID and issuer from RHBK when both components are selected; client secret is fetched at deploy (same as OpenShift OAuth) unless manually overridden.
+- 4701038: Treat Hub collection update as opt-in: default off, clearer optional labeling, and stop implying republish is required when infra.ado already exists on Hub.
+- 4701038: Clarify Hub tab copy (General required, install-or-update collection, force overwrite, Hub-only runs), default EE names to ORG-ee, improve EE description, and allow Hub-only with collection and/or EE push without forcing a collection overwrite.
+- 4701038: Ship infra.ado 1.1.1 and fix Hub EE overlay set_fact self-reference; also overlay apply_aap_25_plus so hub-only creates the General Contoller org.
+- 8008840: Stop pinning infra.ado in generated requirements and bootstrap extra-vars; install whichever infra-ado-\*.tar.gz is newest in collections/ and let Hub/Contoller take latest.
+- 4701038: Keep OpenShift API host/token when Install AAP is on without an OpenShift component, add an AAP version selector on Install / Run, and link back to Core Environment Git Configuration.
+- 4701038: Install AAP no longer auto-selects the AAP platform component or requires Using AAP. Install settings stay on the Install / Run card, with an optional checkbox to configure Controller after the new AAP is up.
+- 4701038: When Hub collection update is off, do not write Galaxy requirements.yml and pass that flag into bootstrap so Contoller project sync does not require Hub.
+- 36c89ac: Documented the GitHub Release, Changesets, and GHCR tagging process in docs/RELEASING.md.
+- faf3d65: Release workflow prepares `vendor/ado-ee.docker.tar` from GHCR before the container build (required by Containerfile).
+- 976eb1b: Restore Actions → Download Vault JSON / Push Vault JSON to Git / Upload JSON → Push Vault to Git. Encrypts with ansible-vault as `ado-preflight-<env>.json.vault.yml` and pushes to the Project Git repo from Git Configuration.
+- 976eb1b: Hub-only and standalone AAP runs ignore imported `git.auto_push: true`; server normalizes to false, collection forces manual git mode, and vault encrypt duplicate-id fix is included.
+- 4701038: Add a Storage Class Look up button that lists classes from OpenShift when API host and token are set.
+- 4701038: Vendor kubernetes.core and redhat.openshift from the lab Hub into the preflight collections directory, and install the Python Kubernetes client in the UI image so Install AAP can call kubernetes.core.k8s.
+
 This project uses [Changesets](https://github.com/changesets/changesets).
 Add a file under `.changeset/` for user-visible changes (`npx changeset`).
 Do not edit this file directly in normal PRs — official releases compile
