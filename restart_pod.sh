@@ -45,11 +45,24 @@ podman build --security-opt label=disable --network=host -t "${NAME}:latest" -f 
 
 free_port
 
+PODMAN_MOUNT=()
+if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/podman/podman.sock" ]]; then
+  PODMAN_MOUNT=(-v "${XDG_RUNTIME_DIR}/podman/podman.sock:${XDG_RUNTIME_DIR}/podman/podman.sock")
+fi
+
+KUBE_MOUNT=()
+if [[ -f "${HOME}/.kube/config" ]]; then
+  KUBE_MOUNT=(-v "${HOME}/.kube/config:/tmp/kube/config:ro" -e "KUBECONFIG=/tmp/kube/config")
+fi
+
 podman run --rm -d \
   --name "${NAME}" \
   --security-opt label=disable \
   --add-host=host.containers.internal:host-gateway \
   -e AIRGAP_ARCHITECT_URL="${AIRGAP_ARCHITECT_URL:-http://host.containers.internal:8081}" \
+  -e ADO_PREFLIGHT_DEPLOY_OPENSHIFT_ENABLED="${ADO_PREFLIGHT_DEPLOY_OPENSHIFT_ENABLED:-true}" \
+  "${PODMAN_MOUNT[@]}" \
+  "${KUBE_MOUNT[@]}" \
   -p "${PORT}:8080" \
   "localhost/${NAME}:latest"
 

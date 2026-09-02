@@ -10,12 +10,19 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "@xterm/addon-fit": "latest",
+    "@xterm/addon-web-links": "latest",
+    "@xterm/xterm": "latest",
     "vite": "latest",
     "react": "latest",
     "react-dom": "latest",
     "@patternfly/react-core": "latest",
     "@patternfly/react-icons": "latest",
-    "express": "latest"
+    "express": "latest",
+    "ws": "latest"
+  },
+  "optionalDependencies": {
+    "node-pty": "latest"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.5"

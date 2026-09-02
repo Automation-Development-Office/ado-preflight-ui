@@ -942,12 +942,15 @@ Events / Debug area contains nested tabs for:
 - Repo Tree
 - Generated Configs
 - Runtime
-- Terminal Help
+- Pod Terminal
 
 The debug tabs are read-only and redact secret-looking values such as tokens,
-passwords, vault values, and private keys. The Terminal Help tab does not open a
-browser shell; instead it shows `podman` and `oc` commands that can be run from
-an operator shell to inspect the running container or pod.
+passwords, vault values, and private keys. **Pod Terminal** opens an interactive
+shell in the preflight pod/container (`/workspace`) via WebSocket + xterm.js —
+useful for inspecting the bootstrap clone, vault files, and collections during
+troubleshooting. Set `ADO_PREFLIGHT_TERMINAL_ENABLED=false` on shared OpenShift
+deployments if you do not want browser shell access. When disabled, the tab shows
+`podman exec` / `oc rsh` fallback commands.
 
 Use the console text controls to decrease, reset, or increase the text size for
 both Logs and Events / Debug output. Completed bootstrap runs show the returned
