@@ -966,6 +966,97 @@ function buildGitCloneArgs({
   return args;
 }
 
+function bootstrapRepoExists(repoDir) {
+  return fs.existsSync(path.join(repoDir, '.git'));
+}
+
+const GIT_OVERRIDE_DEFAULTS = {
+  group_vars_current_env: false,
+  job_and_workflow_templates: false,
+  all: false
+};
+
+function normalizeGitOverrides(git) {
+  if (!git || typeof git !== 'object') {
+    return { ...GIT_OVERRIDE_DEFAULTS };
+  }
+  if (!git.overrides || typeof git.overrides !== 'object') {
+    git.overrides = { ...GIT_OVERRIDE_DEFAULTS };
+    if (git.overwrite_generated === true) {
+      git.overrides.all = true;
+      git.overrides.group_vars_current_env = true;
+      git.overrides.job_and_workflow_templates = true;
+    }
+  } else {
+    git.overrides = {
+      group_vars_current_env: git.overrides.group_vars_current_env === true,
+      job_and_workflow_templates: git.overrides.job_and_workflow_templates === true,
+      all: git.overrides.all === true
+    };
+  }
+  git.overwrite_generated = git.overrides.all;
+  return git.overrides;
+}
+
+function resolveGitOverrideFlags(git, varsOnly) {
+  const overrides = normalizeGitOverrides(git || {});
+  if (varsOnly) {
+    return {
+      overrides,
+      overrideAll: false,
+      overrideGroupVarsEnv: true,
+      overrideJtWf: false
+    };
+  }
+  const overrideAll = overrides.all === true;
+  const overrideGroupVarsEnv = overrideAll || overrides.group_vars_current_env === true;
+  const overrideJtWf = overrideAll || overrides.job_and_workflow_templates === true;
+  return { overrides, overrideAll, overrideGroupVarsEnv, overrideJtWf };
+}
+
+async function prepareBootstrapGitRepo({
+  repoDir,
+  workRoot,
+  recloneRepo,
+  repoUrl,
+  branch,
+  token,
+  scmTool,
+  gitSkipTlsVerify,
+  skipTlsVerify
+}) {
+  if (!recloneRepo && bootstrapRepoExists(repoDir)) {
+    event(
+      `Reusing existing bootstrap clone at ${repoDir} `
+      + '(incremental git update; uncommitted pod edits preserved)'
+    );
+    return 0;
+  }
+
+  event(`Cleaning repo directory ${repoDir}`);
+  fs.rmSync(repoDir, { recursive: true, force: true });
+  fs.mkdirSync(workRoot, { recursive: true });
+
+  const cloneArgs = buildGitCloneArgs({
+    repoUrl,
+    branch,
+    repoDir,
+    token,
+    scmTool,
+    gitSkipTlsVerify
+  });
+
+  return runStream(
+    'git',
+    cloneArgs,
+    workRoot,
+    usesBearerGitAuth(scmTool)
+      ? 'Cloning Git repository with Authorization Bearer header'
+      : 'Cloning Git repository',
+    buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify)
+  );
+}
+
 function selectedComponentAppsFrom(data) {
   if (Array.isArray(data.components) && data.components.includes('all')) {
     return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...awsApps, ...provisionApps, 'jira'])];
@@ -1597,7 +1688,9 @@ function normalizePreflightPayload(input) {
   if (data.git.skip_tls_verify === undefined) data.git.skip_tls_verify = true;
   if (data.git.overwrite_generated === undefined) data.git.overwrite_generated = false;
   if (data.git.vars_only === undefined) data.git.vars_only = false;
+  normalizeGitOverrides(data.git);
   if (data.git.token === undefined) data.git.token = '';
+  if (data.git.username === undefined) data.git.username = '';
 
   // Normalize additional environments for survey choices (never create group_vars dirs).
   data.additional_environments = normalizeAdditionalEnvironments(data.additional_environments);
@@ -1740,6 +1833,7 @@ function normalizePreflightPayload(input) {
     }
   };
   if (data.aap.galaxy_setup_enabled === undefined) data.aap.galaxy_setup_enabled = false;
+  if (data.aap.ignore_galaxy_cert === undefined) data.aap.ignore_galaxy_cert = false;
   // Hub collection / EE / hub-only runs need org + Galaxy/registry creds. Auto-enable
   // when those Hub options are on so Contoller can pull ado-ee without ImagePullBackOff.
   if (
@@ -1840,22 +1934,15 @@ function normalizePreflightPayload(input) {
   if (data.aap.skip_tls_verify === true && data.aap.container_registry_credential.verify_ssl === true) {
     data.aap.container_registry_credential.verify_ssl = false;
   }
-  // Galaxy tab mirrors Hub: empty token/password fields fall back to General credentials.
+  // Hub/Galaxy API token is separate from Controller OAuth — only propagate shared Hub token.
   if (data.aap.galaxy_setup_enabled === true) {
-    const generalToken = String(data.aap.oauth_token || '').trim();
-    const generalPassword = String(data.aap.admin_password || '').trim();
+    const sharedHubToken = String(data.aap.galaxy_hub_token || '').trim();
     const generalUser = String(data.aap.admin_username || 'admin').trim() || 'admin';
-    const sharedHubToken = String(data.aap.galaxy_hub_token || '').trim()
-      || generalToken
-      || generalPassword;
-    if (!String(data.aap.galaxy_hub_token || '').trim() && sharedHubToken) {
-      data.aap.galaxy_hub_token = sharedHubToken;
-    }
     if (Array.isArray(data.aap.galaxy_credentials)) {
       data.aap.galaxy_credentials = data.aap.galaxy_credentials.map((credential) => {
         if (!credential || typeof credential !== 'object') return credential;
         const next = { ...credential };
-        if (!String(next.token || '').trim()) {
+        if (!String(next.token || '').trim() && sharedHubToken) {
           next.token = sharedHubToken;
         }
         return next;
@@ -1864,8 +1951,8 @@ function normalizePreflightPayload(input) {
     const registry = data.aap.container_registry_credential;
     if (registry && typeof registry === 'object' && registry.enabled !== false) {
       if (!String(registry.username || '').trim()) registry.username = generalUser;
-      if (!String(registry.password || '').trim()) {
-        registry.password = sharedHubToken || generalPassword;
+      if (!String(registry.password || '').trim() && sharedHubToken) {
+        registry.password = sharedHubToken;
       }
       if (!String(registry.host || '').trim()) {
         registry.host = String(data.aap.hostname || data.aap.hub_hostname || '')
@@ -4692,11 +4779,24 @@ app.post('/api/bootstrap', async (req, res) => {
   }
 
   const gitToken = data?.git?.token || '';
+  const gitUsername = String(data?.git?.username || '').trim();
+  const scmToolEarly = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
   const aapEnabled = data?.aap?.enabled !== false;
   const installAapDuringBootstrap = installAapFullRequested(data);
   const attachAapLicenseDuringBootstrap = attachAapLicenseRequested(data);
   // License-only attach must not skip Using AAP / controller configuration.
   const configureAap = aapEnabled && !installAapDuringBootstrap;
+
+  if (scmToolEarly === 'bitbucket' && configureAap && gitToken && !gitUsername) {
+    event('Bootstrap failed: Bitbucket needs git.username for Controller project sync');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error:
+        'Bitbucket is selected — set Git Configuration → Bitbucket username '
+        + 'so Controller Source Control credentials use username + HTTP access token (not OAuth2).'
+    });
+  }
 
   const standaloneRun = aapStandaloneRun(data);
   const hubUpdateCollectionOnly = standaloneRun;
@@ -4901,7 +5001,12 @@ app.post('/api/bootstrap', async (req, res) => {
     ? false
     : (data?.git?.auto_push !== false);
   const varsOnly = data?.git?.vars_only === true && !hubUpdateCollectionOnly;
-  const overwriteGenerated = !varsOnly && data?.git?.overwrite_generated === true;
+  const {
+    overrides: gitOverrides,
+    overrideAll,
+    overrideGroupVarsEnv,
+    overrideJtWf
+  } = resolveGitOverrideFlags(data?.git, varsOnly);
   // UI dropdown (ansible.verbosity in POST body) is authoritative — never fall back
   // to legacy top-level verbosity from imported JSON.
   if (!data.ansible) data.ansible = {};
@@ -4920,7 +5025,8 @@ app.post('/api/bootstrap', async (req, res) => {
   append(`Selected Component Apps: ${selectedComponentApps.join(',')}\n`);
   append(`Auto Git Push: ${autoGitPush}\n`);
   append(`Vars/Vault Only: ${varsOnly}\n`);
-  append(`Overwrite Generated Content: ${overwriteGenerated}\n`);
+  append(`Overwrite Generated Content (legacy all): ${overrideAll}\n`);
+  append(`Git overrides: group_vars=${overrideGroupVarsEnv} job_workflow=${overrideJtWf} all=${overrideAll}\n`);
   append(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}\n`);
   append(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}\n`);
   append(`Ansible Extra Args: ${ansibleExtraArgsRaw || '(none)'}\n`);
@@ -4936,7 +5042,7 @@ app.post('/api/bootstrap', async (req, res) => {
   event(`Selected component apps: ${selectedComponentApps.join(',')}`);
   event(`Auto Git Push: ${autoGitPush}`);
   event(`Vars/Vault Only: ${varsOnly}`);
-  event(`Overwrite Generated Content: ${overwriteGenerated}`);
+  event(`Git overrides: group_vars=${overrideGroupVarsEnv} job_workflow=${overrideJtWf} all=${overrideAll}`);
   event(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}`);
   event(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}`);
   event(`Ansible Extra Args: ${ansibleExtraArgsRaw || '(none)'}`);
@@ -4989,10 +5095,6 @@ app.post('/api/bootstrap', async (req, res) => {
   latestDebug.repoDir = repoDir;
   latestDebug.preflightPath = preflightPath;
   latestDebug.extraVarsPath = extraVarsPath;
-
-  event(`Cleaning repo directory ${repoDir}`);
-  fs.rmSync(repoDir, { recursive: true, force: true });
-  fs.mkdirSync(workRoot, { recursive: true });
 
   const collectionInstallScript = path.join(workRoot, 'install-collections.sh');
   const stageAdoSourceScript = path.join(workRoot, 'stage-ado-source.py');
@@ -5284,37 +5386,30 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     );
   }
 
-  const cloneArgs = buildGitCloneArgs({
+  const cloneCode = await prepareBootstrapGitRepo({
+    repoDir,
+    workRoot,
+    recloneRepo: overrideAll,
     repoUrl,
     branch: data.aap.git_branch,
-    repoDir,
     token: gitToken,
     scmTool,
-    gitSkipTlsVerify
+    gitSkipTlsVerify,
+    skipTlsVerify
   });
 
-  const cloneCode = await runStream(
-    'git',
-    cloneArgs,
-    workRoot,
-    gitUsesBearerAuth
-      ? 'Cloning Git repository with Authorization Bearer header'
-      : 'Cloning Git repository',
-    buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify)
-  );
-
   if (cloneCode !== 0 || !fs.existsSync(repoDir)) {
-    event(`Bootstrap failed during git clone exitCode=${cloneCode}`);
+    event(`Bootstrap failed during git prepare exitCode=${cloneCode}`);
     latestDebug.result = {
       status: 'failed',
       exitCode: cloneCode || 128,
       repoDir,
-      error: 'Git clone failed. Check logs.'
+      error: 'Git clone/prepare failed. Check logs.'
     };
     return res.json(latestDebug.result);
   }
 
-  event('Git repository cloned');
+  event(bootstrapRepoExists(repoDir) ? 'Git repository ready' : 'Git repository cloned');
 
   if (gitUsesBearerAuth && gitToken) {
     await runStream(
@@ -5355,7 +5450,10 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     component_options: data.component_options || {},
     machine_credential: data.aap.machine_credential || {},
     git_auto_push: autoGitPush,
-    git_overwrite_generated: overwriteGenerated,
+    git_overwrite_generated: overrideAll,
+    git_overrides: gitOverrides,
+    git_override_group_vars_env: overrideGroupVarsEnv,
+    git_override_job_workflow_templates: overrideJtWf,
     git_skip_tls_verify: gitSkipTlsVerify,
     git_vars_only: varsOnly,
     scm_tool: scmTool,
@@ -5376,6 +5474,22 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     vaultPassPath,
     data?.aap?.vault_password || data.vault_password || 'redhat123'
   );
+
+  const gitPrepBash = overrideAll
+    ? `echo "Git override (all): removing group_vars, playbooks, and configs"
+rm -rf group_vars playbooks configs`
+    : [
+      `echo "Incremental git update: preserving existing pod clone (env=${envName})"`,
+      `mkdir -p "group_vars/all/${envName}"`,
+      overrideGroupVarsEnv
+        ? `echo "Git override (group_vars): removing group_vars/all/${envName}"
+rm -rf "group_vars/all/${envName}"`
+        : '',
+      overrideJtWf
+        ? `echo "Git override (job/workflow templates): removing configs/job_templates and configs/workflows"
+rm -rf configs/job_templates configs/workflows`
+        : ''
+    ].filter(Boolean).join('\n');
 
   const code = await runStream('bash', ['-lc', `
 set -euo pipefail
@@ -5407,13 +5521,7 @@ rm -rf collections/ansible_collections/infra/ado
 
 echo ""
 echo "=== Prepare generated bootstrap content ==="
-${overwriteGenerated
-  ? `echo "Overwrite enabled: removing all group_vars, playbooks, and configs"
-rm -rf group_vars playbooks configs`
-  : `echo "Overwrite disabled: refreshing only group_vars/all/${envName} (sibling envs preserved)"
-rm -rf "group_vars/all/${envName}"
-# Shared playbooks/configs are regenerated with force; do not wipe sibling env dirs.
-mkdir -p group_vars/all`}
+${gitPrepBash}
 
 echo ""
 echo "=== Effective preflight JSON ==="
@@ -5469,8 +5577,10 @@ ansible-playbook \\
   -e generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e bootstrap_generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e generate_playbook_repo_git_commit_message="Generate ADO bootstrap content for ${envName}" \\
-  -e bootstrap_generate_env_vars_force=true \\
-  -e generate_env_vars_force=true \\
+  -e bootstrap_generate_env_vars_force=${overrideGroupVarsEnv ? 'true' : 'false'} \\
+  -e generate_env_vars_force=${overrideGroupVarsEnv ? 'true' : 'false'} \\
+  -e bootstrap_generate_playbook_repo_force=${overrideAll ? 'true' : 'false'} \\
+  -e bootstrap_controller_generate_aap_configs_force_job_workflows=${overrideJtWf ? 'true' : 'false'} \\
   -e generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
   -e bootstrap_generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
   -e bootstrap_generate_env_vars_vault_password_file=.vault_pass \\
@@ -5499,7 +5609,11 @@ ansible-playbook \\
     selectedComponentApps,
     autoGitPush,
     varsOnly,
-    overwriteGenerated,
+    gitOverrides,
+    overrideAll,
+    overrideGroupVarsEnv,
+    overrideJtWf,
+    overwriteGenerated: overrideAll,
     ansibleVerbosity,
     ansibleVerbosityFlag,
     ansibleExtraArgs: ansibleExtraArgsRaw,

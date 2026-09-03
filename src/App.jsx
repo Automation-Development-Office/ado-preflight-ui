@@ -952,13 +952,20 @@ const defaults = {
   git: {
     auto_push: true,
     skip_tls_verify: true,
-    // When false (default), regenerate only group_vars/all/<environment>.
-    // When true, wipe all group_vars (+ playbooks/configs) before scaffolding.
+    // Legacy boolean; kept in sync with git.overrides.all for imported JSON.
     overwrite_generated: false,
+    overrides: {
+      // Default: incremental updates only — no wipe/force overwrite in pod git repo.
+      group_vars_current_env: false,
+      job_and_workflow_templates: false,
+      all: false
+    },
     // When true: only refresh group_vars (vars/vault) + optional git push.
     // Skips playbook regeneration and Controller org/project/JT/workflow apply.
     vars_only: false,
-    token: ''
+    token: '',
+    // Bitbucket Server HTTP access tokens need the account username for Controller SCM creds.
+    username: ''
   },
 
   components: [],
@@ -1376,6 +1383,7 @@ const defaults = {
       + 'amazon.aws, and related dependencies) so Contoller can run disconnected without Galaxy pulls.',
     // Optional Galaxy/Hub credentials + org association (default off for disconnected)
     galaxy_setup_enabled: false,
+    ignore_galaxy_cert: false,
     galaxy_hub_token: '',
     auth: {
       keycloak_oidc: {
@@ -1585,6 +1593,7 @@ function App() {
   const [activeConfigTab, setActiveConfigTab] = useState('all');
   const [showOpenShiftToken, setShowOpenShiftToken] = useState(false);
   const [showAapOauthToken, setShowAapOauthToken] = useState(false);
+  const [showAapGalaxyHubToken, setShowAapGalaxyHubToken] = useState(false);
   const [showAapAdminPassword, setShowAapAdminPassword] = useState(false);
   const [showMachineCredentialSecrets, setShowMachineCredentialSecrets] = useState(false);
   const [showSatelliteSecrets, setShowSatelliteSecrets] = useState(false);
@@ -1599,10 +1608,12 @@ function App() {
   const [showAwsSecrets, setShowAwsSecrets] = useState(false);
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
+  const [ansibleExtraArgsOpen, setAnsibleExtraArgsOpen] = useState(false);
   const [additionalEnvOtherEnabled, setAdditionalEnvOtherEnabled] = useState(false);
   const [additionalEnvOtherDraft, setAdditionalEnvOtherDraft] = useState('');
   const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
   const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
+  const [activeHubSubTab, setActiveHubSubTab] = useState('collections');
   const [activeAapAuthTab, setActiveAapAuthTab] = useState('keycloak');
   const [storageClassLookup, setStorageClassLookup] = useState({
     loading: false,
@@ -2808,6 +2819,7 @@ function App() {
       merged.aap.hub_ee_description = defaults.aap.hub_ee_description;
     }
     if (merged.aap.galaxy_setup_enabled === undefined) merged.aap.galaxy_setup_enabled = false;
+    if (merged.aap.ignore_galaxy_cert === undefined) merged.aap.ignore_galaxy_cert = false;
     if (!merged.aap.auth) merged.aap.auth = JSON.parse(JSON.stringify(defaults.aap.auth || {}));
     if (!merged.aap.auth.keycloak_oidc) {
       merged.aap.auth.keycloak_oidc = JSON.parse(JSON.stringify(defaults.aap.auth.keycloak_oidc));
@@ -2877,7 +2889,22 @@ function App() {
     if (merged.git.auto_push === undefined) merged.git.auto_push = true;
     if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
     if (merged.git.overwrite_generated === undefined) merged.git.overwrite_generated = false;
+    if (!merged.git.overrides) {
+      merged.git.overrides = {
+        group_vars_current_env: false,
+        job_and_workflow_templates: false,
+        all: merged.git.overwrite_generated === true
+      };
+    }
+    merged.git.overrides = {
+      group_vars_current_env: merged.git.overrides.group_vars_current_env === true,
+      job_and_workflow_templates: merged.git.overrides.job_and_workflow_templates === true,
+      all: merged.git.overrides.all === true
+        || merged.git.overwrite_generated === true
+    };
+    merged.git.overwrite_generated = merged.git.overrides.all === true;
     if (merged.git.vars_only === undefined) merged.git.vars_only = false;
+    if (merged.git.username === undefined) merged.git.username = '';
     if (merged.additional_environments === undefined) merged.additional_environments = ['prod'];
     merged.additional_environments = parseAdditionalEnvironmentsList(merged.additional_environments);
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
@@ -3032,32 +3059,26 @@ function App() {
           description: payload.aap.hub_ee_description
         }
       };
-      // Populate galaxy_hub_token and all galaxy credential tokens from the best
-      // available token (galaxy_hub_token → oauth_token → admin_password) so the
-      // downloaded JSON is self-contained and doesn't rely on server-side fallback.
+      // Hub/Galaxy API token is separate from Controller OAuth — only propagate the
+      // shared Hub token into empty per-credential token fields when Galaxy setup runs.
       if (payload.aap.galaxy_setup_enabled === true) {
-        const generalToken = String(payload.aap.oauth_token || '').trim();
-        const generalPassword = String(payload.aap.admin_password || '').trim();
-        const generalUser = String(payload.aap.admin_username || 'admin').trim() || 'admin';
-        const sharedHubToken = String(payload.aap.galaxy_hub_token || '').trim()
-          || generalToken
-          || generalPassword;
-        if (!String(payload.aap.galaxy_hub_token || '').trim() && sharedHubToken) {
-          payload.aap.galaxy_hub_token = sharedHubToken;
-        }
+        const sharedHubToken = String(payload.aap.galaxy_hub_token || '').trim();
         if (Array.isArray(payload.aap.galaxy_credentials)) {
           payload.aap.galaxy_credentials = payload.aap.galaxy_credentials.map((cred) => {
             if (!cred || typeof cred !== 'object') return cred;
             const next = { ...cred };
-            if (!String(next.token || '').trim()) next.token = sharedHubToken;
+            if (!String(next.token || '').trim() && sharedHubToken) {
+              next.token = sharedHubToken;
+            }
             return next;
           });
         }
         const registry = payload.aap.container_registry_credential;
         if (registry && typeof registry === 'object' && registry.enabled !== false) {
+          const generalUser = String(payload.aap.admin_username || 'admin').trim() || 'admin';
           if (!String(registry.username || '').trim()) registry.username = generalUser;
-          if (!String(registry.password || '').trim()) {
-            registry.password = sharedHubToken || generalPassword;
+          if (!String(registry.password || '').trim() && sharedHubToken) {
+            registry.password = sharedHubToken;
           }
           if (!String(registry.host || '').trim()) {
             registry.host = payload.aap.hub_hostname
@@ -3313,6 +3334,65 @@ function App() {
 
     lines.push('  --vault-password-file .vault_pass');
     return lines.join('\n');
+  };
+
+  const renderAnsibleExtraArgsCollapsible = () => {
+    const summary = String(data?.ansible?.extra_args || '').trim();
+    return (
+      <div style={{ marginTop: '4px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+          <button
+            type="button"
+            onClick={() => setAnsibleExtraArgsOpen(open => !open)}
+            aria-expanded={ansibleExtraArgsOpen}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              padding: 0,
+              fontWeight: 600,
+              cursor: 'pointer',
+              fontSize: '14px',
+              color: textColor,
+              textAlign: 'left'
+            }}
+          >
+            {ansibleExtraArgsOpen ? '−' : '+'} Additional ansible-playbook options
+          </button>
+          {labelWithHelp('', (
+            <>
+              <p>Appended after the built-in <code>-e</code> flags when the pod runs bootstrap.</p>
+              <p>Examples: <code>-e generate_playbooks=false</code>, <code>--tags bootstrap</code>, <code>-e some_custom_var=value</code></p>
+            </>
+          ))}
+          {!ansibleExtraArgsOpen && summary && (
+            <span style={{ color: mutedTextColor, fontWeight: 400, fontFamily: 'monospace', fontSize: '12px' }}>
+              {summary.length > 56 ? `${summary.slice(0, 56)}…` : summary}
+            </span>
+          )}
+        </div>
+        {ansibleExtraArgsOpen && (
+          <textarea
+            value={data.ansible?.extra_args || ''}
+            onChange={e => set('ansible.extra_args', e.target.value)}
+            placeholder="-e my_var=value --tags bootstrap"
+            spellCheck="false"
+            rows={2}
+            style={{
+              width: '100%',
+              marginTop: '6px',
+              background: fieldBg,
+              color: fieldColor,
+              fontFamily: 'monospace',
+              fontSize: `${Math.max(consoleFontSize - 1, 12)}px`,
+              lineHeight: '1.4',
+              border: `1px solid ${borderColor}`,
+              borderRadius: '4px',
+              padding: '8px'
+            }}
+          />
+        )}
+      </div>
+    );
   };
 
   const isStandaloneDisabled = () => false;
@@ -4673,10 +4753,30 @@ echo $TOKEN
   };
 
   const gitHelp = {
-    overwriteGenerated: (
+    gitOverrides: (
       <>
-        <p>Off (default): only refresh <code>group_vars/all/&lt;env&gt;</code> for the selected Environment Type; sibling envs (for example <code>prod</code> when generating <code>dev</code>) are kept.</p>
-        <p>On: delete all <code>group_vars</code>, <code>playbooks</code>, and <code>configs</code> before scaffolding.</p>
+        <p><strong>Default (all unchecked):</strong> keep the pod&apos;s local git clone and only write/commit bootstrap changes — no wipe or force overwrite.</p>
+        <p><strong>group_vars/all/&lt;env&gt;:</strong> remove and regenerate vars/vault for the current Environment Type only.</p>
+        <p><strong>Job and workflow templates:</strong> remove and regenerate <code>configs/job_templates</code> and <code>configs/workflows</code>.</p>
+        <p><strong>All:</strong> re-clone from Git and wipe <code>group_vars</code>, <code>playbooks</code>, and <code>configs</code> before scaffolding.</p>
+      </>
+    ),
+    overrideGroupVarsEnv: (
+      <>
+        <p>Delete <code>group_vars/all/&lt;current env&gt;</code> in the pod git repo and regenerate vars/vault with force overwrite.</p>
+        <p>Other environments, playbooks, and configs are preserved.</p>
+      </>
+    ),
+    overrideJobWorkflowTemplates: (
+      <>
+        <p>Delete <code>configs/job_templates</code> and <code>configs/workflows</code> and regenerate from the collection.</p>
+        <p>Existing job/workflow YAML files are not modified when unchecked.</p>
+      </>
+    ),
+    overrideAll: (
+      <>
+        <p>Re-clone the bootstrap repo from Git and remove all <code>group_vars</code>, <code>playbooks</code>, and <code>configs</code> before bootstrap runs.</p>
+        <p>Equivalent to enabling all override scopes.</p>
       </>
     ),
     skipTlsVerify: (
@@ -4709,6 +4809,42 @@ echo $TOKEN
         <p>Build the preflight UI image and apply <code>deploy/preflight.yaml</code> on the OpenShift cluster using API host/token from OpenShift Configuration.</p>
         <p>Use this to run preflight on the cluster portal (not the local pod). Poll logs in the console after starting.</p>
         <p>Local testing: <code>./restart_pod.sh</code> runs bootstrap in a pod on this machine instead.</p>
+      </>
+    ),
+    hubPublishCollection: (
+      <>
+        <p>
+          Publishes <code>infra.ado</code> into Private Automation Hub validated content when it is
+          missing, or refreshes it when you also enable force below.
+        </p>
+        <p>Leave off if Hub already has the collection Controller should use.</p>
+      </>
+    ),
+    hubForceCollectionUpdate: (
+      <>
+        <p>
+          Overwrites an existing <code>infra.ado</code> in Hub validated content.
+        </p>
+        <p>Without this, an already-installed collection is left as-is.</p>
+      </>
+    ),
+    hubExecutionEnvironment: (
+      <>
+        <p>
+          Pushes ADO EE into Private Automation Hub with <code>skopeo</code> inside this pod, then
+          optionally creates a Controller execution environment (default{' '}
+          <code>{defaultOrgEeName(data.aap?.organization || 'ADO')}</code>).
+        </p>
+        <p>
+          The UI image ships a baked archive at{' '}
+          <code>docker-archive:/opt/ado-ee/ado-ee.docker.tar</code> — no host podman socket and no
+          runtime internet. Registry login uses General → Hub / Galaxy API token.
+        </p>
+        <p>
+          Without ADO EE, Controller jobs need Galaxy credentials already on the organization so
+          project sync can install vendored <code>infra.ado</code> (Galaxy tab creates them if
+          missing; leave it off if they already exist in Controller).
+        </p>
       </>
     )
   };
@@ -8197,6 +8333,14 @@ echo $TOKEN
                 Auto-push is on, but no Git token is set. Add it on Git Configuration or turn auto-push off.
               </div>
             )}
+            {data.scm_tool === 'bitbucket'
+              && data.aap?.enabled !== false
+              && !installAapFullRequested(data)
+              && !String(data.git?.username || '').trim() && (
+              <div style={{ color: '#8a6d3b', fontSize: '13px', marginTop: '8px' }}>
+                Bitbucket is selected — set Bitbucket username on Git Configuration so Controller project sync can authenticate (username + HTTP access token, not OAuth2).
+              </div>
+            )}
           </CardBody>
         </Card>
         <Grid hasGutter>
@@ -9696,7 +9840,7 @@ ${vaultYaml}
                   </FormGroup>
                   {data.scm_tool === 'bitbucket' && (
                     <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
-                      Bitbucket uses <code>Authorization: Bearer</code> for git clone/push.
+                      Local bootstrap git uses <code>Authorization: Bearer</code>. Controller project sync uses your Bitbucket username plus HTTP access token (not OAuth2).
                     </p>
                   )}
 
@@ -9716,16 +9860,88 @@ ${vaultYaml}
 
                   <br />
 
+                  <Title headingLevel="h4">
+                    {labelWithHelp('Git overrides (local pod git repo)', gitHelp.gitOverrides)}
+                  </Title>
+                  <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: '8px', fontSize: '13px' }}>
+                    Default is all unchecked: bootstrap only applies changes to the pod clone (no remove or force overwrite).
+                  </p>
+
                   <Checkbox
-                    id="git-overwrite-generated"
-                    label={labelWithHelp('Overwrite all generated content (all environments)', gitHelp.overwriteGenerated)}
-                    isChecked={data.git.overwrite_generated === true}
+                    id="git-override-group-vars-env"
+                    label={labelWithHelp(
+                      `Override group_vars/all/${data.environment || 'env'} (current Environment Type)`,
+                      gitHelp.overrideGroupVarsEnv
+                    )}
+                    isChecked={data.git?.overrides?.group_vars_current_env === true}
+                    isDisabled={data.git.vars_only === true || data.git?.overrides?.all === true}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.git) copy.git = {};
+                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
+                        copy.git.overrides.group_vars_current_env = v === true;
+                        if (!v) copy.git.overrides.all = false;
+                        copy.git.overwrite_generated = copy.git.overrides.all === true;
+                        return copy;
+                      });
+                    }}
+                  />
+
+                  <br />
+
+                  <Checkbox
+                    id="git-override-job-workflow-templates"
+                    label={labelWithHelp(
+                      'Override job and workflow templates (configs/job_templates and configs/workflows)',
+                      gitHelp.overrideJobWorkflowTemplates
+                    )}
+                    isChecked={data.git?.overrides?.job_and_workflow_templates === true}
+                    isDisabled={data.git.vars_only === true || data.git?.overrides?.all === true}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.git) copy.git = {};
+                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
+                        copy.git.overrides.job_and_workflow_templates = v === true;
+                        if (!v) copy.git.overrides.all = false;
+                        copy.git.overwrite_generated = copy.git.overrides.all === true;
+                        return copy;
+                      });
+                    }}
+                  />
+
+                  <br />
+
+                  <Checkbox
+                    id="git-override-all"
+                    label={labelWithHelp(
+                      'Override all (re-clone and wipe group_vars, playbooks, and configs)',
+                      gitHelp.overrideAll
+                    )}
+                    isChecked={data.git?.overrides?.all === true}
                     isDisabled={data.git.vars_only === true}
-                    onChange={(_, v) => set('git.overwrite_generated', v)}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.git) copy.git = {};
+                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
+                        copy.git.overrides.all = v === true;
+                        if (v === true) {
+                          copy.git.overrides.group_vars_current_env = true;
+                          copy.git.overrides.job_and_workflow_templates = true;
+                        } else {
+                          copy.git.overrides.group_vars_current_env = false;
+                          copy.git.overrides.job_and_workflow_templates = false;
+                        }
+                        copy.git.overwrite_generated = copy.git.overrides.all === true;
+                        return copy;
+                      });
+                    }}
                   />
                   {data.git.vars_only === true && (
                     <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
-                      Overwrite-all is disabled while Vars / Vault files only is checked.
+                      Git overrides are disabled while Vars / Vault files only is checked (vars for the current env are always regenerated).
                     </p>
                   )}
 
@@ -9751,6 +9967,20 @@ ${vaultYaml}
                   </FormGroup>
 
                   <br />
+
+                  {data.scm_tool === 'bitbucket' && (
+                    <>
+                      <FormGroup label="Bitbucket username" isRequired>
+                        <TextInput
+                          value={data.git.username}
+                          onChange={(_, v) => set('git.username', v)}
+                          placeholder="Account username for HTTP access token"
+                        />
+                      </FormGroup>
+
+                      <br />
+                    </>
+                  )}
 
                   <FormGroup label="Git Token">
                     <div style={{ display: 'flex', gap: '8px' }}>
@@ -9805,9 +10035,11 @@ ${vaultYaml}
                   <br />
                   <div style={{ color: mutedTextColor, marginBottom: '8px' }}>
                     Click <strong>Run Bootstrap</strong> below — the pod runs this ansible-playbook locally
-                    (no AAP API calls). Add optional flags or <code>-e</code> vars in the box under the preview.
+                    (no AAP API calls). Expand additional options on the General tab or below.
                     For a greenfield operator install, open the <strong>Install AAP</strong> tab (expand this card).
                   </div>
+                  {renderAnsibleExtraArgsCollapsible()}
+                  <br />
                   <textarea
                     readOnly
                     spellCheck="false"
@@ -9825,32 +10057,6 @@ ${vaultYaml}
                       padding: '14px'
                     }}
                   />
-                  <br />
-                  <FormGroup
-                    label={labelWithHelp(
-                      'Additional ansible-playbook options',
-                      'Appended after the built-in -e flags when the pod runs bootstrap. Examples: -e generate_playbooks=false --tags bootstrap -e some_custom_var=value'
-                    )}
-                  >
-                    <textarea
-                      value={data.ansible?.extra_args || ''}
-                      onChange={e => set('ansible.extra_args', e.target.value)}
-                      placeholder={'-e my_var=value --tags bootstrap'}
-                      spellCheck="false"
-                      rows={3}
-                      style={{
-                        width: '100%',
-                        background: fieldBg,
-                        color: fieldColor,
-                        fontFamily: 'monospace',
-                        fontSize: `${consoleFontSize}px`,
-                        lineHeight: '1.45',
-                        border: `1px solid ${borderColor}`,
-                        borderRadius: '4px',
-                        padding: '10px'
-                      }}
-                    />
-                  </FormGroup>
                 </>
               )}
 
@@ -9986,6 +10192,24 @@ ${vaultYaml}
                           </div>
                         </FormGroup>
                       </GridItem>
+                      <GridItem span={6}>
+                        <FormGroup
+                          label="Hub / Galaxy API token"
+                          helperText="Automation Hub API token for Hub publish, Galaxy credentials, and registry pulls. Not the same as the Controller OAuth token above — create it under Hub → User Access → Tokens."
+                        >
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <TextInput
+                              type={showAapGalaxyHubToken ? 'text' : 'password'}
+                              value={data.aap.galaxy_hub_token}
+                              onChange={(_, v) => set('aap.galaxy_hub_token', v)}
+                              placeholder="Hub API token (separate from Controller OAuth)"
+                            />
+                            <Button variant="secondary" onClick={() => setShowAapGalaxyHubToken(!showAapGalaxyHubToken)}>
+                              {showAapGalaxyHubToken ? 'Hide' : 'Show'}
+                            </Button>
+                          </div>
+                        </FormGroup>
+                      </GridItem>
 
                       <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
                       <GridItem span={6}>
@@ -10036,6 +10260,7 @@ ${vaultYaml}
                                   copy.git.vars_only = v === true;
                                   if (v === true) {
                                     copy.git.overwrite_generated = false;
+                                    copy.git.overrides = { ...defaults.git.overrides };
                                     if (!copy.aap) copy.aap = {};
                                     copy.aap.standalone_run = false;
                                     copy.aap.hub_update_collection_only = false;
@@ -10070,7 +10295,18 @@ ${vaultYaml}
                               components for a full bootstrap.
                             </div>
                           )}
+                          {data.aap?.enabled !== false && (
+                            <div style={{ color: mutedTextColor, fontSize: '13px', margin: '8px 0 0' }}>
+                              <strong>Using AAP:</strong> bootstrap still runs{' '}
+                              <code>ansible-playbook run-ado-scaffolding.yml</code> in the pod, then applies
+                              Controller/Hub config via the AAP API. Expand additional options below for extra{' '}
+                              <code>-e</code> flags.
+                            </div>
+                          )}
                         </FormGroup>
+                      </GridItem>
+                      <GridItem span={12}>
+                        {renderAnsibleExtraArgsCollapsible()}
                       </GridItem>
                       <GridItem span={12}>
                         <Button
@@ -10118,11 +10354,11 @@ ${vaultYaml}
                             background: 'rgba(240, 173, 78, 0.08)'
                           }}
                         >
-                          Before running: make sure General → AAP Hostname URL, Organization Name, and
-                          Admin password (or OAuth token) are populated. Hub talks to that AAP/Hub
-                          endpoint using those General credentials. Local laptop/podman EE push does
-                          not need a separate registry username/password — leave Admin password blank
-                          and set OAuth token; push logs in as unused + token.
+                          Before running: set General → AAP Hostname URL and Organization Name.
+                          Controller API calls use General → Admin password or OAuth token.
+                          Hub publish, Galaxy credentials, and registry pulls use General →
+                          Hub / Galaxy API token (Hub User Access token — not Controller OAuth).
+                          Local laptop/podman EE push can use the Hub token for registry auth.
                         </div>
                       </GridItem>
                       <GridItem span={12}>
@@ -10152,184 +10388,189 @@ ${vaultYaml}
                         </FormGroup>
                       </GridItem>
                       <GridItem span={12}>
-                        <FormGroup label="Collections">
-                          <Checkbox
-                            label="Install or update infra.ado collection in Hub validated content (optional)"
-                            isChecked={data.aap.hub_publish_ado_collection === true}
-                            onChange={(_, v) => setAapHubValidated(v)}
-                          />
-                          <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 8px' }}>
-                            Publishes <code>infra.ado</code> into Private Automation Hub validated content
-                            when it is missing, or refreshes it when you also enable force below.
-                            Leave off if Hub already has the collection Contoller should use.
-                          </div>
-                          <Checkbox
-                            label="Force infra.ado collection update if already installed"
-                            isChecked={data.aap.hub_force_ado_collection_update}
-                            isDisabled={!data.aap.hub_publish_ado_collection}
-                            onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
-                          />
-                          <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 0' }}>
-                            Overwrites an existing <code>infra.ado</code> in Hub validated content.
-                            Without this, an already-installed collection is left as-is.
-                          </div>
-                        </FormGroup>
+                        <Tabs
+                          activeKey={activeHubSubTab}
+                          onSelect={(_, key) => setActiveHubSubTab(key)}
+                        >
+                          <Tab eventKey="collections" title="Collections" />
+                          <Tab eventKey="execution_environment" title="Execution Environment" />
+                        </Tabs>
                       </GridItem>
-                      <GridItem span={12}>
-                        <FormGroup label="Execution environment (optional)">
-                          <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
-                            Pushes ADO EE into Private Automation Hub with <code>skopeo</code>
-                            <strong> inside this pod</strong>, then optionally creates a Contoller
-                            execution environment (default{' '}
-                            <code>{defaultOrgEeName(data.aap.organization || 'ADO')}</code>).
-                            The UI image ships a baked archive at{' '}
-                            <code>docker-archive:/opt/ado-ee/ado-ee.docker.tar</code> — no host podman
-                            socket and no runtime internet. Registry login uses the AAP admin
-                            password / token from this form (lab Hub only).
-                            Without ADO EE, Contoller jobs need Galaxy credentials already on the
-                            organization so project sync can install vendored{' '}
-                            <code>infra.ado</code> (Galaxy tab creates them if missing; leave it off
-                            if they already exist in Contoller).
-                          </p>
-                          <Checkbox
-                            id="aap-hub-push-ee"
-                            label="Push ADO EE image to AAP Hub (optional)"
-                            isChecked={data.aap.hub_push_ee === true}
-                            onChange={(_, v) => setAapHubPushEe(v)}
-                          />
-                        </FormGroup>
-                      </GridItem>
-                      {data.aap.hub_push_ee && (
+                      {activeHubSubTab === 'collections' && (
+                        <GridItem span={12}>
+                          <FormGroup label={labelWithHelp('Collections', (
+                            <>
+                              <p>Publish or refresh the vendored <code>infra.ado</code> collection in Private Automation Hub validated content.</p>
+                              <p>Set General → Hub / Galaxy API token before running collection publish.</p>
+                            </>
+                          ))}>
+                            <Checkbox
+                              label={labelWithHelp(
+                                'Install or update infra.ado collection in Hub validated content (optional)',
+                                aapHelp.hubPublishCollection
+                              )}
+                              isChecked={data.aap.hub_publish_ado_collection === true}
+                              onChange={(_, v) => setAapHubValidated(v)}
+                            />
+                            <div style={{ marginTop: '12px' }}>
+                              <Checkbox
+                                label={labelWithHelp(
+                                  'Force infra.ado collection update if already installed',
+                                  aapHelp.hubForceCollectionUpdate
+                                )}
+                                isChecked={data.aap.hub_force_ado_collection_update}
+                                isDisabled={!data.aap.hub_publish_ado_collection}
+                                onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
+                              />
+                            </div>
+                          </FormGroup>
+                        </GridItem>
+                      )}
+                      {activeHubSubTab === 'execution_environment' && (
                         <>
                           <GridItem span={12}>
-                            <Checkbox
-                              id="aap-hub-ee-pull"
-                              label="Pull source from a registry instead of the baked archive (needs network)"
-                              isChecked={data.aap.hub_ee_pull === true}
-                              onChange={(_, v) => {
-                                setData(prev => {
-                                  const copy = JSON.parse(JSON.stringify(prev));
-                                  if (!copy.aap) copy.aap = {};
-                                  copy.aap.hub_ee_pull = v === true;
-                                  copy.aap.hub_ee_source_image = v
-                                    ? HUB_EE_REGISTRY_SOURCE
-                                    : HUB_EE_BAKED_SOURCE;
-                                  return copy;
-                                });
-                              }}
-                            />
-                            <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
-                              Leave unchecked for disconnected labs (default
-                              {' '}<code>{HUB_EE_BAKED_SOURCE}</code>). Only enable when this
-                              pod can reach ghcr.io or an internal mirror
-                              ({' '}<code>{HUB_EE_REGISTRY_SOURCE}</code>).
-                            </p>
-                          </GridItem>
-                          <GridItem span={8}>
-                            <FormGroup
-                              label={
-                                data.aap.hub_ee_pull
-                                  ? 'Source image (registry pull)'
-                                  : 'Source image (baked archive in this pod)'
-                              }
-                            >
-                              <TextInput
-                                value={data.aap.hub_ee_source_image || (data.aap.hub_ee_pull ? HUB_EE_REGISTRY_SOURCE : HUB_EE_BAKED_SOURCE)}
-                                onChange={(_, v) => set('aap.hub_ee_source_image', v)}
-                                placeholder={data.aap.hub_ee_pull ? HUB_EE_REGISTRY_SOURCE : HUB_EE_BAKED_SOURCE}
+                            <FormGroup label={labelWithHelp('Execution environment (optional)', aapHelp.hubExecutionEnvironment)}>
+                              <Checkbox
+                                id="aap-hub-push-ee"
+                                label="Push ADO EE image to AAP Hub (optional)"
+                                isChecked={data.aap.hub_push_ee === true}
+                                onChange={(_, v) => setAapHubPushEe(v)}
                               />
                             </FormGroup>
                           </GridItem>
-                          <GridItem span={4}>
-                            <FormGroup
-                              label={(
-                                <span>
-                                  Hub image name
-                                  <span style={{ color: mutedTextColor, fontWeight: 400 }}>
-                                    {' — container name in Private Automation Hub'}
-                                  </span>
-                                </span>
-                              )}
-                            >
-                              <TextInput
-                                value={data.aap.hub_ee_name}
-                                onChange={(_, v) => setAapHubEeNameField('hub_ee_name', normalizeHubImageName(v))}
-                                placeholder={defaultHubImageName()}
-                              />
-                              <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
-                                Registry image name must be lowercase (default <code>ado-ee</code>).
-                                Display label remains &quot;ADO EE&quot;; Contoller EE object name is separate below.
-                              </p>
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={4}>
-                            <FormGroup label="Tag">
-                              <TextInput
-                                value={data.aap.hub_ee_tag}
-                                onChange={(_, v) => set('aap.hub_ee_tag', v)}
-                              />
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={8}>
-                            <FormGroup
-                              label={(
-                                <span>
-                                  Hub registry host
-                                  <span style={{ color: mutedTextColor, fontWeight: 400 }}>
-                                    {' — Defaults to Hub hostname when empty'}
-                                  </span>
-                                </span>
-                              )}
-                            >
-                              <TextInput
-                                value={data.aap.hub_ee_registry}
-                                onChange={(_, v) => set('aap.hub_ee_registry', v)}
-                                placeholder={
-                                  data.aap.hub_hostname
-                                  || hostnameFromUrl(data.aap.hostname)
-                                  || 'aap.example.com'
-                                }
-                              />
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={12}>
-                            <Checkbox
-                              id="aap-hub-ee-create-ee"
-                              label="Create Contoller execution environment after push"
-                              isChecked={data.aap.hub_ee_create_execution_environment !== false}
-                              onChange={(_, v) => set('aap.hub_ee_create_execution_environment', v)}
-                            />
-                          </GridItem>
-                          {data.aap.hub_ee_create_execution_environment !== false && (
-                            <GridItem span={6}>
-                              <FormGroup
-                                label={(
-                                  <span>
-                                    Contoller EE name
-                                    <span style={{ color: mutedTextColor, fontWeight: 400 }}>
-                                      {` — defaults to ${defaultOrgEeName(data.aap.organization || 'ADO')} (ORG-ee)`}
-                                    </span>
-                                  </span>
-                                )}
-                              >
-                                <TextInput
-                                  value={data.aap.hub_ee_execution_environment_name}
-                                  onChange={(_, v) => setAapHubEeNameField('hub_ee_execution_environment_name', v)}
-                                  placeholder={defaultOrgEeName(data.aap.organization || 'ADO')}
+                          {data.aap.hub_push_ee && (
+                            <>
+                              <GridItem span={12}>
+                                <Checkbox
+                                  id="aap-hub-ee-pull"
+                                  label="Pull source from a registry instead of the baked archive (needs network)"
+                                  isChecked={data.aap.hub_ee_pull === true}
+                                  onChange={(_, v) => {
+                                    setData(prev => {
+                                      const copy = JSON.parse(JSON.stringify(prev));
+                                      if (!copy.aap) copy.aap = {};
+                                      copy.aap.hub_ee_pull = v === true;
+                                      copy.aap.hub_ee_source_image = v
+                                        ? HUB_EE_REGISTRY_SOURCE
+                                        : HUB_EE_BAKED_SOURCE;
+                                      return copy;
+                                    });
+                                  }}
                                 />
-                              </FormGroup>
-                            </GridItem>
+                                <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
+                                  Leave unchecked for disconnected labs (default
+                                  {' '}<code>{HUB_EE_BAKED_SOURCE}</code>). Only enable when this
+                                  pod can reach ghcr.io or an internal mirror
+                                  ({' '}<code>{HUB_EE_REGISTRY_SOURCE}</code>).
+                                </p>
+                              </GridItem>
+                              <GridItem span={8}>
+                                <FormGroup
+                                  label={
+                                    data.aap.hub_ee_pull
+                                      ? 'Source image (registry pull)'
+                                      : 'Source image (baked archive in this pod)'
+                                  }
+                                >
+                                  <TextInput
+                                    value={data.aap.hub_ee_source_image || (data.aap.hub_ee_pull ? HUB_EE_REGISTRY_SOURCE : HUB_EE_BAKED_SOURCE)}
+                                    onChange={(_, v) => set('aap.hub_ee_source_image', v)}
+                                    placeholder={data.aap.hub_ee_pull ? HUB_EE_REGISTRY_SOURCE : HUB_EE_BAKED_SOURCE}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={4}>
+                                <FormGroup
+                                  label={(
+                                    <span>
+                                      Hub image name
+                                      <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                        {' — container name in Private Automation Hub'}
+                                      </span>
+                                    </span>
+                                  )}
+                                >
+                                  <TextInput
+                                    value={data.aap.hub_ee_name}
+                                    onChange={(_, v) => setAapHubEeNameField('hub_ee_name', normalizeHubImageName(v))}
+                                    placeholder={defaultHubImageName()}
+                                  />
+                                  <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
+                                    Registry image name must be lowercase (default <code>ado-ee</code>).
+                                    Display label remains &quot;ADO EE&quot;; Contoller EE object name is separate below.
+                                  </p>
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={4}>
+                                <FormGroup label="Tag">
+                                  <TextInput
+                                    value={data.aap.hub_ee_tag}
+                                    onChange={(_, v) => set('aap.hub_ee_tag', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={8}>
+                                <FormGroup
+                                  label={(
+                                    <span>
+                                      Hub registry host
+                                      <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                        {' — Defaults to Hub hostname when empty'}
+                                      </span>
+                                    </span>
+                                  )}
+                                >
+                                  <TextInput
+                                    value={data.aap.hub_ee_registry}
+                                    onChange={(_, v) => set('aap.hub_ee_registry', v)}
+                                    placeholder={
+                                      data.aap.hub_hostname
+                                      || hostnameFromUrl(data.aap.hostname)
+                                      || 'aap.example.com'
+                                    }
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={12}>
+                                <Checkbox
+                                  id="aap-hub-ee-create-ee"
+                                  label="Create Contoller execution environment after push"
+                                  isChecked={data.aap.hub_ee_create_execution_environment !== false}
+                                  onChange={(_, v) => set('aap.hub_ee_create_execution_environment', v)}
+                                />
+                              </GridItem>
+                              {data.aap.hub_ee_create_execution_environment !== false && (
+                                <GridItem span={6}>
+                                  <FormGroup
+                                    label={(
+                                      <span>
+                                        Contoller EE name
+                                        <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                          {` — defaults to ${defaultOrgEeName(data.aap.organization || 'ADO')} (ORG-ee)`}
+                                        </span>
+                                      </span>
+                                    )}
+                                  >
+                                    <TextInput
+                                      value={data.aap.hub_ee_execution_environment_name}
+                                      onChange={(_, v) => setAapHubEeNameField('hub_ee_execution_environment_name', v)}
+                                      placeholder={defaultOrgEeName(data.aap.organization || 'ADO')}
+                                    />
+                                  </FormGroup>
+                                </GridItem>
+                              )}
+                              <GridItem span={12}>
+                                <FormGroup label="Hub / Contoller EE description">
+                                  <textarea
+                                    value={data.aap.hub_ee_description}
+                                    onChange={e => set('aap.hub_ee_description', e.target.value)}
+                                    rows={4}
+                                    style={{ width: '100%', padding: '8px' }}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                            </>
                           )}
-                          <GridItem span={12}>
-                            <FormGroup label="Hub / Contoller EE description">
-                              <textarea
-                                value={data.aap.hub_ee_description}
-                                onChange={e => set('aap.hub_ee_description', e.target.value)}
-                                rows={4}
-                                style={{ width: '100%', padding: '8px' }}
-                              />
-                            </FormGroup>
-                          </GridItem>
                         </>
                       )}
                     </Grid>
@@ -10350,10 +10591,11 @@ ${vaultYaml}
                           }}
                         >
                           Before running: fill General → AAP Hostname URL, Organization Name, and
-                          Admin password (or OAuth token). Empty Galaxy token fields fall back to
-                          those General credentials (same pattern as Hub EE push). Hub tab work and
-                          this Galaxy tab can run together or separately; with Run Hub updates only,
-                          both Hub and Galaxy still apply when both are checked.
+                          Controller Admin password or OAuth token. For Hub/Galaxy work also set
+                          General → Hub / Galaxy API token (Hub User Access token — not the
+                          Controller OAuth token). Hub tab work and this Galaxy tab can run
+                          together or separately; with Run Hub updates only, both Hub and Galaxy
+                          still apply when both are checked.
                         </div>
                         <FormGroup label="Galaxy / Hub credentials">
                           <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
@@ -10416,6 +10658,28 @@ ${vaultYaml}
                               });
                             }}
                           />
+                          <br />
+                          <Checkbox
+                            id="aap-ignore-galaxy-cert"
+                            label={labelWithHelp(
+                              'Ignore Galaxy/Hub TLS certificate verification (Controller jobs + project ansible.cfg)',
+                              <>
+                                <p>
+                                  Off (default): Controller project collection installs and generated{' '}
+                                  <code>ansible.cfg</code> verify Hub/Galaxy TLS certificates (
+                                  <code>GALAXY_IGNORE_CERTS=false</code>).
+                                </p>
+                                <p>
+                                  On: sets <code>ansible_dispatch_ignore_galaxy_cert</code> so bootstrap
+                                  patches Controller jobs settings and writes{' '}
+                                  <code>[galaxy] ignore_certs = True</code> in the playbook repo.
+                                  Use for lab Hubs with self-signed certificates.
+                                </p>
+                              </>
+                            )}
+                            isChecked={data.aap.ignore_galaxy_cert === true}
+                            onChange={(_, v) => set('aap.ignore_galaxy_cert', v)}
+                          />
                         </FormGroup>
                       </GridItem>
                       {data.aap.galaxy_setup_enabled && (
@@ -10463,17 +10727,10 @@ ${vaultYaml}
                             </>
                           )}
                           <GridItem span={12}>
-                            <FormGroup
-                              label="Shared Hub / Galaxy API token (optional override)"
-                              helperText="If empty, each credential below uses General → Admin password or OAuth token. Only fill this to override that fallback for Hub/Galaxy API Token credentials."
-                            >
-                              <TextInput
-                                type="password"
-                                value={data.aap.galaxy_hub_token}
-                                onChange={(_, v) => set('aap.galaxy_hub_token', v)}
-                                placeholder="Leave empty to use General Admin password / OAuth token"
-                              />
-                            </FormGroup>
+                            <p style={{ color: mutedTextColor, margin: '0 0 8px', fontSize: '13px' }}>
+                              Shared Hub token is on the <strong>General</strong> tab. Per-credential
+                              token fields below override it when filled.
+                            </p>
                           </GridItem>
                           <GridItem span={12}>
                             <p style={{ color: mutedTextColor, margin: '0 0 8px', fontSize: '13px' }}>
@@ -10551,7 +10808,7 @@ ${vaultYaml}
                                         <GridItem span={6}>
                                           <FormGroup
                                             label="API Token (optional per-cred override)"
-                                            helperText="Empty = Shared token above, then General Admin password / OAuth."
+                                            helperText="Empty = General → Hub / Galaxy API token."
                                           >
                                             <TextInput
                                               type="password"
