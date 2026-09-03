@@ -10195,7 +10195,7 @@ ${vaultYaml}
                       <GridItem span={6}>
                         <FormGroup
                           label="Hub / Galaxy API token"
-                          helperText="Automation Hub API token for Hub publish, Galaxy credentials, and registry pulls. Not the same as the Controller OAuth token above — create it under Hub → User Access → Tokens."
+                          helperText="Used for Contoller organization Galaxy credentials (ansible-galaxy pulls) and registry auth. Hub publish/namespaces on gateway AAP use the Contoller OAuth token above (or admin password), not this field."
                         >
                           <div style={{ display: 'flex', gap: '8px' }}>
                             <TextInput
@@ -10355,10 +10355,10 @@ ${vaultYaml}
                           }}
                         >
                           Before running: set General → AAP Hostname URL and Organization Name.
-                          Controller API calls use General → Admin password or OAuth token.
-                          Hub publish, Galaxy credentials, and registry pulls use General →
-                          Hub / Galaxy API token (Hub User Access token — not Controller OAuth).
-                          Local laptop/podman EE push can use the Hub token for registry auth.
+                          Contoller API and Hub publish/namespaces on gateway AAP use General →
+                          OAuth token (or Admin password). Hub / Galaxy API token is only for
+                          Contoller org Galaxy credentials and registry pulls — it will not
+                          authorize Hub collection publish.
                         </div>
                       </GridItem>
                       <GridItem span={12}>
@@ -10401,7 +10401,7 @@ ${vaultYaml}
                           <FormGroup label={labelWithHelp('Collections', (
                             <>
                               <p>Publish or refresh the vendored <code>infra.ado</code> collection in Private Automation Hub validated content.</p>
-                              <p>Set General → Hub / Galaxy API token before running collection publish.</p>
+                              <p>Set General → Contoller OAuth token (or Admin password) before running collection publish on gateway AAP.</p>
                             </>
                           ))}>
                             <Checkbox
@@ -10591,11 +10591,12 @@ ${vaultYaml}
                           }}
                         >
                           Before running: fill General → AAP Hostname URL, Organization Name, and
-                          Controller Admin password or OAuth token. For Hub/Galaxy work also set
-                          General → Hub / Galaxy API token (Hub User Access token — not the
-                          Controller OAuth token). Hub tab work and this Galaxy tab can run
-                          together or separately; with Run Hub updates only, both Hub and Galaxy
-                          still apply when both are checked.
+                          Contoller Admin password or OAuth token (Contoller API). Galaxy credential
+                          tokens use General → Hub / Galaxy API token (ansible-galaxy pulls). Hub
+                          collection publish on gateway AAP uses Contoller OAuth, not the Hub API
+                          token. Hub tab work and this Galaxy tab can run together or separately;
+                          with Run AAP tabs only, both Hub and Galaxy still apply when both are
+                          checked.
                         </div>
                         <FormGroup label="Galaxy / Hub credentials">
                           <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
