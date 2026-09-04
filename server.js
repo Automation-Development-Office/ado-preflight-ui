@@ -1712,6 +1712,24 @@ function normalizePreflightPayload(input) {
   if (data.aap.hub_publish_preflight_collections === undefined) {
     data.aap.hub_publish_preflight_collections = false;
   }
+  if (!Array.isArray(data.aap.hub_publish_preflight_collection_names)) {
+    data.aap.hub_publish_preflight_collection_names = data.aap.hub_publish_preflight_collections
+      ? [
+        'kubernetes.core',
+        'redhat.openshift',
+        'community.general',
+        'community.grafana',
+        'grafana.grafana',
+        'ansible.controller',
+        'awx.awx',
+        'infra.controller_configuration',
+        'infra.aap_configuration',
+        'ansible.platform',
+        'ansible.hub',
+        'containers.podman'
+      ]
+      : [];
+  }
   if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = false;
   if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = false;
   data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
@@ -1731,6 +1749,9 @@ function normalizePreflightPayload(input) {
     }
     if (data.hub.publish_preflight_collections !== undefined) {
       data.aap.hub_publish_preflight_collections = data.hub.publish_preflight_collections === true;
+    }
+    if (Array.isArray(data.hub.publish_preflight_collection_names)) {
+      data.aap.hub_publish_preflight_collection_names = data.hub.publish_preflight_collection_names;
     }
     if (data.hub.force_ado_collection_update !== undefined) {
       data.aap.hub_force_ado_collection_update = data.hub.force_ado_collection_update === true;
@@ -1829,6 +1850,9 @@ function normalizePreflightPayload(input) {
     registry: data.aap.hub_ee_registry,
     publish_ado_collection: data.aap.hub_publish_ado_collection === true,
     publish_preflight_collections: data.aap.hub_publish_preflight_collections === true,
+    publish_preflight_collection_names: Array.isArray(data.aap.hub_publish_preflight_collection_names)
+      ? data.aap.hub_publish_preflight_collection_names
+      : [],
     force_ado_collection_update: data.aap.hub_force_ado_collection_update === true,
     mark_ado_validated: data.aap.hub_mark_ado_validated === true,
     update_only: data.aap.hub_update_collection_only === true,

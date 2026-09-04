@@ -86,6 +86,230 @@ function hostnameFromUrl(value) {
   }
 }
 
+function httpsOriginFromHost(value) {
+  const host = hostnameFromUrl(value);
+  return host ? `https://${host}` : '';
+}
+
+function deriveAppsDomainFromInfrastructure(domain) {
+  const d = String(domain || '').trim().replace(/^\.+|\.+$/g, '');
+  if (!d) return '';
+  if (d.startsWith('apps.')) return d;
+  return `apps.ocp.${d}`;
+}
+
+function resolveAppsDomain(source) {
+  const apps = String(source?.openshift?.apps_domain || '').trim().replace(/^\.+|\.+$/g, '');
+  if (apps) return apps;
+  return deriveAppsDomainFromInfrastructure(source?.domain);
+}
+
+function isComponentSelectedInForm(source, name) {
+  const components = Array.isArray(source?.components) ? source.components : [];
+  if (components.includes('all') || components.includes(name)) return true;
+  const apps = source?.component_apps || {};
+  return Object.values(apps).some(list => Array.isArray(list) && list.includes(name));
+}
+
+function resolveComponentHostname(source, component) {
+  const cfg = source?.component_config?.[component] || {};
+  if (component === 'bookstack') {
+    return hostnameFromUrl(cfg.route_host || cfg.hostname);
+  }
+  if (component === 'aap') {
+    return hostnameFromUrl(source?.aap?.hostname || cfg.hostname);
+  }
+  return hostnameFromUrl(cfg.hostname);
+}
+
+function rhbkEnvClientLabel(env, product) {
+  const e = String(env || '').trim().toLowerCase();
+  const suffix = e === 'dev' ? 'Dev' : e === 'prod' ? 'Prod' : (e ? e.charAt(0).toUpperCase() + e.slice(1) : 'Lab');
+  return `${product}${suffix}`;
+}
+
+/** Upsert a Keycloak client row; replace a blank row when present. */
+function upsertRhbkClientRow(clients, next) {
+  const list = Array.isArray(clients) ? clients.map(c => ({ ...c })) : [];
+  const id = String(next.id || '').trim();
+  const existingIdx = list.findIndex(c => String(c.id || '').trim() === id && id);
+  if (existingIdx >= 0) {
+    list[existingIdx] = { ...list[existingIdx], ...next };
+    return list;
+  }
+  const emptyIdx = list.findIndex(
+    c => !String(c.id || '').trim()
+      && !String(c.name || '').trim()
+      && !String(c.redirect_uris || '').trim()
+      && !String(c.web_origins || '').trim()
+  );
+  if (emptyIdx >= 0) {
+    list[emptyIdx] = { id: '', name: '', redirect_uris: '', web_origins: '', ...next };
+    return list;
+  }
+  list.push({ id: '', name: '', redirect_uris: '', web_origins: '', ...next });
+  return list;
+}
+
+/**
+ * Build Keycloak OIDC client presets from selected apps / hostnames already on
+ * the form (apps domain, Grafana, GitLab, BookStack, NetBox).
+ */
+function buildRhbkOidcClientPresets(source) {
+  const env = source?.environment || '';
+  const apps = resolveAppsDomain(source);
+  const presets = [];
+
+  const openShiftSelected = isComponentSelectedInForm(source, 'openshift')
+    || Boolean(source?.openshift?.api_host || source?.openshift?.apps_domain);
+  if (apps && openShiftSelected) {
+    const oauthHost = `oauth-openshift.${apps}`;
+    const oauthOrigin = `https://${oauthHost}`;
+    const label = rhbkEnvClientLabel(env, 'Openshift');
+    presets.push({
+      key: 'openshift',
+      label: 'OpenShift',
+      hint: oauthHost,
+      client: {
+        id: label,
+        name: label,
+        redirect_uris: `${oauthOrigin}/oauth2callback/Keycloak/*`,
+        web_origins: oauthOrigin,
+        source: 'openshift'
+      }
+    });
+  }
+
+  const grafanaDefaults = {
+    grafana: apps ? `grafana.${apps}` : '',
+    gitlab: apps ? `gitlab-git.${apps}` : '',
+    bookstack: apps ? `bookstack.${apps}` : '',
+    netbox: apps ? `netbox-netbox.${apps}` : ''
+  };
+
+  const grafanaHost = resolveComponentHostname(source, 'grafana')
+    || (isComponentSelectedInForm(source, 'grafana') ? grafanaDefaults.grafana : '');
+  if (grafanaHost) {
+    const origin = httpsOriginFromHost(grafanaHost);
+    presets.push({
+      key: 'grafana',
+      label: 'Grafana',
+      hint: grafanaHost,
+      client: {
+        id: 'grafana-client',
+        name: rhbkEnvClientLabel(env, 'Grafana'),
+        redirect_uris: `${origin}/login/generic_oauth,${origin}/*`,
+        web_origins: origin,
+        source: 'grafana'
+      }
+    });
+  }
+
+  const gitlabHost = resolveComponentHostname(source, 'gitlab')
+    || (isComponentSelectedInForm(source, 'gitlab') ? grafanaDefaults.gitlab : '');
+  if (gitlabHost) {
+    const origin = httpsOriginFromHost(gitlabHost);
+    presets.push({
+      key: 'gitlab',
+      label: 'GitLab',
+      hint: gitlabHost,
+      client: {
+        id: 'gitlab',
+        name: rhbkEnvClientLabel(env, 'GitLab'),
+        redirect_uris: `${origin}/users/auth/openid_connect/callback`,
+        web_origins: origin,
+        source: 'gitlab'
+      }
+    });
+  }
+
+  const bookstackHost = resolveComponentHostname(source, 'bookstack')
+    || (isComponentSelectedInForm(source, 'bookstack') ? grafanaDefaults.bookstack : '');
+  if (bookstackHost) {
+    const origin = httpsOriginFromHost(bookstackHost);
+    presets.push({
+      key: 'bookstack',
+      label: 'BookStack',
+      hint: bookstackHost,
+      client: {
+        id: 'bookstack',
+        name: rhbkEnvClientLabel(env, 'BookStack'),
+        redirect_uris: `${origin}/login/service`,
+        web_origins: origin,
+        source: 'bookstack'
+      }
+    });
+  }
+
+  const netboxHost = resolveComponentHostname(source, 'netbox')
+    || (isComponentSelectedInForm(source, 'netbox') ? grafanaDefaults.netbox : '');
+  if (netboxHost) {
+    const origin = httpsOriginFromHost(netboxHost);
+    presets.push({
+      key: 'netbox',
+      label: 'NetBox',
+      hint: netboxHost,
+      client: {
+        id: 'netbox',
+        name: rhbkEnvClientLabel(env, 'NetBox'),
+        redirect_uris: `${origin}/oauth/complete/oidc/`,
+        web_origins: origin,
+        source: 'netbox'
+      }
+    });
+  }
+
+  return presets;
+}
+
+/** Apply a preset client into rhbk.clients and mirror matching app OIDC client IDs. */
+function applyRhbkOidcClientPreset(copy, presetClient) {
+  if (!copy.component_config) copy.component_config = {};
+  if (!copy.component_config.rhbk) copy.component_config.rhbk = {};
+  const rhbk = copy.component_config.rhbk;
+  rhbk.clients = upsertRhbkClientRow(rhbk.clients, {
+    id: presetClient.id,
+    name: presetClient.name,
+    redirect_uris: presetClient.redirect_uris,
+    web_origins: presetClient.web_origins
+  });
+
+  if (presetClient.source === 'openshift') {
+    rhbk.client = presetClient.id;
+    rhbk.client_name = presetClient.name;
+    rhbk.client_redirect_uris = presetClient.redirect_uris;
+    rhbk.client_web_origins = presetClient.web_origins;
+    rhbk.openshift_oidc_client_id = presetClient.id;
+  }
+
+  if (presetClient.source === 'grafana') {
+    if (!copy.component_config.grafana) copy.component_config.grafana = {};
+    if (!copy.component_config.grafana.oidc) copy.component_config.grafana.oidc = {};
+    copy.component_config.grafana.oidc.client_id = presetClient.id;
+    if (copy.component_config.grafana.oidc.enabled === undefined) {
+      copy.component_config.grafana.oidc.enabled = true;
+    }
+  }
+
+  if (presetClient.source === 'bookstack') {
+    if (!copy.component_config.bookstack) copy.component_config.bookstack = {};
+    copy.component_config.bookstack.oidc_client_id = presetClient.id;
+    if (copy.component_config.bookstack.oidc_enabled === undefined) {
+      copy.component_config.bookstack.oidc_enabled = true;
+    }
+  }
+
+  if (presetClient.source === 'netbox') {
+    if (!copy.component_config.netbox) copy.component_config.netbox = {};
+    copy.component_config.netbox.oidc_client_id = presetClient.id;
+    if (copy.component_config.netbox.oidc_enabled === undefined) {
+      copy.component_config.netbox.oidc_enabled = true;
+    }
+  }
+
+  return copy;
+}
+
 function syncDevHubGitlabTokenFromGit(source, { force = false } = {}) {
   const copy = source;
   const gitToken = String(copy?.git?.token || '').trim();
@@ -917,6 +1141,21 @@ const parseAdditionalEnvironmentsList = value => {
 
 /** Disconnected default: baked EE tar inside the preflight UI image. */
 const HUB_EE_BAKED_SOURCE = 'docker-archive:/opt/ado-ee/ado-ee.docker.tar';
+/** Preflight Hub collections (excludes infra.ado — that has its own checkbox). */
+const PREFLIGHT_HUB_COLLECTION_OPTIONS = [
+  'kubernetes.core',
+  'redhat.openshift',
+  'community.general',
+  'community.grafana',
+  'grafana.grafana',
+  'ansible.controller',
+  'awx.awx',
+  'infra.controller_configuration',
+  'infra.aap_configuration',
+  'ansible.platform',
+  'ansible.hub',
+  'containers.podman'
+];
 /** Registry-safe Hub image name (lowercase). Contoller EE object may stay ORG-ee. */
 const DEFAULT_HUB_EE_IMAGE_NAME = 'ado-ee';
 /** Online/mirror path when "Pull source from a registry" is checked. */
@@ -1367,6 +1606,7 @@ const defaults = {
     skip_tls_verify: false,
     hub_publish_ado_collection: false,
     hub_publish_preflight_collections: false,
+    hub_publish_preflight_collection_names: [...PREFLIGHT_HUB_COLLECTION_OPTIONS],
     hub_mark_ado_validated: false,
     hub_force_ado_collection_update: false,
     // When true: run Hub collection and/or EE push without scaffolding playbooks / Contoller apply / other components
@@ -1622,6 +1862,8 @@ function App() {
   const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
   const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
   const [activeHubSubTab, setActiveHubSubTab] = useState('collections');
+  const [hubPreflightCollectionsOpen, setHubPreflightCollectionsOpen] = useState(false);
+  const [activeGalaxyCredTab, setActiveGalaxyCredTab] = useState(0);
   const [activeAapAuthTab, setActiveAapAuthTab] = useState('keycloak');
   const [storageClassLookup, setStorageClassLookup] = useState({
     loading: false,
@@ -1630,6 +1872,7 @@ function App() {
   });
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
+  const [rhbkAddClientOpen, setRhbkAddClientOpen] = useState(false);
   const [activePreInstallTab, setActivePreInstallTab] = useState('aap_license');
   const [importStatus, setImportStatus] = useState('');
   const [focusSection, setFocusSection] = useState('');
@@ -2194,6 +2437,10 @@ function App() {
       if (!copy.aap) copy.aap = {};
       copy.aap.hub_publish_preflight_collections = value === true;
       if (value === true) {
+        if (!Array.isArray(copy.aap.hub_publish_preflight_collection_names)
+          || copy.aap.hub_publish_preflight_collection_names.length === 0) {
+          copy.aap.hub_publish_preflight_collection_names = [...PREFLIGHT_HUB_COLLECTION_OPTIONS];
+        }
         copy.aap.galaxy_setup_enabled = true;
         if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
           copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
@@ -2208,6 +2455,22 @@ function App() {
           );
         }
       }
+      return copy;
+    });
+  };
+
+  const toggleHubPreflightCollectionName = (name, enabled) => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      const current = Array.isArray(copy.aap.hub_publish_preflight_collection_names)
+        ? [...copy.aap.hub_publish_preflight_collection_names]
+        : [...PREFLIGHT_HUB_COLLECTION_OPTIONS];
+      const next = enabled
+        ? [...new Set([...current, name])]
+        : current.filter(item => item !== name);
+      copy.aap.hub_publish_preflight_collection_names = next;
+      copy.aap.hub_publish_preflight_collections = next.length > 0;
       return copy;
     });
   };
@@ -2777,6 +3040,11 @@ function App() {
     if (merged.aap.hub_publish_preflight_collections === undefined) {
       merged.aap.hub_publish_preflight_collections = false;
     }
+    if (!Array.isArray(merged.aap.hub_publish_preflight_collection_names)) {
+      merged.aap.hub_publish_preflight_collection_names = merged.aap.hub_publish_preflight_collections
+        ? [...PREFLIGHT_HUB_COLLECTION_OPTIONS]
+        : [];
+    }
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
     if (merged.aap.standalone_run === undefined) {
@@ -2793,6 +3061,9 @@ function App() {
       }
       if (merged.hub.publish_preflight_collections !== undefined) {
         merged.aap.hub_publish_preflight_collections = merged.hub.publish_preflight_collections === true;
+      }
+      if (Array.isArray(merged.hub.publish_preflight_collection_names)) {
+        merged.aap.hub_publish_preflight_collection_names = merged.hub.publish_preflight_collection_names;
       }
       if (merged.hub.force_ado_collection_update !== undefined) {
         merged.aap.hub_force_ado_collection_update = merged.hub.force_ado_collection_update === true;
@@ -3084,6 +3355,9 @@ function App() {
         registry: payload.aap.hub_ee_registry,
         publish_ado_collection: payload.aap.hub_publish_ado_collection === true,
         publish_preflight_collections: payload.aap.hub_publish_preflight_collections === true,
+        publish_preflight_collection_names: Array.isArray(payload.aap.hub_publish_preflight_collection_names)
+          ? payload.aap.hub_publish_preflight_collection_names
+          : [],
         force_ado_collection_update: payload.aap.hub_force_ado_collection_update === true,
         mark_ado_validated: payload.aap.hub_mark_ado_validated === true,
         update_only: payload.aap.hub_update_collection_only === true,
@@ -4887,29 +5161,13 @@ echo $TOKEN
     hubPublishPreflightCollections: (
       <>
         <p>
-          Publishes the other preflight-baked collection tarballs (playbook /
-          bootstrap requirements) into Hub validated content when missing.
-          Does not include <code>infra.ado</code> — use the checkbox above for that.
+          Publishes selected preflight-baked collection tarballs into Hub
+          validated when missing. Does not include <code>infra.ado</code>.
         </p>
-        <p><strong>Published when present under preflight <code>collections/</code>:</strong></p>
-        <ul>
-          <li><code>kubernetes.core</code></li>
-          <li><code>redhat.openshift</code></li>
-          <li><code>community.general</code></li>
-          <li><code>community.grafana</code></li>
-          <li><code>grafana.grafana</code></li>
-          <li><code>ansible.controller</code></li>
-          <li><code>awx.awx</code></li>
-          <li><code>infra.controller_configuration</code></li>
-          <li><code>infra.aap_configuration</code></li>
-          <li><code>ansible.platform</code></li>
-          <li><code>ansible.hub</code></li>
-          <li><code>containers.podman</code> (when the tarball is present)</li>
-        </ul>
         <p>
-          Skips a version already in validated. Contoller project
-          <code>collections/requirements.yml</code> still lists the Hub names
-          Contoller needs at sync time.
+          Use the dropdown to pick which collections to upload. Already-installed
+          versions are skipped (no force for these — only <code>infra.ado</code>
+          has a force checkbox).
         </p>
       </>
     ),
@@ -4917,8 +5175,9 @@ echo $TOKEN
       <>
         <p>
           Overwrites an existing <code>infra.ado</code> in Hub validated content.
+          Additional playbook collections always skip when the version already exists.
         </p>
-        <p>Without this, an already-installed collection is left as-is.</p>
+        <p>Without this, an already-installed <code>infra.ado</code> is left as-is.</p>
       </>
     ),
     hubExecutionEnvironment: (
@@ -5191,6 +5450,7 @@ echo $TOKEN
     switch (tab) {
       case 'client': {
         const clients = data.component_config?.rhbk?.clients || [];
+        const presets = buildRhbkOidcClientPresets(data);
         const updateClient = (index, key, value) => {
           setData(prev => {
             const copy = JSON.parse(JSON.stringify(prev));
@@ -5207,14 +5467,46 @@ echo $TOKEN
           setData(prev => {
             const copy = JSON.parse(JSON.stringify(prev));
             if (!copy.component_config?.rhbk?.clients) return copy;
-            copy.component_config.rhbk.clients = copy.component_config.rhbk.clients.filter((_, i) => i !== index);
+            const list = copy.component_config.rhbk.clients.filter((_, i) => i !== index);
+            copy.component_config.rhbk.clients = list.length
+              ? list
+              : [{ id: '', name: '', redirect_uris: '', web_origins: '' }];
             const firstClient = copy.component_config.rhbk.clients[0];
             copy.component_config.rhbk.client = firstClient?.id || '';
             return copy;
           });
         };
+        const addBlankClient = () => {
+          setData(prev => {
+            const copy = JSON.parse(JSON.stringify(prev));
+            if (!copy.component_config.rhbk.clients) copy.component_config.rhbk.clients = [];
+            copy.component_config.rhbk.clients.push({ id: '', name: '', redirect_uris: '', web_origins: '' });
+            return copy;
+          });
+        };
+        const addPresetClient = preset => {
+          setRhbkAddClientOpen(false);
+          if (!preset?.client) return;
+          setData(prev => applyRhbkOidcClientPreset(JSON.parse(JSON.stringify(prev)), preset.client));
+        };
+        const addAllPresets = () => {
+          setRhbkAddClientOpen(false);
+          setData(prev => {
+            let copy = JSON.parse(JSON.stringify(prev));
+            buildRhbkOidcClientPresets(copy).forEach(preset => {
+              copy = applyRhbkOidcClientPreset(copy, preset.client);
+            });
+            return copy;
+          });
+        };
         return (
           <Grid hasGutter>
+            <GridItem span={12}>
+              <p style={{ margin: 0, color: mutedTextColor, fontSize: '14px' }}>
+                Add Keycloak OIDC clients for apps you already selected. Hostnames come from
+                OpenShift apps domain / Grafana / GitLab / BookStack / NetBox fields on this form.
+              </p>
+            </GridItem>
             {clients.map((client, index) => (
               <GridItem span={12} key={`rhbk-client-${index}`}>
                 <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
@@ -5234,13 +5526,51 @@ echo $TOKEN
                 </div>
               </GridItem>
             ))}
-            <GridItem span={12}>
-              <Button variant="secondary" onClick={() => setData(prev => {
-                const copy = JSON.parse(JSON.stringify(prev));
-                if (!copy.component_config.rhbk.clients) copy.component_config.rhbk.clients = [];
-                copy.component_config.rhbk.clients.push({ id: '', name: '', redirect_uris: '', web_origins: '' });
-                return copy;
-              })}>Add Client</Button>
+            <GridItem span={12} style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <Dropdown
+                isOpen={rhbkAddClientOpen}
+                onOpenChange={setRhbkAddClientOpen}
+                toggle={toggleRef => (
+                  <MenuToggle
+                    ref={toggleRef}
+                    onClick={() => setRhbkAddClientOpen(open => !open)}
+                    isExpanded={rhbkAddClientOpen}
+                    variant="secondary"
+                  >
+                    Add Client
+                  </MenuToggle>
+                )}
+              >
+                <DropdownList>
+                  <DropdownItem key="blank" onClick={() => { setRhbkAddClientOpen(false); addBlankClient(); }}>
+                    Blank client
+                  </DropdownItem>
+                  {presets.map(preset => (
+                    <DropdownItem
+                      key={preset.key}
+                      description={preset.hint}
+                      onClick={() => addPresetClient(preset)}
+                    >
+                      {preset.label}
+                    </DropdownItem>
+                  ))}
+                  {presets.length === 0 && (
+                    <DropdownItem key="none" isDisabled>
+                      No selected apps with hostnames yet — set apps domain / select Grafana, GitLab, …
+                    </DropdownItem>
+                  )}
+                  {presets.length > 1 && (
+                    <DropdownItem key="all" onClick={addAllPresets}>
+                      Add all from form ({presets.length})
+                    </DropdownItem>
+                  )}
+                </DropdownList>
+              </Dropdown>
+              {presets.length > 0 && (
+                <span style={{ fontSize: '13px', color: mutedTextColor }}>
+                  Ready: {presets.map(p => p.label).join(', ')}
+                </span>
+              )}
             </GridItem>
           </Grid>
         );
@@ -10545,8 +10875,8 @@ ${vaultYaml}
                           <FormGroup label={labelWithHelp('Collections', (
                             <>
                               <p>Publish or refresh vendored collections in Private Automation Hub validated content.</p>
-                              <p><code>infra.ado</code> is separate from the additional playbook-requirement tarballs baked into the preflight image.</p>
-                              <p>Set General → Contoller OAuth / Hub token / Admin password before Hub publish.</p>
+                              <p><code>infra.ado</code> is separate from the additional playbook-requirement tarballs.</p>
+                              <p>Everything skips when the version already exists unless Force is checked for <code>infra.ado</code> only.</p>
                             </>
                           ))}>
                             <Checkbox
@@ -10579,6 +10909,77 @@ ${vaultYaml}
                                 onChange={(_, v) => setAapHubPublishPreflightCollections(v)}
                               />
                             </div>
+                            {data.aap.hub_publish_preflight_collections === true && (
+                              <div style={{ marginTop: '10px', display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                                <Dropdown
+                                  isOpen={hubPreflightCollectionsOpen}
+                                  onOpenChange={setHubPreflightCollectionsOpen}
+                                  toggle={toggleRef => (
+                                    <MenuToggle
+                                      ref={toggleRef}
+                                      onClick={() => setHubPreflightCollectionsOpen(open => !open)}
+                                      isExpanded={hubPreflightCollectionsOpen}
+                                      variant="secondary"
+                                    >
+                                      Select collections
+                                      {' '}
+                                      ({(data.aap.hub_publish_preflight_collection_names || []).length}/
+                                      {PREFLIGHT_HUB_COLLECTION_OPTIONS.length})
+                                    </MenuToggle>
+                                  )}
+                                >
+                                  <DropdownList style={{ maxHeight: '320px', overflowY: 'auto', minWidth: '280px' }}>
+                                    <DropdownItem
+                                      key="all"
+                                      onClick={() => {
+                                        set('aap.hub_publish_preflight_collection_names', [...PREFLIGHT_HUB_COLLECTION_OPTIONS]);
+                                        setHubPreflightCollectionsOpen(false);
+                                      }}
+                                    >
+                                      Select all
+                                    </DropdownItem>
+                                    <DropdownItem
+                                      key="none"
+                                      onClick={() => {
+                                        setData(prev => {
+                                          const copy = JSON.parse(JSON.stringify(prev));
+                                          if (!copy.aap) copy.aap = {};
+                                          copy.aap.hub_publish_preflight_collection_names = [];
+                                          copy.aap.hub_publish_preflight_collections = false;
+                                          return copy;
+                                        });
+                                        setHubPreflightCollectionsOpen(false);
+                                      }}
+                                    >
+                                      Clear all
+                                    </DropdownItem>
+                                    {PREFLIGHT_HUB_COLLECTION_OPTIONS.map(name => {
+                                      const selected = (data.aap.hub_publish_preflight_collection_names || [])
+                                        .includes(name);
+                                      return (
+                                        <DropdownItem
+                                          key={name}
+                                          onClick={(event) => {
+                                            event.preventDefault();
+                                            toggleHubPreflightCollectionName(name, !selected);
+                                          }}
+                                        >
+                                          <Checkbox
+                                            id={`hub-preflight-col-${name}`}
+                                            label={name}
+                                            isChecked={selected}
+                                            onChange={(_, v) => toggleHubPreflightCollectionName(name, v)}
+                                          />
+                                        </DropdownItem>
+                                      );
+                                    })}
+                                  </DropdownList>
+                                </Dropdown>
+                                <span style={{ fontSize: '13px', color: mutedTextColor }}>
+                                  Skip if version already in validated (no force).
+                                </span>
+                              </div>
+                            )}
                           </FormGroup>
                         </GridItem>
                       )}
@@ -10898,10 +11299,40 @@ ${vaultYaml}
                               credential this run; it still keeps its attach/order in the org list.
                             </p>
                           </GridItem>
-                          {(data.aap.galaxy_credentials || []).map((credential, index) => (
-                            <GridItem span={12} key={credential.id || `galaxy-cred-${index}`}>
-                              <Card style={{ boxShadow: 'none', border: '1px solid #d2d2d2' }}>
-                                <CardBody>
+                          <GridItem span={12}>
+                            <Tabs
+                              activeKey={
+                                Math.min(
+                                  activeGalaxyCredTab,
+                                  Math.max(0, (data.aap.galaxy_credentials || []).length - 1)
+                                )
+                              }
+                              onSelect={(_, key) => setActiveGalaxyCredTab(Number(key))}
+                            >
+                              {(data.aap.galaxy_credentials || []).map((credential, index) => (
+                                <Tab
+                                  key={credential.id || `galaxy-cred-${index}`}
+                                  eventKey={index}
+                                  title={credential.name || `Credential ${index + 1}`}
+                                />
+                              ))}
+                            </Tabs>
+                            {(data.aap.galaxy_credentials || []).map((credential, index) => {
+                              const selectedTab = Math.min(
+                                activeGalaxyCredTab,
+                                Math.max(0, (data.aap.galaxy_credentials || []).length - 1)
+                              );
+                              if (index !== selectedTab) return null;
+                              return (
+                                <div
+                                  key={credential.id || `galaxy-cred-body-${index}`}
+                                  style={{
+                                    marginTop: '12px',
+                                    border: `1px solid ${borderColor}`,
+                                    borderRadius: '6px',
+                                    padding: '12px'
+                                  }}
+                                >
                                   <Grid hasGutter>
                                     <GridItem span={12}>
                                       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
@@ -10923,14 +11354,20 @@ ${vaultYaml}
                                         <Button
                                           variant="secondary"
                                           isDisabled={index === 0}
-                                          onClick={() => moveGalaxyCredential(index, -1)}
+                                          onClick={() => {
+                                            moveGalaxyCredential(index, -1);
+                                            setActiveGalaxyCredTab(Math.max(0, index - 1));
+                                          }}
                                         >
                                           Move up
                                         </Button>
                                         <Button
                                           variant="secondary"
                                           isDisabled={index >= (data.aap.galaxy_credentials || []).length - 1}
-                                          onClick={() => moveGalaxyCredential(index, 1)}
+                                          onClick={() => {
+                                            moveGalaxyCredential(index, 1);
+                                            setActiveGalaxyCredTab(index + 1);
+                                          }}
                                         >
                                           Move down
                                         </Button>
@@ -10986,10 +11423,10 @@ ${vaultYaml}
                                       </>
                                     )}
                                   </Grid>
-                                </CardBody>
-                              </Card>
-                            </GridItem>
-                          ))}
+                                </div>
+                              );
+                            })}
+                          </GridItem>
                           <GridItem span={12}>
                             <FormGroup label="Container Registry credential (EE pull)">
                               <Checkbox
