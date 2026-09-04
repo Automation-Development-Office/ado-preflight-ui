@@ -313,8 +313,10 @@ function preflightDownloadBasename(payload, { scrubbed = false } = {}) {
   const hubWork = (
     hubOnly
     || payload?.aap?.hub_publish_ado_collection === true
+    || payload?.aap?.hub_publish_preflight_collections === true
     || payload?.aap?.hub_push_ee === true
     || payload?.hub?.publish_ado_collection === true
+    || payload?.hub?.publish_preflight_collections === true
     || payload?.hub?.push_ee === true
   );
   const galaxyWork = payload?.aap?.galaxy_setup_enabled === true;
@@ -495,6 +497,7 @@ function onboardKeycloakGroupsRequested(aap) {
 function aapStandaloneWorkSelected(payload) {
   return (
     payload?.aap?.hub_publish_ado_collection === true
+    || payload?.aap?.hub_publish_preflight_collections === true
     || payload?.aap?.hub_push_ee === true
     || payload?.aap?.galaxy_setup_enabled === true
     || aapAuthConfigRequested(payload)
@@ -1359,6 +1362,7 @@ const defaults = {
     vault_credential_name: 'ADO-vault',
     skip_tls_verify: false,
     hub_publish_ado_collection: false,
+    hub_publish_preflight_collections: false,
     hub_mark_ado_validated: false,
     hub_force_ado_collection_update: false,
     // When true: run Hub collection and/or EE push without scaffolding playbooks / Contoller apply / other components
@@ -2180,6 +2184,30 @@ function App() {
     });
   };
 
+  const setAapHubPublishPreflightCollections = value => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      copy.aap.hub_publish_preflight_collections = value === true;
+      if (value === true) {
+        copy.aap.galaxy_setup_enabled = true;
+        if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
+          copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
+            copy.aap.organization || 'ADO',
+            copy.aap.hostname || ''
+          );
+        }
+        if (!copy.aap.container_registry_credential) {
+          copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
+            copy.aap.organization || 'ADO',
+            copy.aap.hostname || ''
+          );
+        }
+      }
+      return copy;
+    });
+  };
+
   const setAapStandaloneRun = value => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
@@ -2742,6 +2770,9 @@ function App() {
     }));
     if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
     if (merged.aap.hub_publish_ado_collection === undefined) merged.aap.hub_publish_ado_collection = false;
+    if (merged.aap.hub_publish_preflight_collections === undefined) {
+      merged.aap.hub_publish_preflight_collections = false;
+    }
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
     if (merged.aap.standalone_run === undefined) {
@@ -2755,6 +2786,9 @@ function App() {
       if (merged.hub.publish_ado_collection !== undefined) {
         merged.aap.hub_publish_ado_collection = merged.hub.publish_ado_collection === true;
         merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection;
+      }
+      if (merged.hub.publish_preflight_collections !== undefined) {
+        merged.aap.hub_publish_preflight_collections = merged.hub.publish_preflight_collections === true;
       }
       if (merged.hub.force_ado_collection_update !== undefined) {
         merged.aap.hub_force_ado_collection_update = merged.hub.force_ado_collection_update === true;
@@ -3045,6 +3079,7 @@ function App() {
         hostname: payload.aap.hub_hostname,
         registry: payload.aap.hub_ee_registry,
         publish_ado_collection: payload.aap.hub_publish_ado_collection === true,
+        publish_preflight_collections: payload.aap.hub_publish_preflight_collections === true,
         force_ado_collection_update: payload.aap.hub_force_ado_collection_update === true,
         mark_ado_validated: payload.aap.hub_mark_ado_validated === true,
         update_only: payload.aap.hub_update_collection_only === true,
@@ -4818,6 +4853,35 @@ echo $TOKEN
           missing, or refreshes it when you also enable force below.
         </p>
         <p>Leave off if Hub already has the collection Controller should use.</p>
+      </>
+    ),
+    hubPublishPreflightCollections: (
+      <>
+        <p>
+          Publishes the other preflight-baked collection tarballs (playbook /
+          bootstrap requirements) into Hub validated content when missing.
+          Does not include <code>infra.ado</code> — use the checkbox above for that.
+        </p>
+        <p><strong>Published when present under preflight <code>collections/</code>:</strong></p>
+        <ul>
+          <li><code>kubernetes.core</code></li>
+          <li><code>redhat.openshift</code></li>
+          <li><code>community.general</code></li>
+          <li><code>community.grafana</code></li>
+          <li><code>grafana.grafana</code></li>
+          <li><code>ansible.controller</code></li>
+          <li><code>awx.awx</code></li>
+          <li><code>infra.controller_configuration</code></li>
+          <li><code>infra.aap_configuration</code></li>
+          <li><code>ansible.platform</code></li>
+          <li><code>ansible.hub</code></li>
+          <li><code>containers.podman</code> (when the tarball is present)</li>
+        </ul>
+        <p>
+          Skips a version already in validated. Contoller project
+          <code>collections/requirements.yml</code> still lists the Hub names
+          Contoller needs at sync time.
+        </p>
       </>
     ),
     hubForceCollectionUpdate: (
@@ -10379,7 +10443,11 @@ ${vaultYaml}
                               hostnameFromUrl(data.aap.hostname)
                               || 'aap.example.com'
                             }
-                            isRequired={standaloneRun && (data.aap.hub_publish_ado_collection || data.aap.hub_push_ee)}
+                            isRequired={standaloneRun && (
+                              data.aap.hub_publish_ado_collection
+                              || data.aap.hub_publish_preflight_collections
+                              || data.aap.hub_push_ee
+                            )}
                           />
                           <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 0' }}>
                             API/registry host for Private Automation Hub (host only, no path). Used for
@@ -10400,8 +10468,9 @@ ${vaultYaml}
                         <GridItem span={12}>
                           <FormGroup label={labelWithHelp('Collections', (
                             <>
-                              <p>Publish or refresh the vendored <code>infra.ado</code> collection in Private Automation Hub validated content.</p>
-                              <p>Set General → Contoller OAuth token (or Admin password) before running collection publish on gateway AAP.</p>
+                              <p>Publish or refresh vendored collections in Private Automation Hub validated content.</p>
+                              <p><code>infra.ado</code> is separate from the additional playbook-requirement tarballs baked into the preflight image.</p>
+                              <p>Set General → Contoller OAuth / Hub token / Admin password before Hub publish.</p>
                             </>
                           ))}>
                             <Checkbox
@@ -10421,6 +10490,17 @@ ${vaultYaml}
                                 isChecked={data.aap.hub_force_ado_collection_update}
                                 isDisabled={!data.aap.hub_publish_ado_collection}
                                 onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
+                              />
+                            </div>
+                            <div style={{ marginTop: '12px' }}>
+                              <Checkbox
+                                id="aap-hub-publish-preflight-collections"
+                                label={labelWithHelp(
+                                  'Install additional collections that are requirements for playbooks',
+                                  aapHelp.hubPublishPreflightCollections
+                                )}
+                                isChecked={data.aap.hub_publish_preflight_collections === true}
+                                onChange={(_, v) => setAapHubPublishPreflightCollections(v)}
                               />
                             </div>
                           </FormGroup>

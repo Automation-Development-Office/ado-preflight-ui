@@ -1705,6 +1705,9 @@ function normalizePreflightPayload(input) {
   data.aap.project = normalizeOrgScopedName(data.aap.project, data.aap.organization, 'project');
   data.aap.vault_credential_name = normalizeOrgScopedName(data.aap.vault_credential_name, data.aap.organization, 'vault');
   if (data.aap.hub_publish_ado_collection === undefined) data.aap.hub_publish_ado_collection = false;
+  if (data.aap.hub_publish_preflight_collections === undefined) {
+    data.aap.hub_publish_preflight_collections = false;
+  }
   if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = false;
   if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = false;
   data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
@@ -1721,6 +1724,9 @@ function normalizePreflightPayload(input) {
     if (data.hub.publish_ado_collection === true) {
       data.aap.hub_publish_ado_collection = true;
       data.aap.hub_mark_ado_validated = true;
+    }
+    if (data.hub.publish_preflight_collections !== undefined) {
+      data.aap.hub_publish_preflight_collections = data.hub.publish_preflight_collections === true;
     }
     if (data.hub.force_ado_collection_update !== undefined) {
       data.aap.hub_force_ado_collection_update = data.hub.force_ado_collection_update === true;
@@ -1818,6 +1824,7 @@ function normalizePreflightPayload(input) {
     hostname: data.aap.hub_hostname,
     registry: data.aap.hub_ee_registry,
     publish_ado_collection: data.aap.hub_publish_ado_collection === true,
+    publish_preflight_collections: data.aap.hub_publish_preflight_collections === true,
     force_ado_collection_update: data.aap.hub_force_ado_collection_update === true,
     mark_ado_validated: data.aap.hub_mark_ado_validated === true,
     update_only: data.aap.hub_update_collection_only === true,
@@ -1838,6 +1845,7 @@ function normalizePreflightPayload(input) {
   // when those Hub options are on so Contoller can pull ado-ee without ImagePullBackOff.
   if (
     data.aap.hub_publish_ado_collection === true
+    || data.aap.hub_publish_preflight_collections === true
     || data.aap.hub_push_ee === true
     || data.aap.hub_update_collection_only === true
   ) {
@@ -4218,8 +4226,10 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, runtimeMs) {
     `Organization: ${data?.aap?.organization || 'not configured'}`,
     `Project Name: ${projectName}`,
     `AAP Hub collection update: ${data?.aap?.hub_publish_ado_collection ? 'yes' : 'no'}`,
+    `AAP Hub additional playbook collections: ${data?.aap?.hub_publish_preflight_collections ? 'yes' : 'no'}`,
     `AAP Hub/Galaxy requirements.yml: ${
       data?.aap?.hub_publish_ado_collection
+      || data?.aap?.hub_publish_preflight_collections
         ? 'written (Hub/Galaxy names)'
         : 'local type:dir for vendored infra.ado (org must already have Galaxy creds, or use ADO EE)'
     }`,
@@ -4227,7 +4237,12 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, runtimeMs) {
     `AAP standalone run: ${aapStandaloneRun(data) ? 'yes (AAP tabs only — skip component playbooks/full Contoller scaffolding)' : 'no'}`,
     `Vars/vault only: ${data?.git?.vars_only === true ? 'yes (group_vars only — skip playbooks and Controller apply)' : 'no'}`,
     `AAP Hub hostname: ${data?.aap?.hub_hostname || data?.hub?.hostname || 'defaults to AAP hostname'}`,
-    `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`,
+    `AAP Hub repository target: ${
+      data?.aap?.hub_publish_ado_collection
+      || data?.aap?.hub_publish_preflight_collections
+        ? 'validated'
+        : 'not requested'
+    }`,
     `AAP Hub EE push: ${data?.aap?.hub_push_ee ? 'yes' : 'no (optional; default off)'}`,
     ...(data?.aap?.hub_push_ee
       ? [
@@ -4800,7 +4815,10 @@ app.post('/api/bootstrap', async (req, res) => {
 
   const standaloneRun = aapStandaloneRun(data);
   const hubUpdateCollectionOnly = standaloneRun;
-  const hubPublishRequested = aapEnabled && data?.aap?.hub_publish_ado_collection === true;
+  const hubPublishRequested = aapEnabled && (
+    data?.aap?.hub_publish_ado_collection === true
+    || data?.aap?.hub_publish_preflight_collections === true
+  );
   const hubPushEeRequested = aapEnabled && data?.aap?.hub_push_ee === true;
   const gatewayAuthRequested = aapAuthConfigRequested(data);
   const hasAapOAuthToken = Boolean(String(data?.aap?.oauth_token || '').trim());
