@@ -1078,7 +1078,11 @@ const defaults = {
       standalone_zip: '',
       standalone_zip_file: '',
       standalone_zip_upload_path: '',
+      standalone_zip_source: 'url',
       standalone_zip_url: '',
+      standalone_zip_git_repo: '',
+      standalone_zip_git_path: '',
+      standalone_zip_git_branch: '',
       standalone_admin_user: 'admin',
       standalone_admin_password: '',
       standalone_tls_crt: '',
@@ -4599,7 +4603,7 @@ function App() {
 
   const renderStandaloneTlsAndRhn = (
     component,
-    { urlPath = 'standalone_rpm_url', showTls = true } = {}
+    { urlPath = 'standalone_rpm_url', showTls = true, showRhn = true } = {}
   ) => {
     const cfg = data.component_config?.[component] || {};
     const urlSet = String(cfg[urlPath] || '').trim().length > 0;
@@ -4615,18 +4619,22 @@ function App() {
           `component_config.${component}.standalone_tls_key`,
           'PEM private key paired with tls.crt.'
         )}
-        <GridItem span={12}>
-          <p style={{ color: mutedTextColor, margin: '8px 0 0' }}>
-            Optional RHN org + activation key. Used when the VM is unregistered and an RPM/zip
-            URL (or dnf deps) needs a subscription. Skip if already registered or using Satellite.
-            {urlSet ? ' RPM/zip URL is set, so RHN may be needed for deps.' : ''}
-          </p>
-        </GridItem>
-        {renderTextField('RHN Org ID (optional)', `component_config.${component}.standalone_rhn_org_id`, 'text')}
-        {renderTextField(
-          'RHN Activation key (optional)',
-          `component_config.${component}.standalone_rhn_activation_key`,
-          'password'
+        {showRhn && (
+          <>
+            <GridItem span={12}>
+              <p style={{ color: mutedTextColor, margin: '8px 0 0' }}>
+                Optional RHN org + activation key. Used when the VM is unregistered and an RPM/zip
+                URL (or dnf deps) needs a subscription. Skip if already registered or using Satellite.
+                {urlSet ? ' RPM/zip URL is set, so RHN may be needed for deps.' : ''}
+              </p>
+            </GridItem>
+            {renderTextField('RHN Org ID (optional)', `component_config.${component}.standalone_rhn_org_id`, 'text')}
+            {renderTextField(
+              'RHN Activation key (optional)',
+              `component_config.${component}.standalone_rhn_activation_key`,
+              'password'
+            )}
+          </>
         )}
       </>
     );
@@ -4673,7 +4681,28 @@ function App() {
     usersDn: 'LDAP users DN. Example: cn=users,cn=accounts,dc=server,dc=lab.',
     userAttribute: 'User attribute used for the token claim. Example: memberOf.',
     tokenClaimType: 'Token claim type. Example: String or JSON.',
-    standaloneZip: 'Select the official rhbk-*.zip. Generate copies it to files/ in the playbook repo so AAP can copy it from the controller/EE. Prefer Zip URL if the file is hosted.'
+    standaloneZip: (
+      <>
+        <p>Official <code>rhbk-*.zip</code> for the RHEL VM install.</p>
+        <p>
+          The Contoller job copies or downloads the zip onto the Keycloak host and
+          unpacks it there. The preflight pod only stages an uploaded zip into
+          <code>files/</code> — it does not unzip or install Keycloak.
+        </p>
+      </>
+    ),
+    standaloneZipSource: (
+      <>
+        <p><strong>HTTP / Satellite URL:</strong> Keycloak host downloads the zip (example
+        <code>http://sat.server.lab/pub/rhbk-26.6.5.zip</code>).</p>
+        <p><strong>Git repo:</strong> Keycloak host clones the repo and uses the zip path inside it.</p>
+        <p><strong>Upload:</strong> stage zip into bootstrap <code>files/</code>; Contoller copies it to the host.</p>
+      </>
+    ),
+    standaloneZipUrl: 'HTTP(S) URL the Keycloak host can reach. Satellite example: http://sat.server.lab/pub/rhbk.zip',
+    standaloneZipGitRepo: 'Git clone URL containing the RHBK zip. Example: https://gitlab.example.com/lab/rhbk-artifacts.git',
+    standaloneZipGitPath: 'Path to the zip inside the repo. Example: rhbk-26.6.5.zip or dist/rhbk.zip',
+    standaloneZipGitBranch: 'Optional branch or tag. Default: repo default branch.'
   };
 
   const idmHelp = {
@@ -5311,35 +5340,79 @@ echo $TOKEN
           <Grid hasGutter>
             {renderTextField('VM hostname (KC_HOSTNAME)', 'component_config.rhbk.standalone_hostname', 'text')}
             <GridItem span={12}>
-              <FormGroup label={labelWithHelp('RHBK zip', rhbkHelp.standaloneZip)}>
-                <input
-                  id="rhbk-standalone-zip-file"
-                  type="file"
-                  accept=".zip,application/zip"
-                  disabled={rhbkZipUploading}
-                  onChange={event => {
-                    uploadRhbkStandaloneZip(event.target.files?.[0]);
-                    event.target.value = '';
-                  }}
-                  style={{ display: 'block', marginBottom: '8px' }}
-                />
-                <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
-                  {rhbkZipUploading
-                    ? 'Uploading zip to the preflight workspace…'
-                    : (data.component_config?.rhbk?.standalone_zip_file
-                      ? `Selected: ${data.component_config.rhbk.standalone_zip_file}. Generated repo path: files/${data.component_config.rhbk.standalone_zip_file}.`
-                      : 'Choose rhbk-*.zip from this workstation. It is staged and written to files/ on generate (same pattern as the Satellite manifest).')}
-                </div>
-                {rhbkZipError && (
-                  <div style={{ color: '#c9190b', fontSize: '13px', marginTop: '6px' }}>{rhbkZipError}</div>
-                )}
-                {data.component_config?.rhbk?.standalone_zip_file && (
-                  <Button variant="link" onClick={clearRhbkStandaloneZip}>Clear zip</Button>
-                )}
+              <FormGroup label={labelWithHelp('RHBK zip source', rhbkHelp.standaloneZipSource)}>
+                <select
+                  value={data.component_config?.rhbk?.standalone_zip_source || 'url'}
+                  onChange={e => set('component_config.rhbk.standalone_zip_source', e.target.value)}
+                  style={{ width: '100%', padding: '8px' }}
+                >
+                  <option value="url">HTTP / Satellite URL (host downloads)</option>
+                  <option value="git">Git repo (host clones, then uses zip path)</option>
+                  <option value="upload">Upload zip into bootstrap files/ (Contoller copies to host)</option>
+                </select>
               </FormGroup>
             </GridItem>
-            {renderTextField('Zip URL (optional)', 'component_config.rhbk.standalone_zip_url', 'text')}
-            {renderStandaloneTlsAndRhn('rhbk', { urlPath: 'standalone_zip_url' })}
+            {(data.component_config?.rhbk?.standalone_zip_source || 'url') === 'url' && (
+              renderTextField(
+                'Zip URL (Satellite or HTTP)',
+                'component_config.rhbk.standalone_zip_url',
+                'text',
+                rhbkHelp.standaloneZipUrl
+              )
+            )}
+            {(data.component_config?.rhbk?.standalone_zip_source || 'url') === 'git' && (
+              <>
+                {renderTextField(
+                  'Git repo URL',
+                  'component_config.rhbk.standalone_zip_git_repo',
+                  'text',
+                  rhbkHelp.standaloneZipGitRepo
+                )}
+                {renderTextField(
+                  'Zip path in repo',
+                  'component_config.rhbk.standalone_zip_git_path',
+                  'text',
+                  rhbkHelp.standaloneZipGitPath
+                )}
+                {renderTextField(
+                  'Git branch / tag (optional)',
+                  'component_config.rhbk.standalone_zip_git_branch',
+                  'text',
+                  rhbkHelp.standaloneZipGitBranch
+                )}
+              </>
+            )}
+            {(data.component_config?.rhbk?.standalone_zip_source || 'url') === 'upload' && (
+              <GridItem span={12}>
+                <FormGroup label={labelWithHelp('RHBK zip upload', rhbkHelp.standaloneZip)}>
+                  <input
+                    id="rhbk-standalone-zip-file"
+                    type="file"
+                    accept=".zip,application/zip"
+                    disabled={rhbkZipUploading}
+                    onChange={event => {
+                      uploadRhbkStandaloneZip(event.target.files?.[0]);
+                      event.target.value = '';
+                    }}
+                    style={{ display: 'block', marginBottom: '8px' }}
+                  />
+                  <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
+                    {rhbkZipUploading
+                      ? 'Uploading zip to the preflight workspace…'
+                      : (data.component_config?.rhbk?.standalone_zip_file
+                        ? `Selected: ${data.component_config.rhbk.standalone_zip_file}. Generated repo path: files/${data.component_config.rhbk.standalone_zip_file}. Contoller JT copies this to the Keycloak host and unpacks there.`
+                        : 'Choose rhbk-*.zip from this workstation. Staged into files/ on generate; Contoller JT copies it to the Keycloak host and unpacks there (pod does not install).')}
+                  </div>
+                  {rhbkZipError && (
+                    <div style={{ color: '#c9190b', fontSize: '13px', marginTop: '6px' }}>{rhbkZipError}</div>
+                  )}
+                  {data.component_config?.rhbk?.standalone_zip_file && (
+                    <Button variant="link" onClick={clearRhbkStandaloneZip}>Clear zip</Button>
+                  )}
+                </FormGroup>
+              </GridItem>
+            )}
+            {renderStandaloneTlsAndRhn('rhbk', { urlPath: 'standalone_zip_url', showRhn: false })}
             {renderTextField('Admin user', 'component_config.rhbk.standalone_admin_user', 'text')}
             {renderTextField('Admin password', 'component_config.rhbk.standalone_admin_password', 'password')}
           </Grid>
@@ -5764,6 +5837,9 @@ echo $TOKEN
       copy.component_config.rhbk.standalone_zip_file = filename || '';
       copy.component_config.rhbk.standalone_zip_upload_path = uploadPath || '';
       copy.component_config.rhbk.standalone_zip = filename ? `files/${filename}` : '';
+      if (filename) {
+        copy.component_config.rhbk.standalone_zip_source = 'upload';
+      }
       return copy;
     });
   };
