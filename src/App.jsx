@@ -2557,33 +2557,44 @@ function App() {
     });
   };
 
-  const moveGalaxyCredential = (index, direction) => {
-    setData(prev => {
-      const copy = JSON.parse(JSON.stringify(prev));
-      if (!copy.aap) copy.aap = {};
-      const list = [...(copy.aap.galaxy_credentials || [])];
-      const target = index + direction;
-      if (target < 0 || target >= list.length) return prev;
-      const tmp = list[index];
-      list[index] = list[target];
-      list[target] = tmp;
-      copy.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(list);
-      return copy;
-    });
-  };
-
+  /** Set org search rank (1..N) among Create/update-enabled Galaxy credentials. */
   const setGalaxyCredentialOrder = (index, rawOrder) => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
       if (!copy.aap) copy.aap = {};
       const list = [...(copy.aap.galaxy_credentials || [])];
-      if (!list[index]) return prev;
+      if (!list[index] || list[index].enabled === false) return prev;
+
+      const enabled = list
+        .map((credential, credIndex) => ({ credential, credIndex }))
+        .filter(row => row.credential.enabled !== false)
+        .sort((a, b) => (
+          (Number(a.credential.order) || 0) - (Number(b.credential.order) || 0)
+          || String(a.credential.name || '').localeCompare(String(b.credential.name || ''))
+        ));
+
+      const max = enabled.length;
       const parsed = parseInt(rawOrder, 10);
-      list[index] = {
-        ...list[index],
-        order: Number.isFinite(parsed) && parsed > 0 ? parsed : index + 1
-      };
-      copy.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(list);
+      const targetOrder = Number.isFinite(parsed) && parsed > 0
+        ? Math.min(parsed, max)
+        : 1;
+
+      const currentPos = enabled.findIndex(row => row.credIndex === index);
+      if (currentPos < 0) return prev;
+      const [row] = enabled.splice(currentPos, 1);
+      enabled.splice(targetOrder - 1, 0, row);
+
+      enabled.forEach((item, pos) => {
+        list[item.credIndex] = { ...list[item.credIndex], order: pos + 1 };
+      });
+      let next = max + 1;
+      list.forEach((credential, credIndex) => {
+        if (credential.enabled === false) {
+          list[credIndex] = { ...credential, order: next };
+          next += 1;
+        }
+      });
+      copy.aap.galaxy_credentials = list;
       return copy;
     });
   };
@@ -5178,6 +5189,23 @@ echo $TOKEN
           Additional playbook collections always skip when the version already exists.
         </p>
         <p>Without this, an already-installed <code>infra.ado</code> is left as-is.</p>
+      </>
+    ),
+    containerRegistryCredential: (
+      <>
+        <p>
+          Contoller <strong>Container Registry</strong> credential used to pull execution
+          environment images (for example the ADO EE from Private Automation Hub).
+        </p>
+        <p>
+          Without this, Contoller jobs can fail with <code>ImagePullBackOff</code> when the EE
+          lives on Hub. Galaxy credentials above are for collection sync; this one is for
+          container image pull.
+        </p>
+        <p>
+          Host is usually the same Hub/AAP hostname. Username/password are optional when the
+          registry allows anonymous pull or uses the Hub token path your Contoller already has.
+        </p>
       </>
     ),
     hubExecutionEnvironment: (
@@ -11292,198 +11320,238 @@ ${vaultYaml}
                           </GridItem>
                           <GridItem span={12}>
                             <p style={{ color: mutedTextColor, margin: '0 0 8px', fontSize: '13px' }}>
-                              Organization Galaxy credential order: <strong>1</strong> is tried first
-                              by Contoller, then 2, 3, … Use Move up/down or set the Order number.
-                              Order + &quot;Attach to organization&quot; set the full org search list.
-                              Unchecking <strong>Create</strong> skips creating/updating that
-                              credential this run; it still keeps its attach/order in the org list.
+                              Galaxy tabs: check <strong>Create/update</strong> to include a credential.
+                              <strong> Order</strong> is 1…N among checked credentials (1 is tried first
+                              by Contoller). Unchecking Create skips create/update this run but can still
+                              keep attach/order. The <strong>Container Registry</strong> tab is for EE
+                              image pull, not Galaxy collections.
                             </p>
                           </GridItem>
                           <GridItem span={12}>
-                            <Tabs
-                              activeKey={
-                                Math.min(
-                                  activeGalaxyCredTab,
-                                  Math.max(0, (data.aap.galaxy_credentials || []).length - 1)
-                                )
-                              }
-                              onSelect={(_, key) => setActiveGalaxyCredTab(Number(key))}
-                            >
-                              {(data.aap.galaxy_credentials || []).map((credential, index) => (
-                                <Tab
-                                  key={credential.id || `galaxy-cred-${index}`}
-                                  eventKey={index}
-                                  title={credential.name || `Credential ${index + 1}`}
-                                />
-                              ))}
-                            </Tabs>
-                            {(data.aap.galaxy_credentials || []).map((credential, index) => {
-                              const selectedTab = Math.min(
-                                activeGalaxyCredTab,
-                                Math.max(0, (data.aap.galaxy_credentials || []).length - 1)
+                            {(() => {
+                              const galaxyCreds = data.aap.galaxy_credentials || [];
+                              const enabledCount = galaxyCreds.filter(c => c.enabled !== false).length;
+                              const orderOptions = Array.from(
+                                { length: Math.max(enabledCount, 1) },
+                                (_, i) => i + 1
                               );
-                              if (index !== selectedTab) return null;
+                              const selectedTab = activeGalaxyCredTab;
+                              const registrySelected = selectedTab === 'container_registry';
+                              const galaxyTabIndex = registrySelected
+                                ? -1
+                                : Math.min(
+                                  Number(selectedTab) || 0,
+                                  Math.max(0, galaxyCreds.length - 1)
+                                );
+
                               return (
-                                <div
-                                  key={credential.id || `galaxy-cred-body-${index}`}
-                                  style={{
-                                    marginTop: '12px',
-                                    border: `1px solid ${borderColor}`,
-                                    borderRadius: '6px',
-                                    padding: '12px'
-                                  }}
-                                >
-                                  <Grid hasGutter>
-                                    <GridItem span={12}>
-                                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                                        <Checkbox
-                                          id={`aap-galaxy-cred-enabled-${index}`}
-                                          label={`Create/update ${credential.name || 'credential'}`}
-                                          isChecked={credential.enabled !== false}
-                                          onChange={(_, v) => set(`aap.galaxy_credentials.${index}.enabled`, v)}
-                                        />
-                                        <FormGroup label="Order" style={{ marginBottom: 0, minWidth: '72px' }}>
-                                          <TextInput
-                                            type="number"
-                                            min={1}
-                                            value={credential.order ?? index + 1}
-                                            onChange={(_, v) => setGalaxyCredentialOrder(index, v)}
-                                            aria-label={`Order for ${credential.name || 'credential'}`}
-                                          />
-                                        </FormGroup>
-                                        <Button
-                                          variant="secondary"
-                                          isDisabled={index === 0}
-                                          onClick={() => {
-                                            moveGalaxyCredential(index, -1);
-                                            setActiveGalaxyCredTab(Math.max(0, index - 1));
-                                          }}
-                                        >
-                                          Move up
-                                        </Button>
-                                        <Button
-                                          variant="secondary"
-                                          isDisabled={index >= (data.aap.galaxy_credentials || []).length - 1}
-                                          onClick={() => {
-                                            moveGalaxyCredential(index, 1);
-                                            setActiveGalaxyCredTab(index + 1);
-                                          }}
-                                        >
-                                          Move down
-                                        </Button>
+                                <>
+                                  <Tabs
+                                    activeKey={registrySelected ? 'container_registry' : galaxyTabIndex}
+                                    onSelect={(_, key) => setActiveGalaxyCredTab(key)}
+                                  >
+                                    {galaxyCreds.map((credential, index) => (
+                                      <Tab
+                                        key={credential.id || `galaxy-cred-${index}`}
+                                        eventKey={index}
+                                        title={credential.name || `Credential ${index + 1}`}
+                                      />
+                                    ))}
+                                    <Tab
+                                      eventKey="container_registry"
+                                      title={labelWithHelp(
+                                        'Container Registry',
+                                        aapHelp.containerRegistryCredential
+                                      )}
+                                    />
+                                  </Tabs>
+
+                                  {!registrySelected && galaxyCreds.map((credential, index) => {
+                                    if (index !== galaxyTabIndex) return null;
+                                    const enabledRank = galaxyCreds
+                                      .map((item, credIndex) => ({ item, credIndex }))
+                                      .filter(row => row.item.enabled !== false)
+                                      .sort((a, b) => (
+                                        (Number(a.item.order) || 0) - (Number(b.item.order) || 0)
+                                        || String(a.item.name || '').localeCompare(String(b.item.name || ''))
+                                      ))
+                                      .findIndex(row => row.credIndex === index) + 1;
+                                    const orderValue = credential.enabled === false
+                                      ? ''
+                                      : (enabledRank > 0 ? enabledRank : 1);
+
+                                    return (
+                                      <div
+                                        key={credential.id || `galaxy-cred-body-${index}`}
+                                        style={{
+                                          marginTop: '12px',
+                                          border: `1px solid ${borderColor}`,
+                                          borderRadius: '6px',
+                                          padding: '12px'
+                                        }}
+                                      >
+                                        <Grid hasGutter>
+                                          <GridItem span={12}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                                              <Checkbox
+                                                id={`aap-galaxy-cred-enabled-${index}`}
+                                                label={`Create/update ${credential.name || 'credential'}`}
+                                                isChecked={credential.enabled !== false}
+                                                onChange={(_, v) => set(`aap.galaxy_credentials.${index}.enabled`, v)}
+                                              />
+                                              <FormGroup
+                                                label="Order"
+                                                style={{ marginBottom: 0, minWidth: '100px' }}
+                                              >
+                                                <select
+                                                  aria-label={`Order for ${credential.name || 'credential'}`}
+                                                  value={orderValue}
+                                                  disabled={credential.enabled === false || enabledCount < 1}
+                                                  onChange={e => setGalaxyCredentialOrder(index, e.target.value)}
+                                                  style={{ width: '100%', padding: '6px 8px' }}
+                                                >
+                                                  {credential.enabled === false ? (
+                                                    <option value="">n/a</option>
+                                                  ) : (
+                                                    orderOptions.map(option => (
+                                                      <option key={option} value={option}>{option}</option>
+                                                    ))
+                                                  )}
+                                                </select>
+                                              </FormGroup>
+                                            </div>
+                                          </GridItem>
+                                          {credential.enabled !== false && (
+                                            <>
+                                              <GridItem span={4}>
+                                                <FormGroup label="Name">
+                                                  <TextInput
+                                                    value={credential.name}
+                                                    onChange={(_, v) => set(`aap.galaxy_credentials.${index}.name`, v)}
+                                                  />
+                                                </FormGroup>
+                                              </GridItem>
+                                              <GridItem span={8}>
+                                                <FormGroup label="Galaxy Server URL">
+                                                  <TextInput
+                                                    value={credential.url}
+                                                    onChange={(_, v) => set(`aap.galaxy_credentials.${index}.url`, v)}
+                                                  />
+                                                </FormGroup>
+                                              </GridItem>
+                                              <GridItem span={6}>
+                                                <FormGroup label="Auth Server URL (optional)">
+                                                  <TextInput
+                                                    value={credential.auth_url || ''}
+                                                    onChange={(_, v) => set(`aap.galaxy_credentials.${index}.auth_url`, v)}
+                                                  />
+                                                </FormGroup>
+                                              </GridItem>
+                                              <GridItem span={6}>
+                                                <FormGroup
+                                                  label="API Token (optional per-cred override)"
+                                                  helperText="Empty = General → Hub / Galaxy API token."
+                                                >
+                                                  <TextInput
+                                                    type="password"
+                                                    value={credential.token || ''}
+                                                    onChange={(_, v) => set(`aap.galaxy_credentials.${index}.token`, v)}
+                                                  />
+                                                </FormGroup>
+                                              </GridItem>
+                                              <GridItem span={12}>
+                                                <Checkbox
+                                                  id={`aap-galaxy-cred-attach-${index}`}
+                                                  label="Attach to organization Galaxy credentials (uses Order above)"
+                                                  description="Uncheck to create the credential but not add it to the org Galaxy search list."
+                                                  isChecked={credential.attach_to_org !== false}
+                                                  onChange={(_, v) => set(`aap.galaxy_credentials.${index}.attach_to_org`, v)}
+                                                />
+                                              </GridItem>
+                                            </>
+                                          )}
+                                        </Grid>
                                       </div>
-                                    </GridItem>
-                                    {credential.enabled !== false && (
-                                      <>
-                                        <GridItem span={4}>
-                                          <FormGroup label="Name">
-                                            <TextInput
-                                              value={credential.name}
-                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.name`, v)}
-                                            />
-                                          </FormGroup>
-                                        </GridItem>
-                                        <GridItem span={8}>
-                                          <FormGroup label="Galaxy Server URL">
-                                            <TextInput
-                                              value={credential.url}
-                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.url`, v)}
-                                            />
-                                          </FormGroup>
-                                        </GridItem>
-                                        <GridItem span={6}>
-                                          <FormGroup label="Auth Server URL (optional)">
-                                            <TextInput
-                                              value={credential.auth_url || ''}
-                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.auth_url`, v)}
-                                            />
-                                          </FormGroup>
-                                        </GridItem>
-                                        <GridItem span={6}>
-                                          <FormGroup
-                                            label="API Token (optional per-cred override)"
-                                            helperText="Empty = General → Hub / Galaxy API token."
-                                          >
-                                            <TextInput
-                                              type="password"
-                                              value={credential.token || ''}
-                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.token`, v)}
-                                            />
-                                          </FormGroup>
-                                        </GridItem>
+                                    );
+                                  })}
+
+                                  {registrySelected && (
+                                    <div
+                                      style={{
+                                        marginTop: '12px',
+                                        border: `1px solid ${borderColor}`,
+                                        borderRadius: '6px',
+                                        padding: '12px'
+                                      }}
+                                    >
+                                      <Grid hasGutter>
                                         <GridItem span={12}>
-                                          <Checkbox
-                                            id={`aap-galaxy-cred-attach-${index}`}
-                                            label="Attach to organization Galaxy credentials (uses Order above)"
-                                            description="Uncheck to create the credential but not add it to the org Galaxy search list."
-                                            isChecked={credential.attach_to_org !== false}
-                                            onChange={(_, v) => set(`aap.galaxy_credentials.${index}.attach_to_org`, v)}
-                                          />
+                                          <FormGroup label={labelWithHelp(
+                                            'Container Registry credential (EE pull)',
+                                            aapHelp.containerRegistryCredential
+                                          )}>
+                                            <Checkbox
+                                              id="aap-galaxy-ee-registry-enabled"
+                                              label={`Create ${data.aap.container_registry_credential?.name || 'ADO-EE'} (Container Registry)`}
+                                              isChecked={data.aap.container_registry_credential?.enabled !== false}
+                                              onChange={(_, v) => set('aap.container_registry_credential.enabled', v)}
+                                            />
+                                          </FormGroup>
                                         </GridItem>
-                                      </>
-                                    )}
-                                  </Grid>
-                                </div>
+                                        {data.aap.container_registry_credential?.enabled !== false && (
+                                          <>
+                                            <GridItem span={4}>
+                                              <FormGroup label="Name">
+                                                <TextInput
+                                                  value={data.aap.container_registry_credential.name}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.name', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                            <GridItem span={8}>
+                                              <FormGroup label="Registry host">
+                                                <TextInput
+                                                  value={data.aap.container_registry_credential.host}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.host', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                            <GridItem span={4}>
+                                              <FormGroup label="Username">
+                                                <TextInput
+                                                  value={data.aap.container_registry_credential.username}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.username', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                            <GridItem span={4}>
+                                              <FormGroup label="Password / token">
+                                                <TextInput
+                                                  type="password"
+                                                  value={data.aap.container_registry_credential.password}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.password', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                            <GridItem span={4}>
+                                              <FormGroup label="TLS">
+                                                <Checkbox
+                                                  id="aap-galaxy-ee-verify-ssl"
+                                                  label="Verify SSL"
+                                                  isChecked={data.aap.container_registry_credential.verify_ssl !== false}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.verify_ssl', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                          </>
+                                        )}
+                                      </Grid>
+                                    </div>
+                                  )}
+                                </>
                               );
-                            })}
+                            })()}
                           </GridItem>
-                          <GridItem span={12}>
-                            <FormGroup label="Container Registry credential (EE pull)">
-                              <Checkbox
-                                id="aap-galaxy-ee-registry-enabled"
-                                label={`Create ${data.aap.container_registry_credential?.name || 'ADO-EE'} (Container Registry)`}
-                                isChecked={data.aap.container_registry_credential?.enabled !== false}
-                                onChange={(_, v) => set('aap.container_registry_credential.enabled', v)}
-                              />
-                            </FormGroup>
-                          </GridItem>
-                          {data.aap.container_registry_credential?.enabled !== false && (
-                            <>
-                              <GridItem span={4}>
-                                <FormGroup label="Name">
-                                  <TextInput
-                                    value={data.aap.container_registry_credential.name}
-                                    onChange={(_, v) => set('aap.container_registry_credential.name', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                              <GridItem span={8}>
-                                <FormGroup label="Registry host">
-                                  <TextInput
-                                    value={data.aap.container_registry_credential.host}
-                                    onChange={(_, v) => set('aap.container_registry_credential.host', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                              <GridItem span={4}>
-                                <FormGroup label="Username">
-                                  <TextInput
-                                    value={data.aap.container_registry_credential.username}
-                                    onChange={(_, v) => set('aap.container_registry_credential.username', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                              <GridItem span={4}>
-                                <FormGroup label="Password / token">
-                                  <TextInput
-                                    type="password"
-                                    value={data.aap.container_registry_credential.password}
-                                    onChange={(_, v) => set('aap.container_registry_credential.password', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                              <GridItem span={4}>
-                                <FormGroup label="TLS">
-                                  <Checkbox
-                                    id="aap-galaxy-ee-verify-ssl"
-                                    label="Verify SSL"
-                                    isChecked={data.aap.container_registry_credential.verify_ssl !== false}
-                                    onChange={(_, v) => set('aap.container_registry_credential.verify_ssl', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                            </>
-                          )}
                         </>
                       )}
                     </Grid>
