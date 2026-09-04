@@ -1863,6 +1863,7 @@ function App() {
   const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
   const [activeHubSubTab, setActiveHubSubTab] = useState('collections');
   const [hubPreflightCollectionsOpen, setHubPreflightCollectionsOpen] = useState(false);
+  const hubPreflightCollectionsMenuRef = useRef(null);
   const [activeGalaxyCredTab, setActiveGalaxyCredTab] = useState(0);
   const [activeAapAuthTab, setActiveAapAuthTab] = useState('keycloak');
   const [storageClassLookup, setStorageClassLookup] = useState({
@@ -2206,6 +2207,18 @@ function App() {
     data.environment
   ]);
 
+  useEffect(() => {
+    if (!hubPreflightCollectionsOpen) return undefined;
+    const onPointerDown = (event) => {
+      const node = hubPreflightCollectionsMenuRef.current;
+      if (node && !node.contains(event.target)) {
+        setHubPreflightCollectionsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [hubPreflightCollectionsOpen]);
+
   const set = (path, value) => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
@@ -2470,7 +2483,9 @@ function App() {
         ? [...new Set([...current, name])]
         : current.filter(item => item !== name);
       copy.aap.hub_publish_preflight_collection_names = next;
-      copy.aap.hub_publish_preflight_collections = next.length > 0;
+      // Keep the parent opt-in checked while editing the list (empty = publish none
+      // until the user clears the parent checkbox or picks collections again).
+      copy.aap.hub_publish_preflight_collections = true;
       return copy;
     });
   };
@@ -10939,70 +10954,74 @@ ${vaultYaml}
                             </div>
                             {data.aap.hub_publish_preflight_collections === true && (
                               <div style={{ marginTop: '10px', display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
-                                <Dropdown
-                                  isOpen={hubPreflightCollectionsOpen}
-                                  onOpenChange={setHubPreflightCollectionsOpen}
-                                  toggle={toggleRef => (
-                                    <MenuToggle
-                                      ref={toggleRef}
-                                      onClick={() => setHubPreflightCollectionsOpen(open => !open)}
-                                      isExpanded={hubPreflightCollectionsOpen}
-                                      variant="secondary"
-                                    >
-                                      Select collections
-                                      {' '}
-                                      ({(data.aap.hub_publish_preflight_collection_names || []).length}/
-                                      {PREFLIGHT_HUB_COLLECTION_OPTIONS.length})
-                                    </MenuToggle>
-                                  )}
-                                >
-                                  <DropdownList style={{ maxHeight: '320px', overflowY: 'auto', minWidth: '280px' }}>
-                                    <DropdownItem
-                                      key="all"
-                                      onClick={() => {
-                                        set('aap.hub_publish_preflight_collection_names', [...PREFLIGHT_HUB_COLLECTION_OPTIONS]);
-                                        setHubPreflightCollectionsOpen(false);
+                                <div ref={hubPreflightCollectionsMenuRef} style={{ position: 'relative' }}>
+                                  <MenuToggle
+                                    onClick={() => setHubPreflightCollectionsOpen(open => !open)}
+                                    isExpanded={hubPreflightCollectionsOpen}
+                                    variant="secondary"
+                                  >
+                                    Select collections
+                                    {' '}
+                                    ({(data.aap.hub_publish_preflight_collection_names || []).length}/
+                                    {PREFLIGHT_HUB_COLLECTION_OPTIONS.length})
+                                  </MenuToggle>
+                                  {hubPreflightCollectionsOpen && (
+                                    <div
+                                      role="menu"
+                                      style={{
+                                        position: 'absolute',
+                                        zIndex: 400,
+                                        top: 'calc(100% + 4px)',
+                                        left: 0,
+                                        minWidth: '280px',
+                                        maxHeight: '320px',
+                                        overflowY: 'auto',
+                                        background: 'var(--pf-t--global--background--color--primary--default, #fff)',
+                                        border: '1px solid var(--pf-t--global--border--color--default, #d2d2d2)',
+                                        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+                                        padding: '6px 0'
                                       }}
                                     >
-                                      Select all
-                                    </DropdownItem>
-                                    <DropdownItem
-                                      key="none"
-                                      onClick={() => {
-                                        setData(prev => {
-                                          const copy = JSON.parse(JSON.stringify(prev));
-                                          if (!copy.aap) copy.aap = {};
-                                          copy.aap.hub_publish_preflight_collection_names = [];
-                                          copy.aap.hub_publish_preflight_collections = false;
-                                          return copy;
-                                        });
-                                        setHubPreflightCollectionsOpen(false);
-                                      }}
-                                    >
-                                      Clear all
-                                    </DropdownItem>
-                                    {PREFLIGHT_HUB_COLLECTION_OPTIONS.map(name => {
-                                      const selected = (data.aap.hub_publish_preflight_collection_names || [])
-                                        .includes(name);
-                                      return (
-                                        <DropdownItem
-                                          key={name}
-                                          onClick={(event) => {
-                                            event.preventDefault();
-                                            toggleHubPreflightCollectionName(name, !selected);
+                                      <div style={{ display: 'flex', gap: '8px', padding: '4px 12px 8px' }}>
+                                        <Button
+                                          variant="link"
+                                          isInline
+                                          onClick={() => {
+                                            set(
+                                              'aap.hub_publish_preflight_collection_names',
+                                              [...PREFLIGHT_HUB_COLLECTION_OPTIONS]
+                                            );
                                           }}
                                         >
-                                          <Checkbox
-                                            id={`hub-preflight-col-${name}`}
-                                            label={name}
-                                            isChecked={selected}
-                                            onChange={(_, v) => toggleHubPreflightCollectionName(name, v)}
-                                          />
-                                        </DropdownItem>
-                                      );
-                                    })}
-                                  </DropdownList>
-                                </Dropdown>
+                                          Select all
+                                        </Button>
+                                        <Button
+                                          variant="link"
+                                          isInline
+                                          onClick={() => {
+                                            set('aap.hub_publish_preflight_collection_names', []);
+                                          }}
+                                        >
+                                          Clear all
+                                        </Button>
+                                      </div>
+                                      {PREFLIGHT_HUB_COLLECTION_OPTIONS.map(name => {
+                                        const selected = (data.aap.hub_publish_preflight_collection_names || [])
+                                          .includes(name);
+                                        return (
+                                          <div key={name} role="menuitem" style={{ padding: '6px 12px' }}>
+                                            <Checkbox
+                                              id={`hub-preflight-col-${name}`}
+                                              label={name}
+                                              isChecked={selected}
+                                              onChange={(_, v) => toggleHubPreflightCollectionName(name, v)}
+                                            />
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
                                 <span style={{ fontSize: '13px', color: mutedTextColor }}>
                                   Skip if version already in validated (no force).
                                 </span>
