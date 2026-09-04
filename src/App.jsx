@@ -1145,13 +1145,23 @@ const HUB_EE_BAKED_SOURCE = 'docker-archive:/opt/ado-ee/ado-ee.docker.tar';
 const PREFLIGHT_HUB_COLLECTION_OPTIONS = [
   'kubernetes.core',
   'redhat.openshift',
+  'redhat.satellite',
+  'redhat.rhel_idm',
+  'redhat.rhel_system_roles',
   'community.general',
   'community.grafana',
+  'community.hashi_vault',
+  'community.kubernetes',
+  'freeipa.ansible_freeipa',
   'grafana.grafana',
+  'ansible.posix',
+  'ansible.utils',
   'ansible.controller',
   'awx.awx',
   'infra.controller_configuration',
   'infra.aap_configuration',
+  'infra.aap_utilities',
+  'infra.rhacs_configuration',
   'ansible.platform',
   'ansible.hub',
   'containers.podman'
@@ -1862,8 +1872,6 @@ function App() {
   const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
   const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
   const [activeHubSubTab, setActiveHubSubTab] = useState('collections');
-  const [hubPreflightCollectionsOpen, setHubPreflightCollectionsOpen] = useState(false);
-  const hubPreflightCollectionsMenuRef = useRef(null);
   const [activeGalaxyCredTab, setActiveGalaxyCredTab] = useState(0);
   const [activeAapAuthTab, setActiveAapAuthTab] = useState('keycloak');
   const [storageClassLookup, setStorageClassLookup] = useState({
@@ -2206,18 +2214,6 @@ function App() {
     data.openshift?.apps_domain,
     data.environment
   ]);
-
-  useEffect(() => {
-    if (!hubPreflightCollectionsOpen) return undefined;
-    const onPointerDown = (event) => {
-      const node = hubPreflightCollectionsMenuRef.current;
-      if (node && !node.contains(event.target)) {
-        setHubPreflightCollectionsOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onPointerDown);
-    return () => document.removeEventListener('mousedown', onPointerDown);
-  }, [hubPreflightCollectionsOpen]);
 
   const set = (path, value) => {
     setData(prev => {
@@ -10953,78 +10949,66 @@ ${vaultYaml}
                               />
                             </div>
                             {data.aap.hub_publish_preflight_collections === true && (
-                              <div style={{ marginTop: '10px', display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
-                                <div ref={hubPreflightCollectionsMenuRef} style={{ position: 'relative' }}>
-                                  <MenuToggle
-                                    onClick={() => setHubPreflightCollectionsOpen(open => !open)}
-                                    isExpanded={hubPreflightCollectionsOpen}
-                                    variant="secondary"
-                                  >
+                              <div style={{ marginTop: '10px' }}>
+                                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center', marginBottom: '8px' }}>
+                                  <span style={{ fontWeight: 600 }}>
                                     Select collections
                                     {' '}
                                     ({(data.aap.hub_publish_preflight_collection_names || []).length}/
                                     {PREFLIGHT_HUB_COLLECTION_OPTIONS.length})
-                                  </MenuToggle>
-                                  {hubPreflightCollectionsOpen && (
-                                    <div
-                                      role="menu"
-                                      style={{
-                                        position: 'absolute',
-                                        zIndex: 400,
-                                        top: 'calc(100% + 4px)',
-                                        left: 0,
-                                        minWidth: '280px',
-                                        maxHeight: '320px',
-                                        overflowY: 'auto',
-                                        background: 'var(--pf-t--global--background--color--primary--default, #fff)',
-                                        border: '1px solid var(--pf-t--global--border--color--default, #d2d2d2)',
-                                        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
-                                        padding: '6px 0'
-                                      }}
-                                    >
-                                      <div style={{ display: 'flex', gap: '8px', padding: '4px 12px 8px' }}>
-                                        <Button
-                                          variant="link"
-                                          isInline
-                                          onClick={() => {
-                                            set(
-                                              'aap.hub_publish_preflight_collection_names',
-                                              [...PREFLIGHT_HUB_COLLECTION_OPTIONS]
-                                            );
-                                          }}
-                                        >
-                                          Select all
-                                        </Button>
-                                        <Button
-                                          variant="link"
-                                          isInline
-                                          onClick={() => {
-                                            set('aap.hub_publish_preflight_collection_names', []);
-                                          }}
-                                        >
-                                          Clear all
-                                        </Button>
-                                      </div>
-                                      {PREFLIGHT_HUB_COLLECTION_OPTIONS.map(name => {
-                                        const selected = (data.aap.hub_publish_preflight_collection_names || [])
-                                          .includes(name);
-                                        return (
-                                          <div key={name} role="menuitem" style={{ padding: '6px 12px' }}>
-                                            <Checkbox
-                                              id={`hub-preflight-col-${name}`}
-                                              label={name}
-                                              isChecked={selected}
-                                              onChange={(_, v) => toggleHubPreflightCollectionName(name, v)}
-                                            />
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  )}
+                                  </span>
+                                  <Button
+                                    variant="link"
+                                    isInline
+                                    onClick={() => {
+                                      set(
+                                        'aap.hub_publish_preflight_collection_names',
+                                        [...PREFLIGHT_HUB_COLLECTION_OPTIONS]
+                                      );
+                                    }}
+                                  >
+                                    Select all
+                                  </Button>
+                                  <Button
+                                    variant="link"
+                                    isInline
+                                    onClick={() => {
+                                      set('aap.hub_publish_preflight_collection_names', []);
+                                    }}
+                                  >
+                                    Clear all
+                                  </Button>
+                                  <span style={{ fontSize: '13px', color: mutedTextColor }}>
+                                    Skip if version already in validated (no force).
+                                  </span>
                                 </div>
-                                <span style={{ fontSize: '13px', color: mutedTextColor }}>
-                                  Skip if version already in validated (no force).
-                                </span>
+                                <div
+                                  style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+                                    gap: '4px 12px',
+                                    maxHeight: '240px',
+                                    overflowY: 'auto',
+                                    padding: '10px 12px',
+                                    border: `1px solid ${borderColor}`,
+                                    borderRadius: '6px',
+                                    background: isDark ? '#1f1f1f' : '#fafafa'
+                                  }}
+                                >
+                                  {PREFLIGHT_HUB_COLLECTION_OPTIONS.map(name => {
+                                    const selected = (data.aap.hub_publish_preflight_collection_names || [])
+                                      .includes(name);
+                                    return (
+                                      <Checkbox
+                                        key={name}
+                                        id={`hub-preflight-col-${name}`}
+                                        label={name}
+                                        isChecked={selected}
+                                        onChange={(_, v) => toggleHubPreflightCollectionName(name, v)}
+                                      />
+                                    );
+                                  })}
+                                </div>
                               </div>
                             )}
                           </FormGroup>
