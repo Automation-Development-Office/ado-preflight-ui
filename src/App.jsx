@@ -10195,7 +10195,7 @@ ${vaultYaml}
                       <GridItem span={6}>
                         <FormGroup
                           label="Hub / Galaxy API token"
-                          helperText="Used for Contoller organization Galaxy credentials (ansible-galaxy pulls) and registry auth. Hub publish/namespaces on gateway AAP use the Contoller OAuth token above (or admin password), not this field."
+                          helperText="Hub User Access token (Authorization: Token). Used by ansible.hub for namespace/upload when Contoller OAuth is rejected by Hub, and for Contoller org Galaxy credentials. Keep Contoller OAuth set for Contoller API and Pulp URI calls."
                         >
                           <div style={{ display: 'flex', gap: '8px' }}>
                             <TextInput
@@ -10355,10 +10355,10 @@ ${vaultYaml}
                           }}
                         >
                           Before running: set General → AAP Hostname URL and Organization Name.
-                          Contoller API and Hub publish/namespaces on gateway AAP use General →
-                          OAuth token (or Admin password). Hub / Galaxy API token is only for
-                          Contoller org Galaxy credentials and registry pulls — it will not
-                          authorize Hub collection publish.
+                          Keep Contoller OAuth and Admin password set. Also set Hub / Galaxy API
+                          token when Hub User Access tokens are required — ansible.hub uses
+                          Token auth and will try Hub token, then Contoller OAuth, then admin
+                          basic until one works.
                         </div>
                       </GridItem>
                       <GridItem span={12}>
