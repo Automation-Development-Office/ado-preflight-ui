@@ -1860,6 +1860,7 @@ function App() {
   const [showAapOauthToken, setShowAapOauthToken] = useState(false);
   const [showAapGalaxyHubToken, setShowAapGalaxyHubToken] = useState(false);
   const [showAapAdminPassword, setShowAapAdminPassword] = useState(false);
+  const [showHtpasswdPassword, setShowHtpasswdPassword] = useState(false);
   const [showMachineCredentialSecrets, setShowMachineCredentialSecrets] = useState(false);
   const [showSatelliteSecrets, setShowSatelliteSecrets] = useState(false);
   const [rhbkZipUploading, setRhbkZipUploading] = useState(false);
@@ -7459,7 +7460,16 @@ echo $TOKEN
               </GridItem>
               <GridItem span={4}>
                 <FormGroup label="Password">
-                  <TextInput type="password" value={user.password || ''} onChange={(_, v) => updateUser(index, 'password', v)} />
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <TextInput
+                      type={showHtpasswdPassword ? 'text' : 'password'}
+                      value={user.password || ''}
+                      onChange={(_, v) => updateUser(index, 'password', v)}
+                    />
+                    <Button variant="secondary" onClick={() => setShowHtpasswdPassword(!showHtpasswdPassword)}>
+                      {showHtpasswdPassword ? 'Hide' : 'Show'}
+                    </Button>
+                  </div>
                 </FormGroup>
               </GridItem>
               <GridItem span={4}>
