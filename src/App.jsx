@@ -86,6 +86,230 @@ function hostnameFromUrl(value) {
   }
 }
 
+function httpsOriginFromHost(value) {
+  const host = hostnameFromUrl(value);
+  return host ? `https://${host}` : '';
+}
+
+function deriveAppsDomainFromInfrastructure(domain) {
+  const d = String(domain || '').trim().replace(/^\.+|\.+$/g, '');
+  if (!d) return '';
+  if (d.startsWith('apps.')) return d;
+  return `apps.ocp.${d}`;
+}
+
+function resolveAppsDomain(source) {
+  const apps = String(source?.openshift?.apps_domain || '').trim().replace(/^\.+|\.+$/g, '');
+  if (apps) return apps;
+  return deriveAppsDomainFromInfrastructure(source?.domain);
+}
+
+function isComponentSelectedInForm(source, name) {
+  const components = Array.isArray(source?.components) ? source.components : [];
+  if (components.includes('all') || components.includes(name)) return true;
+  const apps = source?.component_apps || {};
+  return Object.values(apps).some(list => Array.isArray(list) && list.includes(name));
+}
+
+function resolveComponentHostname(source, component) {
+  const cfg = source?.component_config?.[component] || {};
+  if (component === 'bookstack') {
+    return hostnameFromUrl(cfg.route_host || cfg.hostname);
+  }
+  if (component === 'aap') {
+    return hostnameFromUrl(source?.aap?.hostname || cfg.hostname);
+  }
+  return hostnameFromUrl(cfg.hostname);
+}
+
+function rhbkEnvClientLabel(env, product) {
+  const e = String(env || '').trim().toLowerCase();
+  const suffix = e === 'dev' ? 'Dev' : e === 'prod' ? 'Prod' : (e ? e.charAt(0).toUpperCase() + e.slice(1) : 'Lab');
+  return `${product}${suffix}`;
+}
+
+/** Upsert a Keycloak client row; replace a blank row when present. */
+function upsertRhbkClientRow(clients, next) {
+  const list = Array.isArray(clients) ? clients.map(c => ({ ...c })) : [];
+  const id = String(next.id || '').trim();
+  const existingIdx = list.findIndex(c => String(c.id || '').trim() === id && id);
+  if (existingIdx >= 0) {
+    list[existingIdx] = { ...list[existingIdx], ...next };
+    return list;
+  }
+  const emptyIdx = list.findIndex(
+    c => !String(c.id || '').trim()
+      && !String(c.name || '').trim()
+      && !String(c.redirect_uris || '').trim()
+      && !String(c.web_origins || '').trim()
+  );
+  if (emptyIdx >= 0) {
+    list[emptyIdx] = { id: '', name: '', redirect_uris: '', web_origins: '', ...next };
+    return list;
+  }
+  list.push({ id: '', name: '', redirect_uris: '', web_origins: '', ...next });
+  return list;
+}
+
+/**
+ * Build Keycloak OIDC client presets from selected apps / hostnames already on
+ * the form (apps domain, Grafana, GitLab, BookStack, NetBox).
+ */
+function buildRhbkOidcClientPresets(source) {
+  const env = source?.environment || '';
+  const apps = resolveAppsDomain(source);
+  const presets = [];
+
+  const openShiftSelected = isComponentSelectedInForm(source, 'openshift')
+    || Boolean(source?.openshift?.api_host || source?.openshift?.apps_domain);
+  if (apps && openShiftSelected) {
+    const oauthHost = `oauth-openshift.${apps}`;
+    const oauthOrigin = `https://${oauthHost}`;
+    const label = rhbkEnvClientLabel(env, 'Openshift');
+    presets.push({
+      key: 'openshift',
+      label: 'OpenShift',
+      hint: oauthHost,
+      client: {
+        id: label,
+        name: label,
+        redirect_uris: `${oauthOrigin}/oauth2callback/Keycloak/*`,
+        web_origins: oauthOrigin,
+        source: 'openshift'
+      }
+    });
+  }
+
+  const grafanaDefaults = {
+    grafana: apps ? `grafana.${apps}` : '',
+    gitlab: apps ? `gitlab-git.${apps}` : '',
+    bookstack: apps ? `bookstack.${apps}` : '',
+    netbox: apps ? `netbox-netbox.${apps}` : ''
+  };
+
+  const grafanaHost = resolveComponentHostname(source, 'grafana')
+    || (isComponentSelectedInForm(source, 'grafana') ? grafanaDefaults.grafana : '');
+  if (grafanaHost) {
+    const origin = httpsOriginFromHost(grafanaHost);
+    presets.push({
+      key: 'grafana',
+      label: 'Grafana',
+      hint: grafanaHost,
+      client: {
+        id: 'grafana-client',
+        name: rhbkEnvClientLabel(env, 'Grafana'),
+        redirect_uris: `${origin}/login/generic_oauth,${origin}/*`,
+        web_origins: origin,
+        source: 'grafana'
+      }
+    });
+  }
+
+  const gitlabHost = resolveComponentHostname(source, 'gitlab')
+    || (isComponentSelectedInForm(source, 'gitlab') ? grafanaDefaults.gitlab : '');
+  if (gitlabHost) {
+    const origin = httpsOriginFromHost(gitlabHost);
+    presets.push({
+      key: 'gitlab',
+      label: 'GitLab',
+      hint: gitlabHost,
+      client: {
+        id: 'gitlab',
+        name: rhbkEnvClientLabel(env, 'GitLab'),
+        redirect_uris: `${origin}/users/auth/openid_connect/callback`,
+        web_origins: origin,
+        source: 'gitlab'
+      }
+    });
+  }
+
+  const bookstackHost = resolveComponentHostname(source, 'bookstack')
+    || (isComponentSelectedInForm(source, 'bookstack') ? grafanaDefaults.bookstack : '');
+  if (bookstackHost) {
+    const origin = httpsOriginFromHost(bookstackHost);
+    presets.push({
+      key: 'bookstack',
+      label: 'BookStack',
+      hint: bookstackHost,
+      client: {
+        id: 'bookstack',
+        name: rhbkEnvClientLabel(env, 'BookStack'),
+        redirect_uris: `${origin}/login/service`,
+        web_origins: origin,
+        source: 'bookstack'
+      }
+    });
+  }
+
+  const netboxHost = resolveComponentHostname(source, 'netbox')
+    || (isComponentSelectedInForm(source, 'netbox') ? grafanaDefaults.netbox : '');
+  if (netboxHost) {
+    const origin = httpsOriginFromHost(netboxHost);
+    presets.push({
+      key: 'netbox',
+      label: 'NetBox',
+      hint: netboxHost,
+      client: {
+        id: 'netbox',
+        name: rhbkEnvClientLabel(env, 'NetBox'),
+        redirect_uris: `${origin}/oauth/complete/oidc/`,
+        web_origins: origin,
+        source: 'netbox'
+      }
+    });
+  }
+
+  return presets;
+}
+
+/** Apply a preset client into rhbk.clients and mirror matching app OIDC client IDs. */
+function applyRhbkOidcClientPreset(copy, presetClient) {
+  if (!copy.component_config) copy.component_config = {};
+  if (!copy.component_config.rhbk) copy.component_config.rhbk = {};
+  const rhbk = copy.component_config.rhbk;
+  rhbk.clients = upsertRhbkClientRow(rhbk.clients, {
+    id: presetClient.id,
+    name: presetClient.name,
+    redirect_uris: presetClient.redirect_uris,
+    web_origins: presetClient.web_origins
+  });
+
+  if (presetClient.source === 'openshift') {
+    rhbk.client = presetClient.id;
+    rhbk.client_name = presetClient.name;
+    rhbk.client_redirect_uris = presetClient.redirect_uris;
+    rhbk.client_web_origins = presetClient.web_origins;
+    rhbk.openshift_oidc_client_id = presetClient.id;
+  }
+
+  if (presetClient.source === 'grafana') {
+    if (!copy.component_config.grafana) copy.component_config.grafana = {};
+    if (!copy.component_config.grafana.oidc) copy.component_config.grafana.oidc = {};
+    copy.component_config.grafana.oidc.client_id = presetClient.id;
+    if (copy.component_config.grafana.oidc.enabled === undefined) {
+      copy.component_config.grafana.oidc.enabled = true;
+    }
+  }
+
+  if (presetClient.source === 'bookstack') {
+    if (!copy.component_config.bookstack) copy.component_config.bookstack = {};
+    copy.component_config.bookstack.oidc_client_id = presetClient.id;
+    if (copy.component_config.bookstack.oidc_enabled === undefined) {
+      copy.component_config.bookstack.oidc_enabled = true;
+    }
+  }
+
+  if (presetClient.source === 'netbox') {
+    if (!copy.component_config.netbox) copy.component_config.netbox = {};
+    copy.component_config.netbox.oidc_client_id = presetClient.id;
+    if (copy.component_config.netbox.oidc_enabled === undefined) {
+      copy.component_config.netbox.oidc_enabled = true;
+    }
+  }
+
+  return copy;
+}
+
 function syncDevHubGitlabTokenFromGit(source, { force = false } = {}) {
   const copy = source;
   const gitToken = String(copy?.git?.token || '').trim();
@@ -313,8 +537,10 @@ function preflightDownloadBasename(payload, { scrubbed = false } = {}) {
   const hubWork = (
     hubOnly
     || payload?.aap?.hub_publish_ado_collection === true
+    || payload?.aap?.hub_publish_preflight_collections === true
     || payload?.aap?.hub_push_ee === true
     || payload?.hub?.publish_ado_collection === true
+    || payload?.hub?.publish_preflight_collections === true
     || payload?.hub?.push_ee === true
   );
   const galaxyWork = payload?.aap?.galaxy_setup_enabled === true;
@@ -495,6 +721,7 @@ function onboardKeycloakGroupsRequested(aap) {
 function aapStandaloneWorkSelected(payload) {
   return (
     payload?.aap?.hub_publish_ado_collection === true
+    || payload?.aap?.hub_publish_preflight_collections === true
     || payload?.aap?.hub_push_ee === true
     || payload?.aap?.galaxy_setup_enabled === true
     || aapAuthConfigRequested(payload)
@@ -741,10 +968,10 @@ const agentInstallerDefaults = {
   nodes: [0, 1, 2].map(defaultAgentInstallerNode)
 };
 
-const buildDefaultGalaxyCredentials = (org = 'ADO', hostname = '') => {
+const buildDefaultGalaxyCredentials = (org = 'ADO', hubHostname = '') => {
   const prefix = (org || 'ADO').trim() || 'ADO';
-  const base = String(hostname || '').replace(/\/+$/, '');
-  const hubContent = base ? `${base}/api/galaxy/content` : '';
+  const host = normalizeAapHostname(hubHostname);
+  const hubContent = host ? `${host}/api/galaxy/content` : '';
 
   return [
     {
@@ -803,6 +1030,12 @@ const buildDefaultGalaxyCredentials = (org = 'ADO', hostname = '') => {
       order: 5
     }
   ];
+};
+
+const galaxyHubHostnameForCredentials = (aap = {}) => {
+  const hub = normalizeAapHostname(aap?.hub_hostname || '');
+  if (hub) return hub;
+  return normalizeAapHostname(aap?.hostname || '');
 };
 
 /** Ensure each Galaxy cred has a unique 1-based order; sort list by order. */
@@ -914,6 +1147,32 @@ const parseAdditionalEnvironmentsList = value => {
 
 /** Disconnected default: baked EE tar inside the preflight UI image. */
 const HUB_EE_BAKED_SOURCE = 'docker-archive:/opt/ado-ee/ado-ee.docker.tar';
+/** Preflight Hub collections (excludes infra.ado — that has its own checkbox). */
+const PREFLIGHT_HUB_COLLECTION_OPTIONS = [
+  'kubernetes.core',
+  'redhat.openshift',
+  'redhat.satellite',
+  'redhat.rhel_idm',
+  'redhat.rhel_system_roles',
+  'community.general',
+  'community.grafana',
+  'amazon.aws',
+  'community.hashi_vault',
+  'community.kubernetes',
+  'freeipa.ansible_freeipa',
+  'grafana.grafana',
+  'ansible.posix',
+  'ansible.utils',
+  'ansible.controller',
+  'awx.awx',
+  'infra.controller_configuration',
+  'infra.aap_configuration',
+  'infra.aap_utilities',
+  'infra.rhacs_configuration',
+  'ansible.platform',
+  'ansible.hub',
+  'containers.podman'
+];
 /** Registry-safe Hub image name (lowercase). Contoller EE object may stay ORG-ee. */
 const DEFAULT_HUB_EE_IMAGE_NAME = 'ado-ee';
 /** Online/mirror path when "Pull source from a registry" is checked. */
@@ -952,13 +1211,20 @@ const defaults = {
   git: {
     auto_push: true,
     skip_tls_verify: true,
-    // When false (default), regenerate only group_vars/all/<environment>.
-    // When true, wipe all group_vars (+ playbooks/configs) before scaffolding.
+    // Legacy boolean; kept in sync with git.overrides.all for imported JSON.
     overwrite_generated: false,
+    overrides: {
+      // Default: incremental updates only — no wipe/force overwrite in pod git repo.
+      group_vars_current_env: false,
+      job_and_workflow_templates: false,
+      all: false
+    },
     // When true: only refresh group_vars (vars/vault) + optional git push.
     // Skips playbook regeneration and Controller org/project/JT/workflow apply.
     vars_only: false,
-    token: ''
+    token: '',
+    // Bitbucket Server HTTP access tokens need the account username for Controller SCM creds.
+    username: ''
   },
 
   components: [],
@@ -1068,7 +1334,11 @@ const defaults = {
       standalone_zip: '',
       standalone_zip_file: '',
       standalone_zip_upload_path: '',
+      standalone_zip_source: 'url',
       standalone_zip_url: '',
+      standalone_zip_git_repo: '',
+      standalone_zip_git_path: '',
+      standalone_zip_git_branch: '',
       standalone_admin_user: 'admin',
       standalone_admin_password: '',
       standalone_tls_crt: '',
@@ -1352,6 +1622,8 @@ const defaults = {
     vault_credential_name: 'ADO-vault',
     skip_tls_verify: false,
     hub_publish_ado_collection: false,
+    hub_publish_preflight_collections: false,
+    hub_publish_preflight_collection_names: [...PREFLIGHT_HUB_COLLECTION_OPTIONS],
     hub_mark_ado_validated: false,
     hub_force_ado_collection_update: false,
     // When true: run Hub collection and/or EE push without scaffolding playbooks / Contoller apply / other components
@@ -1376,6 +1648,7 @@ const defaults = {
       + 'amazon.aws, and related dependencies) so Contoller can run disconnected without Galaxy pulls.',
     // Optional Galaxy/Hub credentials + org association (default off for disconnected)
     galaxy_setup_enabled: false,
+    ignore_galaxy_cert: false,
     galaxy_hub_token: '',
     auth: {
       keycloak_oidc: {
@@ -1585,7 +1858,9 @@ function App() {
   const [activeConfigTab, setActiveConfigTab] = useState('all');
   const [showOpenShiftToken, setShowOpenShiftToken] = useState(false);
   const [showAapOauthToken, setShowAapOauthToken] = useState(false);
+  const [showAapGalaxyHubToken, setShowAapGalaxyHubToken] = useState(false);
   const [showAapAdminPassword, setShowAapAdminPassword] = useState(false);
+  const [showHtpasswdPassword, setShowHtpasswdPassword] = useState(false);
   const [showMachineCredentialSecrets, setShowMachineCredentialSecrets] = useState(false);
   const [showSatelliteSecrets, setShowSatelliteSecrets] = useState(false);
   const [rhbkZipUploading, setRhbkZipUploading] = useState(false);
@@ -1599,10 +1874,13 @@ function App() {
   const [showAwsSecrets, setShowAwsSecrets] = useState(false);
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
+  const [ansibleExtraArgsOpen, setAnsibleExtraArgsOpen] = useState(false);
   const [additionalEnvOtherEnabled, setAdditionalEnvOtherEnabled] = useState(false);
   const [additionalEnvOtherDraft, setAdditionalEnvOtherDraft] = useState('');
   const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
   const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
+  const [activeHubSubTab, setActiveHubSubTab] = useState('collections');
+  const [activeGalaxyCredTab, setActiveGalaxyCredTab] = useState(0);
   const [activeAapAuthTab, setActiveAapAuthTab] = useState('keycloak');
   const [storageClassLookup, setStorageClassLookup] = useState({
     loading: false,
@@ -1611,6 +1889,7 @@ function App() {
   });
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
+  const [rhbkAddClientOpen, setRhbkAddClientOpen] = useState(false);
   const [activePreInstallTab, setActivePreInstallTab] = useState('aap_license');
   const [importStatus, setImportStatus] = useState('');
   const [focusSection, setFocusSection] = useState('');
@@ -2060,19 +2339,47 @@ function App() {
       if (!copy.aap) copy.aap = {};
       const previousHostname = copy.aap.hostname || '';
       copy.aap.hostname = value;
-      if (Array.isArray(copy.aap.galaxy_credentials) && copy.aap.galaxy_credentials.length > 0) {
+      if (
+        Array.isArray(copy.aap.galaxy_credentials)
+        && copy.aap.galaxy_credentials.length > 0
+        && !String(copy.aap.hub_hostname || '').trim()
+      ) {
         copy.aap.galaxy_credentials = applyHostnameToGalaxyCredentials(
           copy.aap.galaxy_credentials,
-          value,
-          previousHostname
+          galaxyHubHostnameForCredentials(copy.aap),
+          galaxyHubHostnameForCredentials({ ...copy.aap, hostname: previousHostname })
         );
       }
-      if (copy.aap.container_registry_credential) {
+      if (copy.aap.container_registry_credential && !String(copy.aap.hub_hostname || '').trim()) {
         copy.aap.container_registry_credential = applyHostnameToContainerRegistryCredential(
           copy.aap.container_registry_credential,
           value,
           previousHostname
         );
+      }
+      return copy;
+    });
+  };
+
+  const setAapHubHostname = value => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      const previousHub = copy.aap.hub_hostname || '';
+      copy.aap.hub_hostname = value;
+      if (Array.isArray(copy.aap.galaxy_credentials) && copy.aap.galaxy_credentials.length > 0) {
+        copy.aap.galaxy_credentials = applyHostnameToGalaxyCredentials(
+          copy.aap.galaxy_credentials,
+          galaxyHubHostnameForCredentials(copy.aap),
+          galaxyHubHostnameForCredentials({ ...copy.aap, hub_hostname: previousHub })
+        );
+      }
+      if (copy.aap.container_registry_credential) {
+        const previousHost = String(copy.aap.container_registry_credential.host || '').replace(/\/+$/, '');
+        const nextHost = galaxyHubHostnameForCredentials(copy.aap);
+        if (!previousHost || previousHost === normalizeAapHostname(previousHub)) {
+          copy.aap.container_registry_credential.host = nextHost;
+        }
       }
       return copy;
     });
@@ -2149,22 +2456,40 @@ function App() {
       copy.aap.hub_mark_ado_validated = value;
       if (!value) {
         copy.aap.hub_force_ado_collection_update = false;
-      } else {
-        // Hub collection publish needs Galaxy/Hub API token creds + org.
-        copy.aap.galaxy_setup_enabled = true;
-        if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
-          copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
-            copy.aap.organization || 'ADO',
-            copy.aap.hostname || ''
-          );
-        }
-        if (!copy.aap.container_registry_credential) {
-          copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
-            copy.aap.organization || 'ADO',
-            copy.aap.hostname || ''
-          );
+      }
+      return copy;
+    });
+  };
+
+  const setAapHubPublishPreflightCollections = value => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      copy.aap.hub_publish_preflight_collections = value === true;
+      if (value === true) {
+        if (!Array.isArray(copy.aap.hub_publish_preflight_collection_names)
+          || copy.aap.hub_publish_preflight_collection_names.length === 0) {
+          copy.aap.hub_publish_preflight_collection_names = [...PREFLIGHT_HUB_COLLECTION_OPTIONS];
         }
       }
+      return copy;
+    });
+  };
+
+  const toggleHubPreflightCollectionName = (name, enabled) => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      const current = Array.isArray(copy.aap.hub_publish_preflight_collection_names)
+        ? [...copy.aap.hub_publish_preflight_collection_names]
+        : [...PREFLIGHT_HUB_COLLECTION_OPTIONS];
+      const next = enabled
+        ? [...new Set([...current, name])]
+        : current.filter(item => item !== name);
+      copy.aap.hub_publish_preflight_collection_names = next;
+      // Keep the parent opt-in checked while editing the list (empty = publish none
+      // until the user clears the parent checkbox or picks collections again).
+      copy.aap.hub_publish_preflight_collections = true;
       return copy;
     });
   };
@@ -2199,20 +2524,15 @@ function App() {
       copy.aap.hub_push_ee = value === true;
       if (copy.aap.hub_push_ee) {
         const org = copy.aap.organization || 'ADO';
-        // EE push needs Contoller org + Container Registry cred (avoids ImagePullBackOff).
-        copy.aap.galaxy_setup_enabled = true;
-        if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
-          copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(org, copy.aap.hostname || '');
-        } else {
-          copy.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(copy.aap.galaxy_credentials);
-        }
+        const hubHost = galaxyHubHostnameForCredentials(copy.aap);
         if (!copy.aap.container_registry_credential) {
           copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
             org,
-            copy.aap.hostname || ''
+            hubHost || copy.aap.hostname || ''
           );
         } else if (!copy.aap.container_registry_credential.host) {
-          copy.aap.container_registry_credential.host = String(copy.aap.hostname || '').replace(/\/+$/, '');
+          copy.aap.container_registry_credential.host = hubHost
+            || String(copy.aap.hostname || '').replace(/\/+$/, '');
         }
         if (
           !String(copy.aap.hub_ee_name || '').trim()
@@ -2251,33 +2571,44 @@ function App() {
     });
   };
 
-  const moveGalaxyCredential = (index, direction) => {
-    setData(prev => {
-      const copy = JSON.parse(JSON.stringify(prev));
-      if (!copy.aap) copy.aap = {};
-      const list = [...(copy.aap.galaxy_credentials || [])];
-      const target = index + direction;
-      if (target < 0 || target >= list.length) return prev;
-      const tmp = list[index];
-      list[index] = list[target];
-      list[target] = tmp;
-      copy.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(list);
-      return copy;
-    });
-  };
-
+  /** Set org search rank (1..N) among Create/update-enabled Galaxy credentials. */
   const setGalaxyCredentialOrder = (index, rawOrder) => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
       if (!copy.aap) copy.aap = {};
       const list = [...(copy.aap.galaxy_credentials || [])];
-      if (!list[index]) return prev;
+      if (!list[index] || list[index].enabled === false) return prev;
+
+      const enabled = list
+        .map((credential, credIndex) => ({ credential, credIndex }))
+        .filter(row => row.credential.enabled !== false)
+        .sort((a, b) => (
+          (Number(a.credential.order) || 0) - (Number(b.credential.order) || 0)
+          || String(a.credential.name || '').localeCompare(String(b.credential.name || ''))
+        ));
+
+      const max = enabled.length;
       const parsed = parseInt(rawOrder, 10);
-      list[index] = {
-        ...list[index],
-        order: Number.isFinite(parsed) && parsed > 0 ? parsed : index + 1
-      };
-      copy.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(list);
+      const targetOrder = Number.isFinite(parsed) && parsed > 0
+        ? Math.min(parsed, max)
+        : 1;
+
+      const currentPos = enabled.findIndex(row => row.credIndex === index);
+      if (currentPos < 0) return prev;
+      const [row] = enabled.splice(currentPos, 1);
+      enabled.splice(targetOrder - 1, 0, row);
+
+      enabled.forEach((item, pos) => {
+        list[item.credIndex] = { ...list[item.credIndex], order: pos + 1 };
+      });
+      let next = max + 1;
+      list.forEach((credential, credIndex) => {
+        if (credential.enabled === false) {
+          list[credIndex] = { ...credential, order: next };
+          next += 1;
+        }
+      });
+      copy.aap.galaxy_credentials = list;
       return copy;
     });
   };
@@ -2377,7 +2708,10 @@ function App() {
       const oldPrefix = (previous || 'ADO').trim() || 'ADO';
       const newPrefix = (value || 'ADO').trim() || 'ADO';
       if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
-        copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(newPrefix, copy.aap.hostname);
+        copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
+          newPrefix,
+          galaxyHubHostnameForCredentials(copy.aap)
+        );
       } else {
         copy.aap.galaxy_credentials = copy.aap.galaxy_credentials.map(credential => {
           if (!credential || credential.id === 'galaxy' || credential.name === 'Ansible Galaxy') {
@@ -2731,6 +3065,14 @@ function App() {
     }));
     if (merged.aap.hub_force_ado_collection_update === undefined) merged.aap.hub_force_ado_collection_update = false;
     if (merged.aap.hub_publish_ado_collection === undefined) merged.aap.hub_publish_ado_collection = false;
+    if (merged.aap.hub_publish_preflight_collections === undefined) {
+      merged.aap.hub_publish_preflight_collections = false;
+    }
+    if (!Array.isArray(merged.aap.hub_publish_preflight_collection_names)) {
+      merged.aap.hub_publish_preflight_collection_names = merged.aap.hub_publish_preflight_collections
+        ? [...PREFLIGHT_HUB_COLLECTION_OPTIONS]
+        : [];
+    }
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
     if (merged.aap.standalone_run === undefined) {
@@ -2744,6 +3086,12 @@ function App() {
       if (merged.hub.publish_ado_collection !== undefined) {
         merged.aap.hub_publish_ado_collection = merged.hub.publish_ado_collection === true;
         merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection;
+      }
+      if (merged.hub.publish_preflight_collections !== undefined) {
+        merged.aap.hub_publish_preflight_collections = merged.hub.publish_preflight_collections === true;
+      }
+      if (Array.isArray(merged.hub.publish_preflight_collection_names)) {
+        merged.aap.hub_publish_preflight_collection_names = merged.hub.publish_preflight_collection_names;
       }
       if (merged.hub.force_ado_collection_update !== undefined) {
         merged.aap.hub_force_ado_collection_update = merged.hub.force_ado_collection_update === true;
@@ -2808,6 +3156,7 @@ function App() {
       merged.aap.hub_ee_description = defaults.aap.hub_ee_description;
     }
     if (merged.aap.galaxy_setup_enabled === undefined) merged.aap.galaxy_setup_enabled = false;
+    if (merged.aap.ignore_galaxy_cert === undefined) merged.aap.ignore_galaxy_cert = false;
     if (!merged.aap.auth) merged.aap.auth = JSON.parse(JSON.stringify(defaults.aap.auth || {}));
     if (!merged.aap.auth.keycloak_oidc) {
       merged.aap.auth.keycloak_oidc = JSON.parse(JSON.stringify(defaults.aap.auth.keycloak_oidc));
@@ -2858,10 +3207,14 @@ function App() {
       merged.aap.galaxy_user_account = { ...defaults.aap.galaxy_user_account };
     }
     if (!Array.isArray(merged.aap.galaxy_credentials) || merged.aap.galaxy_credentials.length === 0) {
-      merged.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
-        merged.aap.organization || 'ADO',
-        merged.aap.hostname || ''
-      );
+      if (merged.aap.galaxy_setup_enabled === true) {
+        merged.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
+          merged.aap.organization || 'ADO',
+          galaxyHubHostnameForCredentials(merged.aap)
+        );
+      } else {
+        merged.aap.galaxy_credentials = [];
+      }
     } else {
       merged.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(merged.aap.galaxy_credentials);
     }
@@ -2877,7 +3230,22 @@ function App() {
     if (merged.git.auto_push === undefined) merged.git.auto_push = true;
     if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
     if (merged.git.overwrite_generated === undefined) merged.git.overwrite_generated = false;
+    if (!merged.git.overrides) {
+      merged.git.overrides = {
+        group_vars_current_env: false,
+        job_and_workflow_templates: false,
+        all: merged.git.overwrite_generated === true
+      };
+    }
+    merged.git.overrides = {
+      group_vars_current_env: merged.git.overrides.group_vars_current_env === true,
+      job_and_workflow_templates: merged.git.overrides.job_and_workflow_templates === true,
+      all: merged.git.overrides.all === true
+        || merged.git.overwrite_generated === true
+    };
+    merged.git.overwrite_generated = merged.git.overrides.all === true;
     if (merged.git.vars_only === undefined) merged.git.vars_only = false;
+    if (merged.git.username === undefined) merged.git.username = '';
     if (merged.additional_environments === undefined) merged.additional_environments = ['prod'];
     merged.additional_environments = parseAdditionalEnvironmentsList(merged.additional_environments);
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
@@ -3018,6 +3386,10 @@ function App() {
         hostname: payload.aap.hub_hostname,
         registry: payload.aap.hub_ee_registry,
         publish_ado_collection: payload.aap.hub_publish_ado_collection === true,
+        publish_preflight_collections: payload.aap.hub_publish_preflight_collections === true,
+        publish_preflight_collection_names: Array.isArray(payload.aap.hub_publish_preflight_collection_names)
+          ? payload.aap.hub_publish_preflight_collection_names
+          : [],
         force_ado_collection_update: payload.aap.hub_force_ado_collection_update === true,
         mark_ado_validated: payload.aap.hub_mark_ado_validated === true,
         update_only: payload.aap.hub_update_collection_only === true,
@@ -3032,41 +3404,48 @@ function App() {
           description: payload.aap.hub_ee_description
         }
       };
-      // Populate galaxy_hub_token and all galaxy credential tokens from the best
-      // available token (galaxy_hub_token → oauth_token → admin_password) so the
-      // downloaded JSON is self-contained and doesn't rely on server-side fallback.
+      // Hub/Galaxy API token is separate from Controller OAuth — only propagate the
+      // shared Hub token into empty per-credential token fields when Galaxy setup runs.
       if (payload.aap.galaxy_setup_enabled === true) {
-        const generalToken = String(payload.aap.oauth_token || '').trim();
-        const generalPassword = String(payload.aap.admin_password || '').trim();
-        const generalUser = String(payload.aap.admin_username || 'admin').trim() || 'admin';
-        const sharedHubToken = String(payload.aap.galaxy_hub_token || '').trim()
-          || generalToken
-          || generalPassword;
-        if (!String(payload.aap.galaxy_hub_token || '').trim() && sharedHubToken) {
-          payload.aap.galaxy_hub_token = sharedHubToken;
-        }
+        const sharedHubToken = String(payload.aap.galaxy_hub_token || '').trim();
+        const hubHost = galaxyHubHostnameForCredentials(payload.aap);
         if (Array.isArray(payload.aap.galaxy_credentials)) {
           payload.aap.galaxy_credentials = payload.aap.galaxy_credentials.map((cred) => {
             if (!cred || typeof cred !== 'object') return cred;
             const next = { ...cred };
-            if (!String(next.token || '').trim()) next.token = sharedHubToken;
+            if (!String(next.token || '').trim() && sharedHubToken) {
+              next.token = sharedHubToken;
+            }
+            if (hubHost && next.id && next.id !== 'galaxy' && next.name !== 'Ansible Galaxy') {
+              const contentPath = HUB_GALAXY_CONTENT_IDS[next.id];
+              if (contentPath) {
+                next.url = `${hubHost}/api/galaxy/content/${contentPath}/`;
+              }
+            }
             return next;
           });
         }
         const registry = payload.aap.container_registry_credential;
         if (registry && typeof registry === 'object' && registry.enabled !== false) {
+          const generalUser = String(payload.aap.admin_username || 'admin').trim() || 'admin';
           if (!String(registry.username || '').trim()) registry.username = generalUser;
-          if (!String(registry.password || '').trim()) {
-            registry.password = sharedHubToken || generalPassword;
+          if (!String(registry.password || '').trim() && sharedHubToken) {
+            registry.password = sharedHubToken;
           }
           if (!String(registry.host || '').trim()) {
-            registry.host = payload.aap.hub_hostname
+            registry.host = hubHost
               || String(payload.aap.hostname || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
           }
           if (payload.aap.skip_tls_verify === true && registry.verify_ssl === true) {
             registry.verify_ssl = false;
           }
         }
+        if (!sharedHubToken) {
+          payload.aap.galaxy_setup_enabled = false;
+          payload.aap.galaxy_credentials = [];
+        }
+      } else {
+        payload.aap.galaxy_credentials = [];
       }
 
       payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
@@ -3313,6 +3692,65 @@ function App() {
 
     lines.push('  --vault-password-file .vault_pass');
     return lines.join('\n');
+  };
+
+  const renderAnsibleExtraArgsCollapsible = () => {
+    const summary = String(data?.ansible?.extra_args || '').trim();
+    return (
+      <div style={{ marginTop: '4px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+          <button
+            type="button"
+            onClick={() => setAnsibleExtraArgsOpen(open => !open)}
+            aria-expanded={ansibleExtraArgsOpen}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              padding: 0,
+              fontWeight: 600,
+              cursor: 'pointer',
+              fontSize: '14px',
+              color: textColor,
+              textAlign: 'left'
+            }}
+          >
+            {ansibleExtraArgsOpen ? '−' : '+'} Additional ansible-playbook options
+          </button>
+          {labelWithHelp('', (
+            <>
+              <p>Appended after the built-in <code>-e</code> flags when the pod runs bootstrap.</p>
+              <p>Examples: <code>-e generate_playbooks=false</code>, <code>--tags bootstrap</code>, <code>-e some_custom_var=value</code></p>
+            </>
+          ))}
+          {!ansibleExtraArgsOpen && summary && (
+            <span style={{ color: mutedTextColor, fontWeight: 400, fontFamily: 'monospace', fontSize: '12px' }}>
+              {summary.length > 56 ? `${summary.slice(0, 56)}…` : summary}
+            </span>
+          )}
+        </div>
+        {ansibleExtraArgsOpen && (
+          <textarea
+            value={data.ansible?.extra_args || ''}
+            onChange={e => set('ansible.extra_args', e.target.value)}
+            placeholder="-e my_var=value --tags bootstrap"
+            spellCheck="false"
+            rows={2}
+            style={{
+              width: '100%',
+              marginTop: '6px',
+              background: fieldBg,
+              color: fieldColor,
+              fontFamily: 'monospace',
+              fontSize: `${Math.max(consoleFontSize - 1, 12)}px`,
+              lineHeight: '1.4',
+              border: `1px solid ${borderColor}`,
+              borderRadius: '4px',
+              padding: '8px'
+            }}
+          />
+        )}
+      </div>
+    );
   };
 
   const isStandaloneDisabled = () => false;
@@ -4484,7 +4922,7 @@ function App() {
 
   const renderStandaloneTlsAndRhn = (
     component,
-    { urlPath = 'standalone_rpm_url', showTls = true } = {}
+    { urlPath = 'standalone_rpm_url', showTls = true, showRhn = true } = {}
   ) => {
     const cfg = data.component_config?.[component] || {};
     const urlSet = String(cfg[urlPath] || '').trim().length > 0;
@@ -4500,18 +4938,22 @@ function App() {
           `component_config.${component}.standalone_tls_key`,
           'PEM private key paired with tls.crt.'
         )}
-        <GridItem span={12}>
-          <p style={{ color: mutedTextColor, margin: '8px 0 0' }}>
-            Optional RHN org + activation key. Used when the VM is unregistered and an RPM/zip
-            URL (or dnf deps) needs a subscription. Skip if already registered or using Satellite.
-            {urlSet ? ' RPM/zip URL is set, so RHN may be needed for deps.' : ''}
-          </p>
-        </GridItem>
-        {renderTextField('RHN Org ID (optional)', `component_config.${component}.standalone_rhn_org_id`, 'text')}
-        {renderTextField(
-          'RHN Activation key (optional)',
-          `component_config.${component}.standalone_rhn_activation_key`,
-          'password'
+        {showRhn && (
+          <>
+            <GridItem span={12}>
+              <p style={{ color: mutedTextColor, margin: '8px 0 0' }}>
+                Optional RHN org + activation key. Used when the VM is unregistered and an RPM/zip
+                URL (or dnf deps) needs a subscription. Skip if already registered or using Satellite.
+                {urlSet ? ' RPM/zip URL is set, so RHN may be needed for deps.' : ''}
+              </p>
+            </GridItem>
+            {renderTextField('RHN Org ID (optional)', `component_config.${component}.standalone_rhn_org_id`, 'text')}
+            {renderTextField(
+              'RHN Activation key (optional)',
+              `component_config.${component}.standalone_rhn_activation_key`,
+              'password'
+            )}
+          </>
         )}
       </>
     );
@@ -4558,7 +5000,28 @@ function App() {
     usersDn: 'LDAP users DN. Example: cn=users,cn=accounts,dc=server,dc=lab.',
     userAttribute: 'User attribute used for the token claim. Example: memberOf.',
     tokenClaimType: 'Token claim type. Example: String or JSON.',
-    standaloneZip: 'Select the official rhbk-*.zip. Generate copies it to files/ in the playbook repo so AAP can copy it from the controller/EE. Prefer Zip URL if the file is hosted.'
+    standaloneZip: (
+      <>
+        <p>Official <code>rhbk-*.zip</code> for the RHEL VM install.</p>
+        <p>
+          The Contoller job copies or downloads the zip onto the Keycloak host and
+          unpacks it there. The preflight pod only stages an uploaded zip into
+          <code>files/</code> — it does not unzip or install Keycloak.
+        </p>
+      </>
+    ),
+    standaloneZipSource: (
+      <>
+        <p><strong>HTTP / Satellite URL:</strong> Keycloak host downloads the zip (example
+        <code>http://sat.server.lab/pub/rhbk-26.6.5.zip</code>).</p>
+        <p><strong>Git repo:</strong> Keycloak host clones the repo and uses the zip path inside it.</p>
+        <p><strong>Upload:</strong> stage zip into bootstrap <code>files/</code>; Contoller copies it to the host.</p>
+      </>
+    ),
+    standaloneZipUrl: 'HTTP(S) URL the Keycloak host can reach. Satellite example: http://sat.server.lab/pub/rhbk.zip',
+    standaloneZipGitRepo: 'Git clone URL containing the RHBK zip. Example: https://gitlab.example.com/lab/rhbk-artifacts.git',
+    standaloneZipGitPath: 'Path to the zip inside the repo. Example: rhbk-26.6.5.zip or dist/rhbk.zip',
+    standaloneZipGitBranch: 'Optional branch or tag. Default: repo default branch.'
   };
 
   const idmHelp = {
@@ -4673,10 +5136,30 @@ echo $TOKEN
   };
 
   const gitHelp = {
-    overwriteGenerated: (
+    gitOverrides: (
       <>
-        <p>Off (default): only refresh <code>group_vars/all/&lt;env&gt;</code> for the selected Environment Type; sibling envs (for example <code>prod</code> when generating <code>dev</code>) are kept.</p>
-        <p>On: delete all <code>group_vars</code>, <code>playbooks</code>, and <code>configs</code> before scaffolding.</p>
+        <p><strong>Default (all unchecked):</strong> keep the pod&apos;s local git clone and only write/commit bootstrap changes — no wipe or force overwrite.</p>
+        <p><strong>group_vars/all/&lt;env&gt;:</strong> remove and regenerate vars/vault for the current Environment Type only.</p>
+        <p><strong>Job and workflow templates:</strong> remove and regenerate <code>configs/job_templates</code> and <code>configs/workflows</code>.</p>
+        <p><strong>All:</strong> re-clone from Git and wipe <code>group_vars</code>, <code>playbooks</code>, and <code>configs</code> before scaffolding.</p>
+      </>
+    ),
+    overrideGroupVarsEnv: (
+      <>
+        <p>Delete <code>group_vars/all/&lt;current env&gt;</code> in the pod git repo and regenerate vars/vault with force overwrite.</p>
+        <p>Other environments, playbooks, and configs are preserved.</p>
+      </>
+    ),
+    overrideJobWorkflowTemplates: (
+      <>
+        <p>Delete <code>configs/job_templates</code> and <code>configs/workflows</code> and regenerate from the collection.</p>
+        <p>Existing job/workflow YAML files are not modified when unchecked.</p>
+      </>
+    ),
+    overrideAll: (
+      <>
+        <p>Re-clone the bootstrap repo from Git and remove all <code>group_vars</code>, <code>playbooks</code>, and <code>configs</code> before bootstrap runs.</p>
+        <p>Equivalent to enabling all override scopes.</p>
       </>
     ),
     skipTlsVerify: (
@@ -4709,6 +5192,73 @@ echo $TOKEN
         <p>Build the preflight UI image and apply <code>deploy/preflight.yaml</code> on the OpenShift cluster using API host/token from OpenShift Configuration.</p>
         <p>Use this to run preflight on the cluster portal (not the local pod). Poll logs in the console after starting.</p>
         <p>Local testing: <code>./restart_pod.sh</code> runs bootstrap in a pod on this machine instead.</p>
+      </>
+    ),
+    hubPublishCollection: (
+      <>
+        <p>
+          Publishes <code>infra.ado</code> into Private Automation Hub validated content when it is
+          missing, or refreshes it when you also enable force below.
+        </p>
+        <p>Leave off if Hub already has the collection Controller should use.</p>
+      </>
+    ),
+    hubPublishPreflightCollections: (
+      <>
+        <p>
+          Publishes selected preflight-baked collection tarballs into Hub
+          validated when missing. Does not include <code>infra.ado</code>.
+        </p>
+        <p>
+          Use the dropdown to pick which collections to upload. Already-installed
+          versions are skipped (no force for these — only <code>infra.ado</code>
+          has a force checkbox).
+        </p>
+      </>
+    ),
+    hubForceCollectionUpdate: (
+      <>
+        <p>
+          Overwrites an existing <code>infra.ado</code> in Hub validated content.
+          Additional playbook collections always skip when the version already exists.
+        </p>
+        <p>Without this, an already-installed <code>infra.ado</code> is left as-is.</p>
+      </>
+    ),
+    containerRegistryCredential: (
+      <>
+        <p>
+          Contoller <strong>Container Registry</strong> credential used to pull execution
+          environment images (for example the ADO EE from Private Automation Hub).
+        </p>
+        <p>
+          Without this, Contoller jobs can fail with <code>ImagePullBackOff</code> when the EE
+          lives on Hub. Galaxy credentials above are for collection sync; this one is for
+          container image pull.
+        </p>
+        <p>
+          Host is usually the same Hub/AAP hostname. Username/password are optional when the
+          registry allows anonymous pull or uses the Hub token path your Contoller already has.
+        </p>
+      </>
+    ),
+    hubExecutionEnvironment: (
+      <>
+        <p>
+          Pushes ADO EE into Private Automation Hub with <code>skopeo</code> inside this pod, then
+          optionally creates a Controller execution environment (default{' '}
+          <code>{defaultOrgEeName(data.aap?.organization || 'ADO')}</code>).
+        </p>
+        <p>
+          The UI image ships a baked archive at{' '}
+          <code>docker-archive:/opt/ado-ee/ado-ee.docker.tar</code> — no host podman socket and no
+          runtime internet. Registry login uses General → Hub / Galaxy API token.
+        </p>
+        <p>
+          Without ADO EE, Controller jobs need Galaxy credentials already on the organization so
+          project sync can install vendored <code>infra.ado</code> (Galaxy tab creates them if
+          missing; leave it off if they already exist in Controller).
+        </p>
       </>
     )
   };
@@ -4962,6 +5512,7 @@ echo $TOKEN
     switch (tab) {
       case 'client': {
         const clients = data.component_config?.rhbk?.clients || [];
+        const presets = buildRhbkOidcClientPresets(data);
         const updateClient = (index, key, value) => {
           setData(prev => {
             const copy = JSON.parse(JSON.stringify(prev));
@@ -4978,14 +5529,46 @@ echo $TOKEN
           setData(prev => {
             const copy = JSON.parse(JSON.stringify(prev));
             if (!copy.component_config?.rhbk?.clients) return copy;
-            copy.component_config.rhbk.clients = copy.component_config.rhbk.clients.filter((_, i) => i !== index);
+            const list = copy.component_config.rhbk.clients.filter((_, i) => i !== index);
+            copy.component_config.rhbk.clients = list.length
+              ? list
+              : [{ id: '', name: '', redirect_uris: '', web_origins: '' }];
             const firstClient = copy.component_config.rhbk.clients[0];
             copy.component_config.rhbk.client = firstClient?.id || '';
             return copy;
           });
         };
+        const addBlankClient = () => {
+          setData(prev => {
+            const copy = JSON.parse(JSON.stringify(prev));
+            if (!copy.component_config.rhbk.clients) copy.component_config.rhbk.clients = [];
+            copy.component_config.rhbk.clients.push({ id: '', name: '', redirect_uris: '', web_origins: '' });
+            return copy;
+          });
+        };
+        const addPresetClient = preset => {
+          setRhbkAddClientOpen(false);
+          if (!preset?.client) return;
+          setData(prev => applyRhbkOidcClientPreset(JSON.parse(JSON.stringify(prev)), preset.client));
+        };
+        const addAllPresets = () => {
+          setRhbkAddClientOpen(false);
+          setData(prev => {
+            let copy = JSON.parse(JSON.stringify(prev));
+            buildRhbkOidcClientPresets(copy).forEach(preset => {
+              copy = applyRhbkOidcClientPreset(copy, preset.client);
+            });
+            return copy;
+          });
+        };
         return (
           <Grid hasGutter>
+            <GridItem span={12}>
+              <p style={{ margin: 0, color: mutedTextColor, fontSize: '14px' }}>
+                Add Keycloak OIDC clients for apps you already selected. Hostnames come from
+                OpenShift apps domain / Grafana / GitLab / BookStack / NetBox fields on this form.
+              </p>
+            </GridItem>
             {clients.map((client, index) => (
               <GridItem span={12} key={`rhbk-client-${index}`}>
                 <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
@@ -5005,13 +5588,51 @@ echo $TOKEN
                 </div>
               </GridItem>
             ))}
-            <GridItem span={12}>
-              <Button variant="secondary" onClick={() => setData(prev => {
-                const copy = JSON.parse(JSON.stringify(prev));
-                if (!copy.component_config.rhbk.clients) copy.component_config.rhbk.clients = [];
-                copy.component_config.rhbk.clients.push({ id: '', name: '', redirect_uris: '', web_origins: '' });
-                return copy;
-              })}>Add Client</Button>
+            <GridItem span={12} style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <Dropdown
+                isOpen={rhbkAddClientOpen}
+                onOpenChange={setRhbkAddClientOpen}
+                toggle={toggleRef => (
+                  <MenuToggle
+                    ref={toggleRef}
+                    onClick={() => setRhbkAddClientOpen(open => !open)}
+                    isExpanded={rhbkAddClientOpen}
+                    variant="secondary"
+                  >
+                    Add Client
+                  </MenuToggle>
+                )}
+              >
+                <DropdownList>
+                  <DropdownItem key="blank" onClick={() => { setRhbkAddClientOpen(false); addBlankClient(); }}>
+                    Blank client
+                  </DropdownItem>
+                  {presets.map(preset => (
+                    <DropdownItem
+                      key={preset.key}
+                      description={preset.hint}
+                      onClick={() => addPresetClient(preset)}
+                    >
+                      {preset.label}
+                    </DropdownItem>
+                  ))}
+                  {presets.length === 0 && (
+                    <DropdownItem key="none" isDisabled>
+                      No selected apps with hostnames yet — set apps domain / select Grafana, GitLab, …
+                    </DropdownItem>
+                  )}
+                  {presets.length > 1 && (
+                    <DropdownItem key="all" onClick={addAllPresets}>
+                      Add all from form ({presets.length})
+                    </DropdownItem>
+                  )}
+                </DropdownList>
+              </Dropdown>
+              {presets.length > 0 && (
+                <span style={{ fontSize: '13px', color: mutedTextColor }}>
+                  Ready: {presets.map(p => p.label).join(', ')}
+                </span>
+              )}
             </GridItem>
           </Grid>
         );
@@ -5111,35 +5732,79 @@ echo $TOKEN
           <Grid hasGutter>
             {renderTextField('VM hostname (KC_HOSTNAME)', 'component_config.rhbk.standalone_hostname', 'text')}
             <GridItem span={12}>
-              <FormGroup label={labelWithHelp('RHBK zip', rhbkHelp.standaloneZip)}>
-                <input
-                  id="rhbk-standalone-zip-file"
-                  type="file"
-                  accept=".zip,application/zip"
-                  disabled={rhbkZipUploading}
-                  onChange={event => {
-                    uploadRhbkStandaloneZip(event.target.files?.[0]);
-                    event.target.value = '';
-                  }}
-                  style={{ display: 'block', marginBottom: '8px' }}
-                />
-                <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
-                  {rhbkZipUploading
-                    ? 'Uploading zip to the preflight workspace…'
-                    : (data.component_config?.rhbk?.standalone_zip_file
-                      ? `Selected: ${data.component_config.rhbk.standalone_zip_file}. Generated repo path: files/${data.component_config.rhbk.standalone_zip_file}.`
-                      : 'Choose rhbk-*.zip from this workstation. It is staged and written to files/ on generate (same pattern as the Satellite manifest).')}
-                </div>
-                {rhbkZipError && (
-                  <div style={{ color: '#c9190b', fontSize: '13px', marginTop: '6px' }}>{rhbkZipError}</div>
-                )}
-                {data.component_config?.rhbk?.standalone_zip_file && (
-                  <Button variant="link" onClick={clearRhbkStandaloneZip}>Clear zip</Button>
-                )}
+              <FormGroup label={labelWithHelp('RHBK zip source', rhbkHelp.standaloneZipSource)}>
+                <select
+                  value={data.component_config?.rhbk?.standalone_zip_source || 'url'}
+                  onChange={e => set('component_config.rhbk.standalone_zip_source', e.target.value)}
+                  style={{ width: '100%', padding: '8px' }}
+                >
+                  <option value="url">HTTP / Satellite URL (host downloads)</option>
+                  <option value="git">Git repo (host clones, then uses zip path)</option>
+                  <option value="upload">Upload zip into bootstrap files/ (Contoller copies to host)</option>
+                </select>
               </FormGroup>
             </GridItem>
-            {renderTextField('Zip URL (optional)', 'component_config.rhbk.standalone_zip_url', 'text')}
-            {renderStandaloneTlsAndRhn('rhbk', { urlPath: 'standalone_zip_url' })}
+            {(data.component_config?.rhbk?.standalone_zip_source || 'url') === 'url' && (
+              renderTextField(
+                'Zip URL (Satellite or HTTP)',
+                'component_config.rhbk.standalone_zip_url',
+                'text',
+                rhbkHelp.standaloneZipUrl
+              )
+            )}
+            {(data.component_config?.rhbk?.standalone_zip_source || 'url') === 'git' && (
+              <>
+                {renderTextField(
+                  'Git repo URL',
+                  'component_config.rhbk.standalone_zip_git_repo',
+                  'text',
+                  rhbkHelp.standaloneZipGitRepo
+                )}
+                {renderTextField(
+                  'Zip path in repo',
+                  'component_config.rhbk.standalone_zip_git_path',
+                  'text',
+                  rhbkHelp.standaloneZipGitPath
+                )}
+                {renderTextField(
+                  'Git branch / tag (optional)',
+                  'component_config.rhbk.standalone_zip_git_branch',
+                  'text',
+                  rhbkHelp.standaloneZipGitBranch
+                )}
+              </>
+            )}
+            {(data.component_config?.rhbk?.standalone_zip_source || 'url') === 'upload' && (
+              <GridItem span={12}>
+                <FormGroup label={labelWithHelp('RHBK zip upload', rhbkHelp.standaloneZip)}>
+                  <input
+                    id="rhbk-standalone-zip-file"
+                    type="file"
+                    accept=".zip,application/zip"
+                    disabled={rhbkZipUploading}
+                    onChange={event => {
+                      uploadRhbkStandaloneZip(event.target.files?.[0]);
+                      event.target.value = '';
+                    }}
+                    style={{ display: 'block', marginBottom: '8px' }}
+                  />
+                  <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
+                    {rhbkZipUploading
+                      ? 'Uploading zip to the preflight workspace…'
+                      : (data.component_config?.rhbk?.standalone_zip_file
+                        ? `Selected: ${data.component_config.rhbk.standalone_zip_file}. Generated repo path: files/${data.component_config.rhbk.standalone_zip_file}. Contoller JT copies this to the Keycloak host and unpacks there.`
+                        : 'Choose rhbk-*.zip from this workstation. Staged into files/ on generate; Contoller JT copies it to the Keycloak host and unpacks there (pod does not install).')}
+                  </div>
+                  {rhbkZipError && (
+                    <div style={{ color: '#c9190b', fontSize: '13px', marginTop: '6px' }}>{rhbkZipError}</div>
+                  )}
+                  {data.component_config?.rhbk?.standalone_zip_file && (
+                    <Button variant="link" onClick={clearRhbkStandaloneZip}>Clear zip</Button>
+                  )}
+                </FormGroup>
+              </GridItem>
+            )}
+            {renderStandaloneTlsAndRhn('rhbk', { urlPath: 'standalone_zip_url', showRhn: false })}
             {renderTextField('Admin user', 'component_config.rhbk.standalone_admin_user', 'text')}
             {renderTextField('Admin password', 'component_config.rhbk.standalone_admin_password', 'password')}
           </Grid>
@@ -5564,6 +6229,9 @@ echo $TOKEN
       copy.component_config.rhbk.standalone_zip_file = filename || '';
       copy.component_config.rhbk.standalone_zip_upload_path = uploadPath || '';
       copy.component_config.rhbk.standalone_zip = filename ? `files/${filename}` : '';
+      if (filename) {
+        copy.component_config.rhbk.standalone_zip_source = 'upload';
+      }
       return copy;
     });
   };
@@ -6792,7 +7460,16 @@ echo $TOKEN
               </GridItem>
               <GridItem span={4}>
                 <FormGroup label="Password">
-                  <TextInput type="password" value={user.password || ''} onChange={(_, v) => updateUser(index, 'password', v)} />
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <TextInput
+                      type={showHtpasswdPassword ? 'text' : 'password'}
+                      value={user.password || ''}
+                      onChange={(_, v) => updateUser(index, 'password', v)}
+                    />
+                    <Button variant="secondary" onClick={() => setShowHtpasswdPassword(!showHtpasswdPassword)}>
+                      {showHtpasswdPassword ? 'Hide' : 'Show'}
+                    </Button>
+                  </div>
                 </FormGroup>
               </GridItem>
               <GridItem span={4}>
@@ -8195,6 +8872,14 @@ echo $TOKEN
               && data.git?.auto_push !== false && (
               <div style={{ color: '#8a6d3b', fontSize: '13px', marginTop: '8px' }}>
                 Auto-push is on, but no Git token is set. Add it on Git Configuration or turn auto-push off.
+              </div>
+            )}
+            {data.scm_tool === 'bitbucket'
+              && data.aap?.enabled !== false
+              && !installAapFullRequested(data)
+              && !String(data.git?.username || '').trim() && (
+              <div style={{ color: '#8a6d3b', fontSize: '13px', marginTop: '8px' }}>
+                Bitbucket is selected — set Bitbucket username on Git Configuration so Controller project sync can authenticate (username + HTTP access token, not OAuth2).
               </div>
             )}
           </CardBody>
@@ -9696,7 +10381,7 @@ ${vaultYaml}
                   </FormGroup>
                   {data.scm_tool === 'bitbucket' && (
                     <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
-                      Bitbucket uses <code>Authorization: Bearer</code> for git clone/push.
+                      Local bootstrap git uses <code>Authorization: Bearer</code>. Controller project sync uses your Bitbucket username plus HTTP access token (not OAuth2).
                     </p>
                   )}
 
@@ -9716,16 +10401,88 @@ ${vaultYaml}
 
                   <br />
 
+                  <Title headingLevel="h4">
+                    {labelWithHelp('Git overrides (local pod git repo)', gitHelp.gitOverrides)}
+                  </Title>
+                  <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: '8px', fontSize: '13px' }}>
+                    Default is all unchecked: bootstrap only applies changes to the pod clone (no remove or force overwrite).
+                  </p>
+
                   <Checkbox
-                    id="git-overwrite-generated"
-                    label={labelWithHelp('Overwrite all generated content (all environments)', gitHelp.overwriteGenerated)}
-                    isChecked={data.git.overwrite_generated === true}
+                    id="git-override-group-vars-env"
+                    label={labelWithHelp(
+                      `Override group_vars/all/${data.environment || 'env'} (current Environment Type)`,
+                      gitHelp.overrideGroupVarsEnv
+                    )}
+                    isChecked={data.git?.overrides?.group_vars_current_env === true}
+                    isDisabled={data.git.vars_only === true || data.git?.overrides?.all === true}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.git) copy.git = {};
+                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
+                        copy.git.overrides.group_vars_current_env = v === true;
+                        if (!v) copy.git.overrides.all = false;
+                        copy.git.overwrite_generated = copy.git.overrides.all === true;
+                        return copy;
+                      });
+                    }}
+                  />
+
+                  <br />
+
+                  <Checkbox
+                    id="git-override-job-workflow-templates"
+                    label={labelWithHelp(
+                      'Override job and workflow templates (configs/job_templates and configs/workflows)',
+                      gitHelp.overrideJobWorkflowTemplates
+                    )}
+                    isChecked={data.git?.overrides?.job_and_workflow_templates === true}
+                    isDisabled={data.git.vars_only === true || data.git?.overrides?.all === true}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.git) copy.git = {};
+                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
+                        copy.git.overrides.job_and_workflow_templates = v === true;
+                        if (!v) copy.git.overrides.all = false;
+                        copy.git.overwrite_generated = copy.git.overrides.all === true;
+                        return copy;
+                      });
+                    }}
+                  />
+
+                  <br />
+
+                  <Checkbox
+                    id="git-override-all"
+                    label={labelWithHelp(
+                      'Override all (re-clone and wipe group_vars, playbooks, and configs)',
+                      gitHelp.overrideAll
+                    )}
+                    isChecked={data.git?.overrides?.all === true}
                     isDisabled={data.git.vars_only === true}
-                    onChange={(_, v) => set('git.overwrite_generated', v)}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.git) copy.git = {};
+                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
+                        copy.git.overrides.all = v === true;
+                        if (v === true) {
+                          copy.git.overrides.group_vars_current_env = true;
+                          copy.git.overrides.job_and_workflow_templates = true;
+                        } else {
+                          copy.git.overrides.group_vars_current_env = false;
+                          copy.git.overrides.job_and_workflow_templates = false;
+                        }
+                        copy.git.overwrite_generated = copy.git.overrides.all === true;
+                        return copy;
+                      });
+                    }}
                   />
                   {data.git.vars_only === true && (
                     <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
-                      Overwrite-all is disabled while Vars / Vault files only is checked.
+                      Git overrides are disabled while Vars / Vault files only is checked (vars for the current env are always regenerated).
                     </p>
                   )}
 
@@ -9751,6 +10508,20 @@ ${vaultYaml}
                   </FormGroup>
 
                   <br />
+
+                  {data.scm_tool === 'bitbucket' && (
+                    <>
+                      <FormGroup label="Bitbucket username" isRequired>
+                        <TextInput
+                          value={data.git.username}
+                          onChange={(_, v) => set('git.username', v)}
+                          placeholder="Account username for HTTP access token"
+                        />
+                      </FormGroup>
+
+                      <br />
+                    </>
+                  )}
 
                   <FormGroup label="Git Token">
                     <div style={{ display: 'flex', gap: '8px' }}>
@@ -9805,9 +10576,11 @@ ${vaultYaml}
                   <br />
                   <div style={{ color: mutedTextColor, marginBottom: '8px' }}>
                     Click <strong>Run Bootstrap</strong> below — the pod runs this ansible-playbook locally
-                    (no AAP API calls). Add optional flags or <code>-e</code> vars in the box under the preview.
+                    (no AAP API calls). Expand additional options on the General tab or below.
                     For a greenfield operator install, open the <strong>Install AAP</strong> tab (expand this card).
                   </div>
+                  {renderAnsibleExtraArgsCollapsible()}
+                  <br />
                   <textarea
                     readOnly
                     spellCheck="false"
@@ -9825,32 +10598,6 @@ ${vaultYaml}
                       padding: '14px'
                     }}
                   />
-                  <br />
-                  <FormGroup
-                    label={labelWithHelp(
-                      'Additional ansible-playbook options',
-                      'Appended after the built-in -e flags when the pod runs bootstrap. Examples: -e generate_playbooks=false --tags bootstrap -e some_custom_var=value'
-                    )}
-                  >
-                    <textarea
-                      value={data.ansible?.extra_args || ''}
-                      onChange={e => set('ansible.extra_args', e.target.value)}
-                      placeholder={'-e my_var=value --tags bootstrap'}
-                      spellCheck="false"
-                      rows={3}
-                      style={{
-                        width: '100%',
-                        background: fieldBg,
-                        color: fieldColor,
-                        fontFamily: 'monospace',
-                        fontSize: `${consoleFontSize}px`,
-                        lineHeight: '1.45',
-                        border: `1px solid ${borderColor}`,
-                        borderRadius: '4px',
-                        padding: '10px'
-                      }}
-                    />
-                  </FormGroup>
                 </>
               )}
 
@@ -9986,6 +10733,24 @@ ${vaultYaml}
                           </div>
                         </FormGroup>
                       </GridItem>
+                      <GridItem span={6}>
+                        <FormGroup
+                          label="Hub / Galaxy API token"
+                          helperText="Hub User Access token (Authorization: Token). Used by ansible.hub for namespace/upload when Contoller OAuth is rejected by Hub, and for Contoller org Galaxy credentials. Keep Contoller OAuth set for Contoller API and Pulp URI calls."
+                        >
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <TextInput
+                              type={showAapGalaxyHubToken ? 'text' : 'password'}
+                              value={data.aap.galaxy_hub_token}
+                              onChange={(_, v) => set('aap.galaxy_hub_token', v)}
+                              placeholder="Hub API token (separate from Controller OAuth)"
+                            />
+                            <Button variant="secondary" onClick={() => setShowAapGalaxyHubToken(!showAapGalaxyHubToken)}>
+                              {showAapGalaxyHubToken ? 'Hide' : 'Show'}
+                            </Button>
+                          </div>
+                        </FormGroup>
+                      </GridItem>
 
                       <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
                       <GridItem span={6}>
@@ -10036,6 +10801,7 @@ ${vaultYaml}
                                   copy.git.vars_only = v === true;
                                   if (v === true) {
                                     copy.git.overwrite_generated = false;
+                                    copy.git.overrides = { ...defaults.git.overrides };
                                     if (!copy.aap) copy.aap = {};
                                     copy.aap.standalone_run = false;
                                     copy.aap.hub_update_collection_only = false;
@@ -10070,7 +10836,18 @@ ${vaultYaml}
                               components for a full bootstrap.
                             </div>
                           )}
+                          {data.aap?.enabled !== false && (
+                            <div style={{ color: mutedTextColor, fontSize: '13px', margin: '8px 0 0' }}>
+                              <strong>Using AAP:</strong> bootstrap still runs{' '}
+                              <code>ansible-playbook run-ado-scaffolding.yml</code> in the pod, then applies
+                              Controller/Hub config via the AAP API. Expand additional options below for extra{' '}
+                              <code>-e</code> flags.
+                            </div>
+                          )}
                         </FormGroup>
+                      </GridItem>
+                      <GridItem span={12}>
+                        {renderAnsibleExtraArgsCollapsible()}
                       </GridItem>
                       <GridItem span={12}>
                         <Button
@@ -10118,11 +10895,11 @@ ${vaultYaml}
                             background: 'rgba(240, 173, 78, 0.08)'
                           }}
                         >
-                          Before running: make sure General → AAP Hostname URL, Organization Name, and
-                          Admin password (or OAuth token) are populated. Hub talks to that AAP/Hub
-                          endpoint using those General credentials. Local laptop/podman EE push does
-                          not need a separate registry username/password — leave Admin password blank
-                          and set OAuth token; push logs in as unused + token.
+                          Before running: set General → AAP Hostname URL and Organization Name.
+                          Keep Contoller OAuth and Admin password set. Also set Hub / Galaxy API
+                          token when Hub User Access tokens are required — ansible.hub uses
+                          Token auth and will try Hub token, then Contoller OAuth, then admin
+                          basic until one works.
                         </div>
                       </GridItem>
                       <GridItem span={12}>
@@ -10138,12 +10915,16 @@ ${vaultYaml}
                         >
                           <TextInput
                             value={data.aap.hub_hostname || ''}
-                            onChange={(_, v) => set('aap.hub_hostname', v)}
+                            onChange={(_, v) => setAapHubHostname(v)}
                             placeholder={
                               hostnameFromUrl(data.aap.hostname)
                               || 'aap.example.com'
                             }
-                            isRequired={standaloneRun && (data.aap.hub_publish_ado_collection || data.aap.hub_push_ee)}
+                            isRequired={standaloneRun && (
+                              data.aap.hub_publish_ado_collection
+                              || data.aap.hub_publish_preflight_collections
+                              || data.aap.hub_push_ee
+                            )}
                           />
                           <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 0' }}>
                             API/registry host for Private Automation Hub (host only, no path). Used for
@@ -10152,184 +10933,264 @@ ${vaultYaml}
                         </FormGroup>
                       </GridItem>
                       <GridItem span={12}>
-                        <FormGroup label="Collections">
-                          <Checkbox
-                            label="Install or update infra.ado collection in Hub validated content (optional)"
-                            isChecked={data.aap.hub_publish_ado_collection === true}
-                            onChange={(_, v) => setAapHubValidated(v)}
-                          />
-                          <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 8px' }}>
-                            Publishes <code>infra.ado</code> into Private Automation Hub validated content
-                            when it is missing, or refreshes it when you also enable force below.
-                            Leave off if Hub already has the collection Contoller should use.
-                          </div>
-                          <Checkbox
-                            label="Force infra.ado collection update if already installed"
-                            isChecked={data.aap.hub_force_ado_collection_update}
-                            isDisabled={!data.aap.hub_publish_ado_collection}
-                            onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
-                          />
-                          <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 0' }}>
-                            Overwrites an existing <code>infra.ado</code> in Hub validated content.
-                            Without this, an already-installed collection is left as-is.
-                          </div>
-                        </FormGroup>
+                        <Tabs
+                          activeKey={activeHubSubTab}
+                          onSelect={(_, key) => setActiveHubSubTab(key)}
+                        >
+                          <Tab eventKey="collections" title="Collections" />
+                          <Tab eventKey="execution_environment" title="Execution Environment" />
+                        </Tabs>
                       </GridItem>
-                      <GridItem span={12}>
-                        <FormGroup label="Execution environment (optional)">
-                          <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
-                            Pushes ADO EE into Private Automation Hub with <code>skopeo</code>
-                            <strong> inside this pod</strong>, then optionally creates a Contoller
-                            execution environment (default{' '}
-                            <code>{defaultOrgEeName(data.aap.organization || 'ADO')}</code>).
-                            The UI image ships a baked archive at{' '}
-                            <code>docker-archive:/opt/ado-ee/ado-ee.docker.tar</code> — no host podman
-                            socket and no runtime internet. Registry login uses the AAP admin
-                            password / token from this form (lab Hub only).
-                            Without ADO EE, Contoller jobs need Galaxy credentials already on the
-                            organization so project sync can install vendored{' '}
-                            <code>infra.ado</code> (Galaxy tab creates them if missing; leave it off
-                            if they already exist in Contoller).
-                          </p>
-                          <Checkbox
-                            id="aap-hub-push-ee"
-                            label="Push ADO EE image to AAP Hub (optional)"
-                            isChecked={data.aap.hub_push_ee === true}
-                            onChange={(_, v) => setAapHubPushEe(v)}
-                          />
-                        </FormGroup>
-                      </GridItem>
-                      {data.aap.hub_push_ee && (
+                      {activeHubSubTab === 'collections' && (
+                        <GridItem span={12}>
+                          <FormGroup label={labelWithHelp('Collections', (
+                            <>
+                              <p>Publish or refresh vendored collections in Private Automation Hub validated content.</p>
+                              <p><code>infra.ado</code> is separate from the additional playbook-requirement tarballs.</p>
+                              <p>Everything skips when the version already exists unless Force is checked for <code>infra.ado</code> only.</p>
+                            </>
+                          ))}>
+                            <Checkbox
+                              label={labelWithHelp(
+                                'Install or update infra.ado collection in Hub validated content (optional)',
+                                aapHelp.hubPublishCollection
+                              )}
+                              isChecked={data.aap.hub_publish_ado_collection === true}
+                              onChange={(_, v) => setAapHubValidated(v)}
+                            />
+                            <div style={{ marginTop: '12px' }}>
+                              <Checkbox
+                                label={labelWithHelp(
+                                  'Force infra.ado collection update if already installed',
+                                  aapHelp.hubForceCollectionUpdate
+                                )}
+                                isChecked={data.aap.hub_force_ado_collection_update}
+                                isDisabled={!data.aap.hub_publish_ado_collection}
+                                onChange={(_, v) => set('aap.hub_force_ado_collection_update', v)}
+                              />
+                            </div>
+                            <div style={{ marginTop: '12px' }}>
+                              <Checkbox
+                                id="aap-hub-publish-preflight-collections"
+                                label={labelWithHelp(
+                                  'Install additional collections that are requirements for playbooks',
+                                  aapHelp.hubPublishPreflightCollections
+                                )}
+                                isChecked={data.aap.hub_publish_preflight_collections === true}
+                                onChange={(_, v) => setAapHubPublishPreflightCollections(v)}
+                              />
+                            </div>
+                            {data.aap.hub_publish_preflight_collections === true && (
+                              <div style={{ marginTop: '10px' }}>
+                                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center', marginBottom: '8px' }}>
+                                  <span style={{ fontWeight: 600 }}>
+                                    Select collections
+                                    {' '}
+                                    ({(data.aap.hub_publish_preflight_collection_names || []).length}/
+                                    {PREFLIGHT_HUB_COLLECTION_OPTIONS.length})
+                                  </span>
+                                  <Button
+                                    variant="link"
+                                    isInline
+                                    onClick={() => {
+                                      set(
+                                        'aap.hub_publish_preflight_collection_names',
+                                        [...PREFLIGHT_HUB_COLLECTION_OPTIONS]
+                                      );
+                                    }}
+                                  >
+                                    Select all
+                                  </Button>
+                                  <Button
+                                    variant="link"
+                                    isInline
+                                    onClick={() => {
+                                      set('aap.hub_publish_preflight_collection_names', []);
+                                    }}
+                                  >
+                                    Clear all
+                                  </Button>
+                                  <span style={{ fontSize: '13px', color: mutedTextColor }}>
+                                    Skip if version already in validated (no force).
+                                  </span>
+                                </div>
+                                <div
+                                  style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+                                    gap: '4px 12px',
+                                    maxHeight: '240px',
+                                    overflowY: 'auto',
+                                    padding: '10px 12px',
+                                    border: `1px solid ${borderColor}`,
+                                    borderRadius: '6px',
+                                    background: isDark ? '#1f1f1f' : '#fafafa'
+                                  }}
+                                >
+                                  {PREFLIGHT_HUB_COLLECTION_OPTIONS.map(name => {
+                                    const selected = (data.aap.hub_publish_preflight_collection_names || [])
+                                      .includes(name);
+                                    return (
+                                      <Checkbox
+                                        key={name}
+                                        id={`hub-preflight-col-${name}`}
+                                        label={name}
+                                        isChecked={selected}
+                                        onChange={(_, v) => toggleHubPreflightCollectionName(name, v)}
+                                      />
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </FormGroup>
+                        </GridItem>
+                      )}
+                      {activeHubSubTab === 'execution_environment' && (
                         <>
                           <GridItem span={12}>
-                            <Checkbox
-                              id="aap-hub-ee-pull"
-                              label="Pull source from a registry instead of the baked archive (needs network)"
-                              isChecked={data.aap.hub_ee_pull === true}
-                              onChange={(_, v) => {
-                                setData(prev => {
-                                  const copy = JSON.parse(JSON.stringify(prev));
-                                  if (!copy.aap) copy.aap = {};
-                                  copy.aap.hub_ee_pull = v === true;
-                                  copy.aap.hub_ee_source_image = v
-                                    ? HUB_EE_REGISTRY_SOURCE
-                                    : HUB_EE_BAKED_SOURCE;
-                                  return copy;
-                                });
-                              }}
-                            />
-                            <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
-                              Leave unchecked for disconnected labs (default
-                              {' '}<code>{HUB_EE_BAKED_SOURCE}</code>). Only enable when this
-                              pod can reach ghcr.io or an internal mirror
-                              ({' '}<code>{HUB_EE_REGISTRY_SOURCE}</code>).
-                            </p>
-                          </GridItem>
-                          <GridItem span={8}>
-                            <FormGroup
-                              label={
-                                data.aap.hub_ee_pull
-                                  ? 'Source image (registry pull)'
-                                  : 'Source image (baked archive in this pod)'
-                              }
-                            >
-                              <TextInput
-                                value={data.aap.hub_ee_source_image || (data.aap.hub_ee_pull ? HUB_EE_REGISTRY_SOURCE : HUB_EE_BAKED_SOURCE)}
-                                onChange={(_, v) => set('aap.hub_ee_source_image', v)}
-                                placeholder={data.aap.hub_ee_pull ? HUB_EE_REGISTRY_SOURCE : HUB_EE_BAKED_SOURCE}
+                            <FormGroup label={labelWithHelp('Execution environment (optional)', aapHelp.hubExecutionEnvironment)}>
+                              <Checkbox
+                                id="aap-hub-push-ee"
+                                label="Push ADO EE image to AAP Hub (optional)"
+                                isChecked={data.aap.hub_push_ee === true}
+                                onChange={(_, v) => setAapHubPushEe(v)}
                               />
                             </FormGroup>
                           </GridItem>
-                          <GridItem span={4}>
-                            <FormGroup
-                              label={(
-                                <span>
-                                  Hub image name
-                                  <span style={{ color: mutedTextColor, fontWeight: 400 }}>
-                                    {' — container name in Private Automation Hub'}
-                                  </span>
-                                </span>
-                              )}
-                            >
-                              <TextInput
-                                value={data.aap.hub_ee_name}
-                                onChange={(_, v) => setAapHubEeNameField('hub_ee_name', normalizeHubImageName(v))}
-                                placeholder={defaultHubImageName()}
-                              />
-                              <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
-                                Registry image name must be lowercase (default <code>ado-ee</code>).
-                                Display label remains &quot;ADO EE&quot;; Contoller EE object name is separate below.
-                              </p>
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={4}>
-                            <FormGroup label="Tag">
-                              <TextInput
-                                value={data.aap.hub_ee_tag}
-                                onChange={(_, v) => set('aap.hub_ee_tag', v)}
-                              />
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={8}>
-                            <FormGroup
-                              label={(
-                                <span>
-                                  Hub registry host
-                                  <span style={{ color: mutedTextColor, fontWeight: 400 }}>
-                                    {' — Defaults to Hub hostname when empty'}
-                                  </span>
-                                </span>
-                              )}
-                            >
-                              <TextInput
-                                value={data.aap.hub_ee_registry}
-                                onChange={(_, v) => set('aap.hub_ee_registry', v)}
-                                placeholder={
-                                  data.aap.hub_hostname
-                                  || hostnameFromUrl(data.aap.hostname)
-                                  || 'aap.example.com'
-                                }
-                              />
-                            </FormGroup>
-                          </GridItem>
-                          <GridItem span={12}>
-                            <Checkbox
-                              id="aap-hub-ee-create-ee"
-                              label="Create Contoller execution environment after push"
-                              isChecked={data.aap.hub_ee_create_execution_environment !== false}
-                              onChange={(_, v) => set('aap.hub_ee_create_execution_environment', v)}
-                            />
-                          </GridItem>
-                          {data.aap.hub_ee_create_execution_environment !== false && (
-                            <GridItem span={6}>
-                              <FormGroup
-                                label={(
-                                  <span>
-                                    Contoller EE name
-                                    <span style={{ color: mutedTextColor, fontWeight: 400 }}>
-                                      {` — defaults to ${defaultOrgEeName(data.aap.organization || 'ADO')} (ORG-ee)`}
-                                    </span>
-                                  </span>
-                                )}
-                              >
-                                <TextInput
-                                  value={data.aap.hub_ee_execution_environment_name}
-                                  onChange={(_, v) => setAapHubEeNameField('hub_ee_execution_environment_name', v)}
-                                  placeholder={defaultOrgEeName(data.aap.organization || 'ADO')}
+                          {data.aap.hub_push_ee && (
+                            <>
+                              <GridItem span={12}>
+                                <Checkbox
+                                  id="aap-hub-ee-pull"
+                                  label="Pull source from a registry instead of the baked archive (needs network)"
+                                  isChecked={data.aap.hub_ee_pull === true}
+                                  onChange={(_, v) => {
+                                    setData(prev => {
+                                      const copy = JSON.parse(JSON.stringify(prev));
+                                      if (!copy.aap) copy.aap = {};
+                                      copy.aap.hub_ee_pull = v === true;
+                                      copy.aap.hub_ee_source_image = v
+                                        ? HUB_EE_REGISTRY_SOURCE
+                                        : HUB_EE_BAKED_SOURCE;
+                                      return copy;
+                                    });
+                                  }}
                                 />
-                              </FormGroup>
-                            </GridItem>
+                                <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
+                                  Leave unchecked for disconnected labs (default
+                                  {' '}<code>{HUB_EE_BAKED_SOURCE}</code>). Only enable when this
+                                  pod can reach ghcr.io or an internal mirror
+                                  ({' '}<code>{HUB_EE_REGISTRY_SOURCE}</code>).
+                                </p>
+                              </GridItem>
+                              <GridItem span={8}>
+                                <FormGroup
+                                  label={
+                                    data.aap.hub_ee_pull
+                                      ? 'Source image (registry pull)'
+                                      : 'Source image (baked archive in this pod)'
+                                  }
+                                >
+                                  <TextInput
+                                    value={data.aap.hub_ee_source_image || (data.aap.hub_ee_pull ? HUB_EE_REGISTRY_SOURCE : HUB_EE_BAKED_SOURCE)}
+                                    onChange={(_, v) => set('aap.hub_ee_source_image', v)}
+                                    placeholder={data.aap.hub_ee_pull ? HUB_EE_REGISTRY_SOURCE : HUB_EE_BAKED_SOURCE}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={4}>
+                                <FormGroup
+                                  label={(
+                                    <span>
+                                      Hub image name
+                                      <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                        {' — container name in Private Automation Hub'}
+                                      </span>
+                                    </span>
+                                  )}
+                                >
+                                  <TextInput
+                                    value={data.aap.hub_ee_name}
+                                    onChange={(_, v) => setAapHubEeNameField('hub_ee_name', normalizeHubImageName(v))}
+                                    placeholder={defaultHubImageName()}
+                                  />
+                                  <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0 }}>
+                                    Registry image name must be lowercase (default <code>ado-ee</code>).
+                                    Display label remains &quot;ADO EE&quot;; Contoller EE object name is separate below.
+                                  </p>
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={4}>
+                                <FormGroup label="Tag">
+                                  <TextInput
+                                    value={data.aap.hub_ee_tag}
+                                    onChange={(_, v) => set('aap.hub_ee_tag', v)}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={8}>
+                                <FormGroup
+                                  label={(
+                                    <span>
+                                      Hub registry host
+                                      <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                        {' — Defaults to Hub hostname when empty'}
+                                      </span>
+                                    </span>
+                                  )}
+                                >
+                                  <TextInput
+                                    value={data.aap.hub_ee_registry}
+                                    onChange={(_, v) => set('aap.hub_ee_registry', v)}
+                                    placeholder={
+                                      data.aap.hub_hostname
+                                      || hostnameFromUrl(data.aap.hostname)
+                                      || 'aap.example.com'
+                                    }
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={12}>
+                                <Checkbox
+                                  id="aap-hub-ee-create-ee"
+                                  label="Create Contoller execution environment after push"
+                                  isChecked={data.aap.hub_ee_create_execution_environment !== false}
+                                  onChange={(_, v) => set('aap.hub_ee_create_execution_environment', v)}
+                                />
+                              </GridItem>
+                              {data.aap.hub_ee_create_execution_environment !== false && (
+                                <GridItem span={6}>
+                                  <FormGroup
+                                    label={(
+                                      <span>
+                                        Contoller EE name
+                                        <span style={{ color: mutedTextColor, fontWeight: 400 }}>
+                                          {` — defaults to ${defaultOrgEeName(data.aap.organization || 'ADO')} (ORG-ee)`}
+                                        </span>
+                                      </span>
+                                    )}
+                                  >
+                                    <TextInput
+                                      value={data.aap.hub_ee_execution_environment_name}
+                                      onChange={(_, v) => setAapHubEeNameField('hub_ee_execution_environment_name', v)}
+                                      placeholder={defaultOrgEeName(data.aap.organization || 'ADO')}
+                                    />
+                                  </FormGroup>
+                                </GridItem>
+                              )}
+                              <GridItem span={12}>
+                                <FormGroup label="Hub / Contoller EE description">
+                                  <textarea
+                                    value={data.aap.hub_ee_description}
+                                    onChange={e => set('aap.hub_ee_description', e.target.value)}
+                                    rows={4}
+                                    style={{ width: '100%', padding: '8px' }}
+                                  />
+                                </FormGroup>
+                              </GridItem>
+                            </>
                           )}
-                          <GridItem span={12}>
-                            <FormGroup label="Hub / Contoller EE description">
-                              <textarea
-                                value={data.aap.hub_ee_description}
-                                onChange={e => set('aap.hub_ee_description', e.target.value)}
-                                rows={4}
-                                style={{ width: '100%', padding: '8px' }}
-                              />
-                            </FormGroup>
-                          </GridItem>
                         </>
                       )}
                     </Grid>
@@ -10350,10 +11211,12 @@ ${vaultYaml}
                           }}
                         >
                           Before running: fill General → AAP Hostname URL, Organization Name, and
-                          Admin password (or OAuth token). Empty Galaxy token fields fall back to
-                          those General credentials (same pattern as Hub EE push). Hub tab work and
-                          this Galaxy tab can run together or separately; with Run Hub updates only,
-                          both Hub and Galaxy still apply when both are checked.
+                          Contoller Admin password or OAuth token (Contoller API). Galaxy credential
+                          tokens use General → Hub / Galaxy API token (ansible-galaxy pulls). Hub
+                          collection publish on gateway AAP uses Contoller OAuth, not the Hub API
+                          token. Hub tab work and this Galaxy tab can run together or separately;
+                          with Run AAP tabs only, both Hub and Galaxy still apply when both are
+                          checked.
                         </div>
                         <FormGroup label="Galaxy / Hub credentials">
                           <p style={{ color: mutedTextColor, marginTop: 0, marginBottom: '8px' }}>
@@ -10396,7 +11259,7 @@ ${vaultYaml}
                                   if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
                                     copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
                                       copy.aap.organization || 'ADO',
-                                      copy.aap.hostname || ''
+                                      galaxyHubHostnameForCredentials(copy.aap)
                                     );
                                   } else {
                                     copy.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(
@@ -10406,15 +11269,40 @@ ${vaultYaml}
                                   if (!copy.aap.container_registry_credential) {
                                     copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
                                       copy.aap.organization || 'ADO',
-                                      copy.aap.hostname || ''
+                                      galaxyHubHostnameForCredentials(copy.aap) || copy.aap.hostname || ''
                                     );
                                   } else if (!copy.aap.container_registry_credential.host) {
-                                    copy.aap.container_registry_credential.host = String(copy.aap.hostname || '').replace(/\/+$/, '');
+                                    copy.aap.container_registry_credential.host = galaxyHubHostnameForCredentials(copy.aap)
+                                      || String(copy.aap.hostname || '').replace(/\/+$/, '');
                                   }
+                                } else {
+                                  copy.aap.galaxy_credentials = [];
                                 }
                                 return copy;
                               });
                             }}
+                          />
+                          <br />
+                          <Checkbox
+                            id="aap-ignore-galaxy-cert"
+                            label={labelWithHelp(
+                              'Ignore Galaxy/Hub TLS certificate verification (Controller jobs + project ansible.cfg)',
+                              <>
+                                <p>
+                                  Off (default): Controller project collection installs and generated{' '}
+                                  <code>ansible.cfg</code> verify Hub/Galaxy TLS certificates (
+                                  <code>GALAXY_IGNORE_CERTS=false</code>).
+                                </p>
+                                <p>
+                                  On: sets <code>ansible_dispatch_ignore_galaxy_cert</code> so bootstrap
+                                  patches Controller jobs settings and writes{' '}
+                                  <code>[galaxy] ignore_certs = True</code> in the playbook repo.
+                                  Use for lab Hubs with self-signed certificates.
+                                </p>
+                              </>
+                            )}
+                            isChecked={data.aap.ignore_galaxy_cert === true}
+                            onChange={(_, v) => set('aap.ignore_galaxy_cert', v)}
                           />
                         </FormGroup>
                       </GridItem>
@@ -10463,176 +11351,245 @@ ${vaultYaml}
                             </>
                           )}
                           <GridItem span={12}>
-                            <FormGroup
-                              label="Shared Hub / Galaxy API token (optional override)"
-                              helperText="If empty, each credential below uses General → Admin password or OAuth token. Only fill this to override that fallback for Hub/Galaxy API Token credentials."
-                            >
-                              <TextInput
-                                type="password"
-                                value={data.aap.galaxy_hub_token}
-                                onChange={(_, v) => set('aap.galaxy_hub_token', v)}
-                                placeholder="Leave empty to use General Admin password / OAuth token"
-                              />
-                            </FormGroup>
+                            <p style={{ color: mutedTextColor, margin: '0 0 8px', fontSize: '13px' }}>
+                              Shared Hub token is on the <strong>General</strong> tab. Per-credential
+                              token fields below override it when filled.
+                            </p>
                           </GridItem>
                           <GridItem span={12}>
                             <p style={{ color: mutedTextColor, margin: '0 0 8px', fontSize: '13px' }}>
-                              Organization Galaxy credential order: <strong>1</strong> is tried first
-                              by Contoller, then 2, 3, … Use Move up/down or set the Order number.
-                              Order + &quot;Attach to organization&quot; set the full org search list.
-                              Unchecking <strong>Create</strong> skips creating/updating that
-                              credential this run; it still keeps its attach/order in the org list.
+                              Galaxy tabs: check <strong>Create/update</strong> to include a credential.
+                              <strong> Order</strong> is 1…N among checked credentials (1 is tried first
+                              by Contoller). Unchecking Create skips create/update this run but can still
+                              keep attach/order. The <strong>Container Registry</strong> tab is for EE
+                              image pull, not Galaxy collections.
                             </p>
                           </GridItem>
-                          {(data.aap.galaxy_credentials || []).map((credential, index) => (
-                            <GridItem span={12} key={credential.id || `galaxy-cred-${index}`}>
-                              <Card style={{ boxShadow: 'none', border: '1px solid #d2d2d2' }}>
-                                <CardBody>
-                                  <Grid hasGutter>
-                                    <GridItem span={12}>
-                                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                                        <Checkbox
-                                          id={`aap-galaxy-cred-enabled-${index}`}
-                                          label={`Create/update ${credential.name || 'credential'}`}
-                                          isChecked={credential.enabled !== false}
-                                          onChange={(_, v) => set(`aap.galaxy_credentials.${index}.enabled`, v)}
-                                        />
-                                        <FormGroup label="Order" style={{ marginBottom: 0, minWidth: '72px' }}>
-                                          <TextInput
-                                            type="number"
-                                            min={1}
-                                            value={credential.order ?? index + 1}
-                                            onChange={(_, v) => setGalaxyCredentialOrder(index, v)}
-                                            aria-label={`Order for ${credential.name || 'credential'}`}
-                                          />
-                                        </FormGroup>
-                                        <Button
-                                          variant="secondary"
-                                          isDisabled={index === 0}
-                                          onClick={() => moveGalaxyCredential(index, -1)}
-                                        >
-                                          Move up
-                                        </Button>
-                                        <Button
-                                          variant="secondary"
-                                          isDisabled={index >= (data.aap.galaxy_credentials || []).length - 1}
-                                          onClick={() => moveGalaxyCredential(index, 1)}
-                                        >
-                                          Move down
-                                        </Button>
-                                      </div>
-                                    </GridItem>
-                                    {credential.enabled !== false && (
-                                      <>
-                                        <GridItem span={4}>
-                                          <FormGroup label="Name">
-                                            <TextInput
-                                              value={credential.name}
-                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.name`, v)}
-                                            />
-                                          </FormGroup>
-                                        </GridItem>
-                                        <GridItem span={8}>
-                                          <FormGroup label="Galaxy Server URL">
-                                            <TextInput
-                                              value={credential.url}
-                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.url`, v)}
-                                            />
-                                          </FormGroup>
-                                        </GridItem>
-                                        <GridItem span={6}>
-                                          <FormGroup label="Auth Server URL (optional)">
-                                            <TextInput
-                                              value={credential.auth_url || ''}
-                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.auth_url`, v)}
-                                            />
-                                          </FormGroup>
-                                        </GridItem>
-                                        <GridItem span={6}>
-                                          <FormGroup
-                                            label="API Token (optional per-cred override)"
-                                            helperText="Empty = Shared token above, then General Admin password / OAuth."
-                                          >
-                                            <TextInput
-                                              type="password"
-                                              value={credential.token || ''}
-                                              onChange={(_, v) => set(`aap.galaxy_credentials.${index}.token`, v)}
-                                            />
-                                          </FormGroup>
-                                        </GridItem>
-                                        <GridItem span={12}>
-                                          <Checkbox
-                                            id={`aap-galaxy-cred-attach-${index}`}
-                                            label="Attach to organization Galaxy credentials (uses Order above)"
-                                            description="Uncheck to create the credential but not add it to the org Galaxy search list."
-                                            isChecked={credential.attach_to_org !== false}
-                                            onChange={(_, v) => set(`aap.galaxy_credentials.${index}.attach_to_org`, v)}
-                                          />
-                                        </GridItem>
-                                      </>
-                                    )}
-                                  </Grid>
-                                </CardBody>
-                              </Card>
-                            </GridItem>
-                          ))}
                           <GridItem span={12}>
-                            <FormGroup label="Container Registry credential (EE pull)">
-                              <Checkbox
-                                id="aap-galaxy-ee-registry-enabled"
-                                label={`Create ${data.aap.container_registry_credential?.name || 'ADO-EE'} (Container Registry)`}
-                                isChecked={data.aap.container_registry_credential?.enabled !== false}
-                                onChange={(_, v) => set('aap.container_registry_credential.enabled', v)}
-                              />
-                            </FormGroup>
+                            {(() => {
+                              const galaxyCreds = data.aap.galaxy_credentials || [];
+                              const enabledCount = galaxyCreds.filter(c => c.enabled !== false).length;
+                              const orderOptions = Array.from(
+                                { length: Math.max(enabledCount, 1) },
+                                (_, i) => i + 1
+                              );
+                              const selectedTab = activeGalaxyCredTab;
+                              const registrySelected = selectedTab === 'container_registry';
+                              const galaxyTabIndex = registrySelected
+                                ? -1
+                                : Math.min(
+                                  Number(selectedTab) || 0,
+                                  Math.max(0, galaxyCreds.length - 1)
+                                );
+
+                              return (
+                                <>
+                                  <Tabs
+                                    activeKey={registrySelected ? 'container_registry' : galaxyTabIndex}
+                                    onSelect={(_, key) => setActiveGalaxyCredTab(key)}
+                                  >
+                                    {galaxyCreds.map((credential, index) => (
+                                      <Tab
+                                        key={credential.id || `galaxy-cred-${index}`}
+                                        eventKey={index}
+                                        title={credential.name || `Credential ${index + 1}`}
+                                      />
+                                    ))}
+                                    <Tab
+                                      eventKey="container_registry"
+                                      title={labelWithHelp(
+                                        'Container Registry',
+                                        aapHelp.containerRegistryCredential
+                                      )}
+                                    />
+                                  </Tabs>
+
+                                  {!registrySelected && galaxyCreds.map((credential, index) => {
+                                    if (index !== galaxyTabIndex) return null;
+                                    const enabledRank = galaxyCreds
+                                      .map((item, credIndex) => ({ item, credIndex }))
+                                      .filter(row => row.item.enabled !== false)
+                                      .sort((a, b) => (
+                                        (Number(a.item.order) || 0) - (Number(b.item.order) || 0)
+                                        || String(a.item.name || '').localeCompare(String(b.item.name || ''))
+                                      ))
+                                      .findIndex(row => row.credIndex === index) + 1;
+                                    const orderValue = credential.enabled === false
+                                      ? ''
+                                      : (enabledRank > 0 ? enabledRank : 1);
+
+                                    return (
+                                      <div
+                                        key={credential.id || `galaxy-cred-body-${index}`}
+                                        style={{
+                                          marginTop: '12px',
+                                          border: `1px solid ${borderColor}`,
+                                          borderRadius: '6px',
+                                          padding: '12px'
+                                        }}
+                                      >
+                                        <Grid hasGutter>
+                                          <GridItem span={12}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                                              <Checkbox
+                                                id={`aap-galaxy-cred-enabled-${index}`}
+                                                label={`Create/update ${credential.name || 'credential'}`}
+                                                isChecked={credential.enabled !== false}
+                                                onChange={(_, v) => set(`aap.galaxy_credentials.${index}.enabled`, v)}
+                                              />
+                                              <FormGroup
+                                                label="Order"
+                                                style={{ marginBottom: 0, minWidth: '100px' }}
+                                              >
+                                                <select
+                                                  aria-label={`Order for ${credential.name || 'credential'}`}
+                                                  value={orderValue}
+                                                  disabled={credential.enabled === false || enabledCount < 1}
+                                                  onChange={e => setGalaxyCredentialOrder(index, e.target.value)}
+                                                  style={{ width: '100%', padding: '6px 8px' }}
+                                                >
+                                                  {credential.enabled === false ? (
+                                                    <option value="">n/a</option>
+                                                  ) : (
+                                                    orderOptions.map(option => (
+                                                      <option key={option} value={option}>{option}</option>
+                                                    ))
+                                                  )}
+                                                </select>
+                                              </FormGroup>
+                                            </div>
+                                          </GridItem>
+                                          {credential.enabled !== false && (
+                                            <>
+                                              <GridItem span={4}>
+                                                <FormGroup label="Name">
+                                                  <TextInput
+                                                    value={credential.name}
+                                                    onChange={(_, v) => set(`aap.galaxy_credentials.${index}.name`, v)}
+                                                  />
+                                                </FormGroup>
+                                              </GridItem>
+                                              <GridItem span={8}>
+                                                <FormGroup label="Galaxy Server URL">
+                                                  <TextInput
+                                                    value={credential.url}
+                                                    onChange={(_, v) => set(`aap.galaxy_credentials.${index}.url`, v)}
+                                                  />
+                                                </FormGroup>
+                                              </GridItem>
+                                              <GridItem span={6}>
+                                                <FormGroup label="Auth Server URL (optional)">
+                                                  <TextInput
+                                                    value={credential.auth_url || ''}
+                                                    onChange={(_, v) => set(`aap.galaxy_credentials.${index}.auth_url`, v)}
+                                                  />
+                                                </FormGroup>
+                                              </GridItem>
+                                              <GridItem span={6}>
+                                                <FormGroup
+                                                  label="API Token (optional per-cred override)"
+                                                  helperText="Empty = General → Hub / Galaxy API token."
+                                                >
+                                                  <TextInput
+                                                    type="password"
+                                                    value={credential.token || ''}
+                                                    onChange={(_, v) => set(`aap.galaxy_credentials.${index}.token`, v)}
+                                                  />
+                                                </FormGroup>
+                                              </GridItem>
+                                              <GridItem span={12}>
+                                                <Checkbox
+                                                  id={`aap-galaxy-cred-attach-${index}`}
+                                                  label="Attach to organization Galaxy credentials (uses Order above)"
+                                                  description="Uncheck to create the credential but not add it to the org Galaxy search list."
+                                                  isChecked={credential.attach_to_org !== false}
+                                                  onChange={(_, v) => set(`aap.galaxy_credentials.${index}.attach_to_org`, v)}
+                                                />
+                                              </GridItem>
+                                            </>
+                                          )}
+                                        </Grid>
+                                      </div>
+                                    );
+                                  })}
+
+                                  {registrySelected && (
+                                    <div
+                                      style={{
+                                        marginTop: '12px',
+                                        border: `1px solid ${borderColor}`,
+                                        borderRadius: '6px',
+                                        padding: '12px'
+                                      }}
+                                    >
+                                      <Grid hasGutter>
+                                        <GridItem span={12}>
+                                          <FormGroup label={labelWithHelp(
+                                            'Container Registry credential (EE pull)',
+                                            aapHelp.containerRegistryCredential
+                                          )}>
+                                            <Checkbox
+                                              id="aap-galaxy-ee-registry-enabled"
+                                              label={`Create ${data.aap.container_registry_credential?.name || 'ADO-EE'} (Container Registry)`}
+                                              isChecked={data.aap.container_registry_credential?.enabled !== false}
+                                              onChange={(_, v) => set('aap.container_registry_credential.enabled', v)}
+                                            />
+                                          </FormGroup>
+                                        </GridItem>
+                                        {data.aap.container_registry_credential?.enabled !== false && (
+                                          <>
+                                            <GridItem span={4}>
+                                              <FormGroup label="Name">
+                                                <TextInput
+                                                  value={data.aap.container_registry_credential.name}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.name', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                            <GridItem span={8}>
+                                              <FormGroup label="Registry host">
+                                                <TextInput
+                                                  value={data.aap.container_registry_credential.host}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.host', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                            <GridItem span={4}>
+                                              <FormGroup label="Username">
+                                                <TextInput
+                                                  value={data.aap.container_registry_credential.username}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.username', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                            <GridItem span={4}>
+                                              <FormGroup label="Password / token">
+                                                <TextInput
+                                                  type="password"
+                                                  value={data.aap.container_registry_credential.password}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.password', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                            <GridItem span={4}>
+                                              <FormGroup label="TLS">
+                                                <Checkbox
+                                                  id="aap-galaxy-ee-verify-ssl"
+                                                  label="Verify SSL"
+                                                  isChecked={data.aap.container_registry_credential.verify_ssl !== false}
+                                                  onChange={(_, v) => set('aap.container_registry_credential.verify_ssl', v)}
+                                                />
+                                              </FormGroup>
+                                            </GridItem>
+                                          </>
+                                        )}
+                                      </Grid>
+                                    </div>
+                                  )}
+                                </>
+                              );
+                            })()}
                           </GridItem>
-                          {data.aap.container_registry_credential?.enabled !== false && (
-                            <>
-                              <GridItem span={4}>
-                                <FormGroup label="Name">
-                                  <TextInput
-                                    value={data.aap.container_registry_credential.name}
-                                    onChange={(_, v) => set('aap.container_registry_credential.name', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                              <GridItem span={8}>
-                                <FormGroup label="Registry host">
-                                  <TextInput
-                                    value={data.aap.container_registry_credential.host}
-                                    onChange={(_, v) => set('aap.container_registry_credential.host', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                              <GridItem span={4}>
-                                <FormGroup label="Username">
-                                  <TextInput
-                                    value={data.aap.container_registry_credential.username}
-                                    onChange={(_, v) => set('aap.container_registry_credential.username', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                              <GridItem span={4}>
-                                <FormGroup label="Password / token">
-                                  <TextInput
-                                    type="password"
-                                    value={data.aap.container_registry_credential.password}
-                                    onChange={(_, v) => set('aap.container_registry_credential.password', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                              <GridItem span={4}>
-                                <FormGroup label="TLS">
-                                  <Checkbox
-                                    id="aap-galaxy-ee-verify-ssl"
-                                    label="Verify SSL"
-                                    isChecked={data.aap.container_registry_credential.verify_ssl !== false}
-                                    onChange={(_, v) => set('aap.container_registry_credential.verify_ssl', v)}
-                                  />
-                                </FormGroup>
-                              </GridItem>
-                            </>
-                          )}
                         </>
                       )}
                     </Grid>
