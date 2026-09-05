@@ -968,10 +968,10 @@ const agentInstallerDefaults = {
   nodes: [0, 1, 2].map(defaultAgentInstallerNode)
 };
 
-const buildDefaultGalaxyCredentials = (org = 'ADO', hostname = '') => {
+const buildDefaultGalaxyCredentials = (org = 'ADO', hubHostname = '') => {
   const prefix = (org || 'ADO').trim() || 'ADO';
-  const base = String(hostname || '').replace(/\/+$/, '');
-  const hubContent = base ? `${base}/api/galaxy/content` : '';
+  const host = normalizeAapHostname(hubHostname);
+  const hubContent = host ? `${host}/api/galaxy/content` : '';
 
   return [
     {
@@ -1030,6 +1030,12 @@ const buildDefaultGalaxyCredentials = (org = 'ADO', hostname = '') => {
       order: 5
     }
   ];
+};
+
+const galaxyHubHostnameForCredentials = (aap = {}) => {
+  const hub = normalizeAapHostname(aap?.hub_hostname || '');
+  if (hub) return hub;
+  return normalizeAapHostname(aap?.hostname || '');
 };
 
 /** Ensure each Galaxy cred has a unique 1-based order; sort list by order. */
@@ -1150,6 +1156,7 @@ const PREFLIGHT_HUB_COLLECTION_OPTIONS = [
   'redhat.rhel_system_roles',
   'community.general',
   'community.grafana',
+  'amazon.aws',
   'community.hashi_vault',
   'community.kubernetes',
   'freeipa.ansible_freeipa',
@@ -2331,19 +2338,47 @@ function App() {
       if (!copy.aap) copy.aap = {};
       const previousHostname = copy.aap.hostname || '';
       copy.aap.hostname = value;
-      if (Array.isArray(copy.aap.galaxy_credentials) && copy.aap.galaxy_credentials.length > 0) {
+      if (
+        Array.isArray(copy.aap.galaxy_credentials)
+        && copy.aap.galaxy_credentials.length > 0
+        && !String(copy.aap.hub_hostname || '').trim()
+      ) {
         copy.aap.galaxy_credentials = applyHostnameToGalaxyCredentials(
           copy.aap.galaxy_credentials,
-          value,
-          previousHostname
+          galaxyHubHostnameForCredentials(copy.aap),
+          galaxyHubHostnameForCredentials({ ...copy.aap, hostname: previousHostname })
         );
       }
-      if (copy.aap.container_registry_credential) {
+      if (copy.aap.container_registry_credential && !String(copy.aap.hub_hostname || '').trim()) {
         copy.aap.container_registry_credential = applyHostnameToContainerRegistryCredential(
           copy.aap.container_registry_credential,
           value,
           previousHostname
         );
+      }
+      return copy;
+    });
+  };
+
+  const setAapHubHostname = value => {
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.aap) copy.aap = {};
+      const previousHub = copy.aap.hub_hostname || '';
+      copy.aap.hub_hostname = value;
+      if (Array.isArray(copy.aap.galaxy_credentials) && copy.aap.galaxy_credentials.length > 0) {
+        copy.aap.galaxy_credentials = applyHostnameToGalaxyCredentials(
+          copy.aap.galaxy_credentials,
+          galaxyHubHostnameForCredentials(copy.aap),
+          galaxyHubHostnameForCredentials({ ...copy.aap, hub_hostname: previousHub })
+        );
+      }
+      if (copy.aap.container_registry_credential) {
+        const previousHost = String(copy.aap.container_registry_credential.host || '').replace(/\/+$/, '');
+        const nextHost = galaxyHubHostnameForCredentials(copy.aap);
+        if (!previousHost || previousHost === normalizeAapHostname(previousHub)) {
+          copy.aap.container_registry_credential.host = nextHost;
+        }
       }
       return copy;
     });
@@ -2420,21 +2455,6 @@ function App() {
       copy.aap.hub_mark_ado_validated = value;
       if (!value) {
         copy.aap.hub_force_ado_collection_update = false;
-      } else {
-        // Hub collection publish needs Galaxy/Hub API token creds + org.
-        copy.aap.galaxy_setup_enabled = true;
-        if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
-          copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
-            copy.aap.organization || 'ADO',
-            copy.aap.hostname || ''
-          );
-        }
-        if (!copy.aap.container_registry_credential) {
-          copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
-            copy.aap.organization || 'ADO',
-            copy.aap.hostname || ''
-          );
-        }
       }
       return copy;
     });
@@ -2449,19 +2469,6 @@ function App() {
         if (!Array.isArray(copy.aap.hub_publish_preflight_collection_names)
           || copy.aap.hub_publish_preflight_collection_names.length === 0) {
           copy.aap.hub_publish_preflight_collection_names = [...PREFLIGHT_HUB_COLLECTION_OPTIONS];
-        }
-        copy.aap.galaxy_setup_enabled = true;
-        if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
-          copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
-            copy.aap.organization || 'ADO',
-            copy.aap.hostname || ''
-          );
-        }
-        if (!copy.aap.container_registry_credential) {
-          copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
-            copy.aap.organization || 'ADO',
-            copy.aap.hostname || ''
-          );
         }
       }
       return copy;
@@ -2516,20 +2523,15 @@ function App() {
       copy.aap.hub_push_ee = value === true;
       if (copy.aap.hub_push_ee) {
         const org = copy.aap.organization || 'ADO';
-        // EE push needs Contoller org + Container Registry cred (avoids ImagePullBackOff).
-        copy.aap.galaxy_setup_enabled = true;
-        if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
-          copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(org, copy.aap.hostname || '');
-        } else {
-          copy.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(copy.aap.galaxy_credentials);
-        }
+        const hubHost = galaxyHubHostnameForCredentials(copy.aap);
         if (!copy.aap.container_registry_credential) {
           copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
             org,
-            copy.aap.hostname || ''
+            hubHost || copy.aap.hostname || ''
           );
         } else if (!copy.aap.container_registry_credential.host) {
-          copy.aap.container_registry_credential.host = String(copy.aap.hostname || '').replace(/\/+$/, '');
+          copy.aap.container_registry_credential.host = hubHost
+            || String(copy.aap.hostname || '').replace(/\/+$/, '');
         }
         if (
           !String(copy.aap.hub_ee_name || '').trim()
@@ -2705,7 +2707,10 @@ function App() {
       const oldPrefix = (previous || 'ADO').trim() || 'ADO';
       const newPrefix = (value || 'ADO').trim() || 'ADO';
       if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
-        copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(newPrefix, copy.aap.hostname);
+        copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
+          newPrefix,
+          galaxyHubHostnameForCredentials(copy.aap)
+        );
       } else {
         copy.aap.galaxy_credentials = copy.aap.galaxy_credentials.map(credential => {
           if (!credential || credential.id === 'galaxy' || credential.name === 'Ansible Galaxy') {
@@ -3201,10 +3206,14 @@ function App() {
       merged.aap.galaxy_user_account = { ...defaults.aap.galaxy_user_account };
     }
     if (!Array.isArray(merged.aap.galaxy_credentials) || merged.aap.galaxy_credentials.length === 0) {
-      merged.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
-        merged.aap.organization || 'ADO',
-        merged.aap.hostname || ''
-      );
+      if (merged.aap.galaxy_setup_enabled === true) {
+        merged.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
+          merged.aap.organization || 'ADO',
+          galaxyHubHostnameForCredentials(merged.aap)
+        );
+      } else {
+        merged.aap.galaxy_credentials = [];
+      }
     } else {
       merged.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(merged.aap.galaxy_credentials);
     }
@@ -3398,12 +3407,19 @@ function App() {
       // shared Hub token into empty per-credential token fields when Galaxy setup runs.
       if (payload.aap.galaxy_setup_enabled === true) {
         const sharedHubToken = String(payload.aap.galaxy_hub_token || '').trim();
+        const hubHost = galaxyHubHostnameForCredentials(payload.aap);
         if (Array.isArray(payload.aap.galaxy_credentials)) {
           payload.aap.galaxy_credentials = payload.aap.galaxy_credentials.map((cred) => {
             if (!cred || typeof cred !== 'object') return cred;
             const next = { ...cred };
             if (!String(next.token || '').trim() && sharedHubToken) {
               next.token = sharedHubToken;
+            }
+            if (hubHost && next.id && next.id !== 'galaxy' && next.name !== 'Ansible Galaxy') {
+              const contentPath = HUB_GALAXY_CONTENT_IDS[next.id];
+              if (contentPath) {
+                next.url = `${hubHost}/api/galaxy/content/${contentPath}/`;
+              }
             }
             return next;
           });
@@ -3416,13 +3432,19 @@ function App() {
             registry.password = sharedHubToken;
           }
           if (!String(registry.host || '').trim()) {
-            registry.host = payload.aap.hub_hostname
+            registry.host = hubHost
               || String(payload.aap.hostname || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
           }
           if (payload.aap.skip_tls_verify === true && registry.verify_ssl === true) {
             registry.verify_ssl = false;
           }
         }
+        if (!sharedHubToken) {
+          payload.aap.galaxy_setup_enabled = false;
+          payload.aap.galaxy_credentials = [];
+        }
+      } else {
+        payload.aap.galaxy_credentials = [];
       }
 
       payload.aap.additional_credentials = (payload.aap.additional_credentials || []).map(credential => {
@@ -10883,7 +10905,7 @@ ${vaultYaml}
                         >
                           <TextInput
                             value={data.aap.hub_hostname || ''}
-                            onChange={(_, v) => set('aap.hub_hostname', v)}
+                            onChange={(_, v) => setAapHubHostname(v)}
                             placeholder={
                               hostnameFromUrl(data.aap.hostname)
                               || 'aap.example.com'
@@ -11227,7 +11249,7 @@ ${vaultYaml}
                                   if (!Array.isArray(copy.aap.galaxy_credentials) || copy.aap.galaxy_credentials.length === 0) {
                                     copy.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
                                       copy.aap.organization || 'ADO',
-                                      copy.aap.hostname || ''
+                                      galaxyHubHostnameForCredentials(copy.aap)
                                     );
                                   } else {
                                     copy.aap.galaxy_credentials = normalizeGalaxyCredentialOrder(
@@ -11237,11 +11259,14 @@ ${vaultYaml}
                                   if (!copy.aap.container_registry_credential) {
                                     copy.aap.container_registry_credential = buildDefaultContainerRegistryCredential(
                                       copy.aap.organization || 'ADO',
-                                      copy.aap.hostname || ''
+                                      galaxyHubHostnameForCredentials(copy.aap) || copy.aap.hostname || ''
                                     );
                                   } else if (!copy.aap.container_registry_credential.host) {
-                                    copy.aap.container_registry_credential.host = String(copy.aap.hostname || '').replace(/\/+$/, '');
+                                    copy.aap.container_registry_credential.host = galaxyHubHostnameForCredentials(copy.aap)
+                                      || String(copy.aap.hostname || '').replace(/\/+$/, '');
                                   }
+                                } else {
+                                  copy.aap.galaxy_credentials = [];
                                 }
                                 return copy;
                               });

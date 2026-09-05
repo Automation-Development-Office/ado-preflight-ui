@@ -1358,6 +1358,77 @@ function hostnameFromUrl(value) {
   }
 }
 
+/** Hub Galaxy credential URLs must use Hub hostname, not Contoller hostname. */
+function galaxyHubHostnameForCredentials(aap = {}) {
+  const hub = hostnameFromUrl(aap.hub_hostname);
+  if (hub) return hub;
+  return hostnameFromUrl(aap.hostname);
+}
+
+function buildDefaultGalaxyCredentials(org = 'ADO', hubHostname = '') {
+  const prefix = (org || 'ADO').trim() || 'ADO';
+  const host = String(hubHostname || '').trim();
+  const hubContent = host ? `https://${host.replace(/^https?:\/\//, '')}/api/galaxy/content` : '';
+
+  return [
+    {
+      id: 'validated',
+      name: `${prefix}-validated`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/validated/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 1
+    },
+    {
+      id: 'published',
+      name: `${prefix}-published`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/published/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 2
+    },
+    {
+      id: 'community',
+      name: `${prefix}-community`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/community/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 3
+    },
+    {
+      id: 'certified',
+      name: `${prefix}-certified`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/rh-certified/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 4
+    },
+    {
+      id: 'galaxy',
+      name: 'Ansible Galaxy',
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: 'https://galaxy.ansible.com/',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 5
+    }
+  ];
+}
+
 /** Derive https://host/realms/rhlab from OIDC auth/token URLs. */
 function keycloakRealmUrlFromOidcUrl(url) {
   const raw = String(url || '').trim();
@@ -1722,6 +1793,7 @@ function normalizePreflightPayload(input) {
         'redhat.rhel_system_roles',
         'community.general',
         'community.grafana',
+        'amazon.aws',
         'community.hashi_vault',
         'community.kubernetes',
         'freeipa.ansible_freeipa',
@@ -1879,16 +1951,6 @@ function normalizePreflightPayload(input) {
   };
   if (data.aap.galaxy_setup_enabled === undefined) data.aap.galaxy_setup_enabled = false;
   if (data.aap.ignore_galaxy_cert === undefined) data.aap.ignore_galaxy_cert = false;
-  // Hub collection / EE / hub-only runs need org + Galaxy/registry creds. Auto-enable
-  // when those Hub options are on so Contoller can pull ado-ee without ImagePullBackOff.
-  if (
-    data.aap.hub_publish_ado_collection === true
-    || data.aap.hub_publish_preflight_collections === true
-    || data.aap.hub_push_ee === true
-    || data.aap.hub_update_collection_only === true
-  ) {
-    data.aap.galaxy_setup_enabled = true;
-  }
   if (data.aap.galaxy_hub_token === undefined) data.aap.galaxy_hub_token = '';
   if (!data.aap.galaxy_user_account || typeof data.aap.galaxy_user_account !== 'object') {
     data.aap.galaxy_user_account = {
@@ -1900,68 +1962,14 @@ function normalizePreflightPayload(input) {
     };
   }
   if (data.aap.galaxy_user_account.enabled === undefined) data.aap.galaxy_user_account.enabled = false;
-  if (!Array.isArray(data.aap.galaxy_credentials) || data.aap.galaxy_credentials.length === 0) {
-    const org = data.aap.organization || 'ADO';
-    const hostname = data.aap.hostname || '';
-    const base = String(hostname).replace(/\/+$/, '');
-    const hubContent = base ? `${base}/api/galaxy/content` : '';
-    data.aap.galaxy_credentials = [
-      {
-        id: 'validated',
-        name: `${org}-validated`,
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: hubContent ? `${hubContent}/validated/` : '',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 1
-      },
-      {
-        id: 'published',
-        name: `${org}-published`,
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: hubContent ? `${hubContent}/published/` : '',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 2
-      },
-      {
-        id: 'community',
-        name: `${org}-community`,
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: hubContent ? `${hubContent}/community/` : '',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 3
-      },
-      {
-        id: 'certified',
-        name: `${org}-certified`,
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: hubContent ? `${hubContent}/rh-certified/` : '',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 4
-      },
-      {
-        id: 'galaxy',
-        name: 'Ansible Galaxy',
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: 'https://galaxy.ansible.com/',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 5
-      }
-    ];
+  if (
+    data.aap.galaxy_setup_enabled === true
+    && (!Array.isArray(data.aap.galaxy_credentials) || data.aap.galaxy_credentials.length === 0)
+  ) {
+    data.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
+      data.aap.organization || 'ADO',
+      galaxyHubHostnameForCredentials(data.aap)
+    );
   }
   if (!data.aap.container_registry_credential || typeof data.aap.container_registry_credential !== 'object') {
     const org = data.aap.organization || 'ADO';
@@ -1984,12 +1992,24 @@ function normalizePreflightPayload(input) {
   if (data.aap.galaxy_setup_enabled === true) {
     const sharedHubToken = String(data.aap.galaxy_hub_token || '').trim();
     const generalUser = String(data.aap.admin_username || 'admin').trim() || 'admin';
+    const hubHost = galaxyHubHostnameForCredentials(data.aap);
     if (Array.isArray(data.aap.galaxy_credentials)) {
       data.aap.galaxy_credentials = data.aap.galaxy_credentials.map((credential) => {
         if (!credential || typeof credential !== 'object') return credential;
         const next = { ...credential };
         if (!String(next.token || '').trim() && sharedHubToken) {
           next.token = sharedHubToken;
+        }
+        if (hubHost && next.id && next.id !== 'galaxy' && next.name !== 'Ansible Galaxy') {
+          const contentPath = {
+            validated: 'validated',
+            published: 'published',
+            community: 'community',
+            certified: 'rh-certified'
+          }[next.id];
+          if (contentPath) {
+            next.url = `https://${hubHost}/api/galaxy/content/${contentPath}/`;
+          }
         }
         return next;
       });
@@ -2001,11 +2021,15 @@ function normalizePreflightPayload(input) {
         registry.password = sharedHubToken;
       }
       if (!String(registry.host || '').trim()) {
-        registry.host = String(data.aap.hostname || data.aap.hub_hostname || '')
-          .replace(/^https?:\/\//, '')
-          .replace(/\/+$/, '');
+        registry.host = hubHost || hostnameFromUrl(data.aap.hostname);
       }
     }
+    if (!sharedHubToken) {
+      data.aap.galaxy_setup_enabled = false;
+      data.aap.galaxy_credentials = [];
+    }
+  } else {
+    data.aap.galaxy_credentials = [];
   }
   if (!Array.isArray(data.aap.additional_credentials)) data.aap.additional_credentials = [];
   data.aap.additional_credentials = data.aap.additional_credentials.map(({ id, ...credential }) => credential);
