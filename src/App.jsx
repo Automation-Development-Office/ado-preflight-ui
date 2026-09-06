@@ -9498,10 +9498,11 @@ ${vaultYaml}
                     ref={importFileRef}
                     type="file"
                     accept="application/json,.json"
+                    data-testid="import-json-input"
                     style={{ display: 'none' }}
                     onChange={importJsonFile}
                   />
-                  <Button variant="secondary" onClick={() => importFileRef.current?.click()}>
+                  <Button variant="secondary" data-testid="upload-json-button" onClick={() => importFileRef.current?.click()}>
                     Upload JSON
                   </Button>
                 </div>
@@ -9510,7 +9511,11 @@ ${vaultYaml}
               <Grid hasGutter>
                 <GridItem span={6}>
                   <FormGroup label="Environment Type" isRequired>
-                    <TextInput value={data.environment} onChange={(_, v) => set('environment', v)} />
+                    <TextInput
+                      data-testid="environment-input"
+                      value={data.environment}
+                      onChange={(_, v) => set('environment', v)}
+                    />
                   </FormGroup>
                 </GridItem>
 
@@ -11414,6 +11419,7 @@ ${vaultYaml}
                     toggle={(toggleRef) => (
                       <MenuToggle
                         ref={toggleRef}
+                        data-testid="actions-menu"
                         onClick={() => setActionsOpen(!actionsOpen)}
                       >
                         Actions

@@ -1,0 +1,11 @@
+{
+  "environment": "prod",
+  "components": [],
+  "aap": {
+    "hostname": "https://controller.example.com",
+    "organization": "RH",
+    "inventory": "test-inventory",
+    "project": "RH-test-project",
+    "vault_credential_name": "custom-vault"
+  }
+}

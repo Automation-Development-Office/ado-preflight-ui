@@ -11,3 +11,5 @@ vendor/*.tar
 .local/
 .cache/
 .cursor/
+test-results/
+playwright-report/

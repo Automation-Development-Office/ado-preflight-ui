@@ -1,0 +1,9 @@
+{
+  "environment": "dev",
+  "domain": "example.lab",
+  "components": ["openshift"],
+  "aap": {
+    "hostname": "https://controller.example.com",
+    "organization": "RH"
+  }
+}

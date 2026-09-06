@@ -30,6 +30,19 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: API and normalization tests
+        run: node --test tests/*.test.js
+        env:
+          ADO_PREFLIGHT_TERMINAL_ENABLED: "false"
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end UI tests
+        run: npm run test:e2e
+        env:
+          ADO_PREFLIGHT_TERMINAL_ENABLED: "false"
+
       - name: Smoke test server
         run: |
           node server.js &

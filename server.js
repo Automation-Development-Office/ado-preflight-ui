@@ -5533,22 +5533,36 @@ app.use((req, res) => {
   res.sendFile(path.join(uiDir, 'index.html'));
 });
 
-const server = http.createServer(app);
-let terminalWss;
+function startServer() {
+  const server = http.createServer(app);
+  let terminalWss;
 
-try {
-  const { WebSocketServer } = require('ws');
-  terminalWss = new WebSocketServer({ server, path: '/api/terminal/ws' });
-  terminalWss.on('connection', ws => {
-    attachTerminalWebSocket(ws);
+  try {
+    const { WebSocketServer } = require('ws');
+    terminalWss = new WebSocketServer({ server, path: '/api/terminal/ws' });
+    terminalWss.on('connection', ws => {
+      attachTerminalWebSocket(ws);
+    });
+    event(terminalEnabled()
+      ? 'Pod terminal WebSocket enabled at /api/terminal/ws'
+      : 'Pod terminal WebSocket registered but unavailable (disabled or node-pty missing)');
+  } catch (err) {
+    event(`Pod terminal WebSocket setup failed: ${err.message}`);
+  }
+
+  server.listen(port, '0.0.0.0', () => {
+    event(`ADO Preflight UI listening on ${port}`);
   });
-  event(terminalEnabled()
-    ? 'Pod terminal WebSocket enabled at /api/terminal/ws'
-    : 'Pod terminal WebSocket registered but unavailable (disabled or node-pty missing)');
-} catch (err) {
-  event(`Pod terminal WebSocket setup failed: ${err.message}`);
+
+  return server;
 }
 
-server.listen(port, '0.0.0.0', () => {
-  event(`ADO Preflight UI listening on ${port}`);
-});
+module.exports = {
+  app,
+  normalizePreflightPayload,
+  validateAgentInstaller
+};
+
+if (require.main === module) {
+  startServer();
+}

@@ -5,6 +5,8 @@
   "scripts": {
     "build": "vite build",
     "start": "node server.js",
+    "test": "npm run build && node --test tests/*.test.js",
+    "test:e2e": "npm run build && playwright test",
     "changeset": "changeset",
     "version-packages": "changeset version"
   },
@@ -25,6 +27,7 @@
     "node-pty": "latest"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.29.5"
+    "@changesets/cli": "^2.29.5",
+    "@playwright/test": "^1.55.0"
   }
 }
