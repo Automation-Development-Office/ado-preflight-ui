@@ -966,6 +966,97 @@ function buildGitCloneArgs({
   return args;
 }
 
+function bootstrapRepoExists(repoDir) {
+  return fs.existsSync(path.join(repoDir, '.git'));
+}
+
+const GIT_OVERRIDE_DEFAULTS = {
+  group_vars_current_env: false,
+  job_and_workflow_templates: false,
+  all: false
+};
+
+function normalizeGitOverrides(git) {
+  if (!git || typeof git !== 'object') {
+    return { ...GIT_OVERRIDE_DEFAULTS };
+  }
+  if (!git.overrides || typeof git.overrides !== 'object') {
+    git.overrides = { ...GIT_OVERRIDE_DEFAULTS };
+    if (git.overwrite_generated === true) {
+      git.overrides.all = true;
+      git.overrides.group_vars_current_env = true;
+      git.overrides.job_and_workflow_templates = true;
+    }
+  } else {
+    git.overrides = {
+      group_vars_current_env: git.overrides.group_vars_current_env === true,
+      job_and_workflow_templates: git.overrides.job_and_workflow_templates === true,
+      all: git.overrides.all === true
+    };
+  }
+  git.overwrite_generated = git.overrides.all;
+  return git.overrides;
+}
+
+function resolveGitOverrideFlags(git, varsOnly) {
+  const overrides = normalizeGitOverrides(git || {});
+  if (varsOnly) {
+    return {
+      overrides,
+      overrideAll: false,
+      overrideGroupVarsEnv: true,
+      overrideJtWf: false
+    };
+  }
+  const overrideAll = overrides.all === true;
+  const overrideGroupVarsEnv = overrideAll || overrides.group_vars_current_env === true;
+  const overrideJtWf = overrideAll || overrides.job_and_workflow_templates === true;
+  return { overrides, overrideAll, overrideGroupVarsEnv, overrideJtWf };
+}
+
+async function prepareBootstrapGitRepo({
+  repoDir,
+  workRoot,
+  recloneRepo,
+  repoUrl,
+  branch,
+  token,
+  scmTool,
+  gitSkipTlsVerify,
+  skipTlsVerify
+}) {
+  if (!recloneRepo && bootstrapRepoExists(repoDir)) {
+    event(
+      `Reusing existing bootstrap clone at ${repoDir} `
+      + '(incremental git update; uncommitted pod edits preserved)'
+    );
+    return 0;
+  }
+
+  event(`Cleaning repo directory ${repoDir}`);
+  fs.rmSync(repoDir, { recursive: true, force: true });
+  fs.mkdirSync(workRoot, { recursive: true });
+
+  const cloneArgs = buildGitCloneArgs({
+    repoUrl,
+    branch,
+    repoDir,
+    token,
+    scmTool,
+    gitSkipTlsVerify
+  });
+
+  return runStream(
+    'git',
+    cloneArgs,
+    workRoot,
+    usesBearerGitAuth(scmTool)
+      ? 'Cloning Git repository with Authorization Bearer header'
+      : 'Cloning Git repository',
+    buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify)
+  );
+}
+
 function selectedComponentAppsFrom(data) {
   if (Array.isArray(data.components) && data.components.includes('all')) {
     return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...awsApps, ...provisionApps, 'jira'])];
@@ -1239,7 +1330,11 @@ function defaultComponentConfig(component) {
       standalone_zip: '',
       standalone_zip_file: '',
       standalone_zip_upload_path: '',
+      standalone_zip_source: 'url',
       standalone_zip_url: '',
+      standalone_zip_git_repo: '',
+      standalone_zip_git_path: '',
+      standalone_zip_git_branch: '',
       standalone_admin_user: 'admin',
       standalone_admin_password: '',
       standalone_tls_crt: '',
@@ -1261,6 +1356,77 @@ function hostnameFromUrl(value) {
   } catch {
     return raw.replace(/^https?:\/\//i, '').split('/')[0].trim();
   }
+}
+
+/** Hub Galaxy credential URLs must use Hub hostname, not Contoller hostname. */
+function galaxyHubHostnameForCredentials(aap = {}) {
+  const hub = hostnameFromUrl(aap.hub_hostname);
+  if (hub) return hub;
+  return hostnameFromUrl(aap.hostname);
+}
+
+function buildDefaultGalaxyCredentials(org = 'ADO', hubHostname = '') {
+  const prefix = (org || 'ADO').trim() || 'ADO';
+  const host = String(hubHostname || '').trim();
+  const hubContent = host ? `https://${host.replace(/^https?:\/\//, '')}/api/galaxy/content` : '';
+
+  return [
+    {
+      id: 'validated',
+      name: `${prefix}-validated`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/validated/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 1
+    },
+    {
+      id: 'published',
+      name: `${prefix}-published`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/published/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 2
+    },
+    {
+      id: 'community',
+      name: `${prefix}-community`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/community/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 3
+    },
+    {
+      id: 'certified',
+      name: `${prefix}-certified`,
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: hubContent ? `${hubContent}/rh-certified/` : '',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 4
+    },
+    {
+      id: 'galaxy',
+      name: 'Ansible Galaxy',
+      credential_type: 'Ansible Galaxy/Automation Hub API Token',
+      url: 'https://galaxy.ansible.com/',
+      auth_url: '',
+      token: '',
+      enabled: true,
+      attach_to_org: true,
+      order: 5
+    }
+  ];
 }
 
 /** Derive https://host/realms/rhlab from OIDC auth/token URLs. */
@@ -1597,7 +1763,9 @@ function normalizePreflightPayload(input) {
   if (data.git.skip_tls_verify === undefined) data.git.skip_tls_verify = true;
   if (data.git.overwrite_generated === undefined) data.git.overwrite_generated = false;
   if (data.git.vars_only === undefined) data.git.vars_only = false;
+  normalizeGitOverrides(data.git);
   if (data.git.token === undefined) data.git.token = '';
+  if (data.git.username === undefined) data.git.username = '';
 
   // Normalize additional environments for survey choices (never create group_vars dirs).
   data.additional_environments = normalizeAdditionalEnvironments(data.additional_environments);
@@ -1612,6 +1780,38 @@ function normalizePreflightPayload(input) {
   data.aap.project = normalizeOrgScopedName(data.aap.project, data.aap.organization, 'project');
   data.aap.vault_credential_name = normalizeOrgScopedName(data.aap.vault_credential_name, data.aap.organization, 'vault');
   if (data.aap.hub_publish_ado_collection === undefined) data.aap.hub_publish_ado_collection = false;
+  if (data.aap.hub_publish_preflight_collections === undefined) {
+    data.aap.hub_publish_preflight_collections = false;
+  }
+  if (!Array.isArray(data.aap.hub_publish_preflight_collection_names)) {
+    data.aap.hub_publish_preflight_collection_names = data.aap.hub_publish_preflight_collections
+      ? [
+        'kubernetes.core',
+        'redhat.openshift',
+        'redhat.satellite',
+        'redhat.rhel_idm',
+        'redhat.rhel_system_roles',
+        'community.general',
+        'community.grafana',
+        'amazon.aws',
+        'community.hashi_vault',
+        'community.kubernetes',
+        'freeipa.ansible_freeipa',
+        'grafana.grafana',
+        'ansible.posix',
+        'ansible.utils',
+        'ansible.controller',
+        'awx.awx',
+        'infra.controller_configuration',
+        'infra.aap_configuration',
+        'infra.aap_utilities',
+        'infra.rhacs_configuration',
+        'ansible.platform',
+        'ansible.hub',
+        'containers.podman'
+      ]
+      : [];
+  }
   if (data.aap.hub_mark_ado_validated === undefined) data.aap.hub_mark_ado_validated = false;
   if (data.aap.hub_force_ado_collection_update === undefined) data.aap.hub_force_ado_collection_update = false;
   data.aap.hub_mark_ado_validated = data.aap.hub_publish_ado_collection === true;
@@ -1628,6 +1828,12 @@ function normalizePreflightPayload(input) {
     if (data.hub.publish_ado_collection === true) {
       data.aap.hub_publish_ado_collection = true;
       data.aap.hub_mark_ado_validated = true;
+    }
+    if (data.hub.publish_preflight_collections !== undefined) {
+      data.aap.hub_publish_preflight_collections = data.hub.publish_preflight_collections === true;
+    }
+    if (Array.isArray(data.hub.publish_preflight_collection_names)) {
+      data.aap.hub_publish_preflight_collection_names = data.hub.publish_preflight_collection_names;
     }
     if (data.hub.force_ado_collection_update !== undefined) {
       data.aap.hub_force_ado_collection_update = data.hub.force_ado_collection_update === true;
@@ -1725,6 +1931,10 @@ function normalizePreflightPayload(input) {
     hostname: data.aap.hub_hostname,
     registry: data.aap.hub_ee_registry,
     publish_ado_collection: data.aap.hub_publish_ado_collection === true,
+    publish_preflight_collections: data.aap.hub_publish_preflight_collections === true,
+    publish_preflight_collection_names: Array.isArray(data.aap.hub_publish_preflight_collection_names)
+      ? data.aap.hub_publish_preflight_collection_names
+      : [],
     force_ado_collection_update: data.aap.hub_force_ado_collection_update === true,
     mark_ado_validated: data.aap.hub_mark_ado_validated === true,
     update_only: data.aap.hub_update_collection_only === true,
@@ -1740,15 +1950,7 @@ function normalizePreflightPayload(input) {
     }
   };
   if (data.aap.galaxy_setup_enabled === undefined) data.aap.galaxy_setup_enabled = false;
-  // Hub collection / EE / hub-only runs need org + Galaxy/registry creds. Auto-enable
-  // when those Hub options are on so Contoller can pull ado-ee without ImagePullBackOff.
-  if (
-    data.aap.hub_publish_ado_collection === true
-    || data.aap.hub_push_ee === true
-    || data.aap.hub_update_collection_only === true
-  ) {
-    data.aap.galaxy_setup_enabled = true;
-  }
+  if (data.aap.ignore_galaxy_cert === undefined) data.aap.ignore_galaxy_cert = false;
   if (data.aap.galaxy_hub_token === undefined) data.aap.galaxy_hub_token = '';
   if (!data.aap.galaxy_user_account || typeof data.aap.galaxy_user_account !== 'object') {
     data.aap.galaxy_user_account = {
@@ -1760,68 +1962,14 @@ function normalizePreflightPayload(input) {
     };
   }
   if (data.aap.galaxy_user_account.enabled === undefined) data.aap.galaxy_user_account.enabled = false;
-  if (!Array.isArray(data.aap.galaxy_credentials) || data.aap.galaxy_credentials.length === 0) {
-    const org = data.aap.organization || 'ADO';
-    const hostname = data.aap.hostname || '';
-    const base = String(hostname).replace(/\/+$/, '');
-    const hubContent = base ? `${base}/api/galaxy/content` : '';
-    data.aap.galaxy_credentials = [
-      {
-        id: 'validated',
-        name: `${org}-validated`,
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: hubContent ? `${hubContent}/validated/` : '',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 1
-      },
-      {
-        id: 'published',
-        name: `${org}-published`,
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: hubContent ? `${hubContent}/published/` : '',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 2
-      },
-      {
-        id: 'community',
-        name: `${org}-community`,
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: hubContent ? `${hubContent}/community/` : '',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 3
-      },
-      {
-        id: 'certified',
-        name: `${org}-certified`,
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: hubContent ? `${hubContent}/rh-certified/` : '',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 4
-      },
-      {
-        id: 'galaxy',
-        name: 'Ansible Galaxy',
-        credential_type: 'Ansible Galaxy/Automation Hub API Token',
-        url: 'https://galaxy.ansible.com/',
-        auth_url: '',
-        token: '',
-        enabled: true,
-        attach_to_org: true,
-        order: 5
-      }
-    ];
+  if (
+    data.aap.galaxy_setup_enabled === true
+    && (!Array.isArray(data.aap.galaxy_credentials) || data.aap.galaxy_credentials.length === 0)
+  ) {
+    data.aap.galaxy_credentials = buildDefaultGalaxyCredentials(
+      data.aap.organization || 'ADO',
+      galaxyHubHostnameForCredentials(data.aap)
+    );
   }
   if (!data.aap.container_registry_credential || typeof data.aap.container_registry_credential !== 'object') {
     const org = data.aap.organization || 'ADO';
@@ -1840,23 +1988,28 @@ function normalizePreflightPayload(input) {
   if (data.aap.skip_tls_verify === true && data.aap.container_registry_credential.verify_ssl === true) {
     data.aap.container_registry_credential.verify_ssl = false;
   }
-  // Galaxy tab mirrors Hub: empty token/password fields fall back to General credentials.
+  // Hub/Galaxy API token is separate from Controller OAuth — only propagate shared Hub token.
   if (data.aap.galaxy_setup_enabled === true) {
-    const generalToken = String(data.aap.oauth_token || '').trim();
-    const generalPassword = String(data.aap.admin_password || '').trim();
+    const sharedHubToken = String(data.aap.galaxy_hub_token || '').trim();
     const generalUser = String(data.aap.admin_username || 'admin').trim() || 'admin';
-    const sharedHubToken = String(data.aap.galaxy_hub_token || '').trim()
-      || generalToken
-      || generalPassword;
-    if (!String(data.aap.galaxy_hub_token || '').trim() && sharedHubToken) {
-      data.aap.galaxy_hub_token = sharedHubToken;
-    }
+    const hubHost = galaxyHubHostnameForCredentials(data.aap);
     if (Array.isArray(data.aap.galaxy_credentials)) {
       data.aap.galaxy_credentials = data.aap.galaxy_credentials.map((credential) => {
         if (!credential || typeof credential !== 'object') return credential;
         const next = { ...credential };
-        if (!String(next.token || '').trim()) {
+        if (!String(next.token || '').trim() && sharedHubToken) {
           next.token = sharedHubToken;
+        }
+        if (hubHost && next.id && next.id !== 'galaxy' && next.name !== 'Ansible Galaxy') {
+          const contentPath = {
+            validated: 'validated',
+            published: 'published',
+            community: 'community',
+            certified: 'rh-certified'
+          }[next.id];
+          if (contentPath) {
+            next.url = `https://${hubHost}/api/galaxy/content/${contentPath}/`;
+          }
         }
         return next;
       });
@@ -1864,15 +2017,19 @@ function normalizePreflightPayload(input) {
     const registry = data.aap.container_registry_credential;
     if (registry && typeof registry === 'object' && registry.enabled !== false) {
       if (!String(registry.username || '').trim()) registry.username = generalUser;
-      if (!String(registry.password || '').trim()) {
-        registry.password = sharedHubToken || generalPassword;
+      if (!String(registry.password || '').trim() && sharedHubToken) {
+        registry.password = sharedHubToken;
       }
       if (!String(registry.host || '').trim()) {
-        registry.host = String(data.aap.hostname || data.aap.hub_hostname || '')
-          .replace(/^https?:\/\//, '')
-          .replace(/\/+$/, '');
+        registry.host = hubHost || hostnameFromUrl(data.aap.hostname);
       }
     }
+    if (!sharedHubToken) {
+      data.aap.galaxy_setup_enabled = false;
+      data.aap.galaxy_credentials = [];
+    }
+  } else {
+    data.aap.galaxy_credentials = [];
   }
   if (!Array.isArray(data.aap.additional_credentials)) data.aap.additional_credentials = [];
   data.aap.additional_credentials = data.aap.additional_credentials.map(({ id, ...credential }) => credential);
@@ -4131,8 +4288,10 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, runtimeMs) {
     `Organization: ${data?.aap?.organization || 'not configured'}`,
     `Project Name: ${projectName}`,
     `AAP Hub collection update: ${data?.aap?.hub_publish_ado_collection ? 'yes' : 'no'}`,
+    `AAP Hub additional playbook collections: ${data?.aap?.hub_publish_preflight_collections ? 'yes' : 'no'}`,
     `AAP Hub/Galaxy requirements.yml: ${
       data?.aap?.hub_publish_ado_collection
+      || data?.aap?.hub_publish_preflight_collections
         ? 'written (Hub/Galaxy names)'
         : 'local type:dir for vendored infra.ado (org must already have Galaxy creds, or use ADO EE)'
     }`,
@@ -4140,7 +4299,12 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, runtimeMs) {
     `AAP standalone run: ${aapStandaloneRun(data) ? 'yes (AAP tabs only — skip component playbooks/full Contoller scaffolding)' : 'no'}`,
     `Vars/vault only: ${data?.git?.vars_only === true ? 'yes (group_vars only — skip playbooks and Controller apply)' : 'no'}`,
     `AAP Hub hostname: ${data?.aap?.hub_hostname || data?.hub?.hostname || 'defaults to AAP hostname'}`,
-    `AAP Hub repository target: ${data?.aap?.hub_publish_ado_collection ? 'validated' : 'not requested'}`,
+    `AAP Hub repository target: ${
+      data?.aap?.hub_publish_ado_collection
+      || data?.aap?.hub_publish_preflight_collections
+        ? 'validated'
+        : 'not requested'
+    }`,
     `AAP Hub EE push: ${data?.aap?.hub_push_ee ? 'yes' : 'no (optional; default off)'}`,
     ...(data?.aap?.hub_push_ee
       ? [
@@ -4692,15 +4856,31 @@ app.post('/api/bootstrap', async (req, res) => {
   }
 
   const gitToken = data?.git?.token || '';
+  const gitUsername = String(data?.git?.username || '').trim();
+  const scmToolEarly = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
   const aapEnabled = data?.aap?.enabled !== false;
   const installAapDuringBootstrap = installAapFullRequested(data);
   const attachAapLicenseDuringBootstrap = attachAapLicenseRequested(data);
   // License-only attach must not skip Using AAP / controller configuration.
   const configureAap = aapEnabled && !installAapDuringBootstrap;
 
+  if (scmToolEarly === 'bitbucket' && configureAap && gitToken && !gitUsername) {
+    event('Bootstrap failed: Bitbucket needs git.username for Controller project sync');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error:
+        'Bitbucket is selected — set Git Configuration → Bitbucket username '
+        + 'so Controller Source Control credentials use username + HTTP access token (not OAuth2).'
+    });
+  }
+
   const standaloneRun = aapStandaloneRun(data);
   const hubUpdateCollectionOnly = standaloneRun;
-  const hubPublishRequested = aapEnabled && data?.aap?.hub_publish_ado_collection === true;
+  const hubPublishRequested = aapEnabled && (
+    data?.aap?.hub_publish_ado_collection === true
+    || data?.aap?.hub_publish_preflight_collections === true
+  );
   const hubPushEeRequested = aapEnabled && data?.aap?.hub_push_ee === true;
   const gatewayAuthRequested = aapAuthConfigRequested(data);
   const hasAapOAuthToken = Boolean(String(data?.aap?.oauth_token || '').trim());
@@ -4901,7 +5081,12 @@ app.post('/api/bootstrap', async (req, res) => {
     ? false
     : (data?.git?.auto_push !== false);
   const varsOnly = data?.git?.vars_only === true && !hubUpdateCollectionOnly;
-  const overwriteGenerated = !varsOnly && data?.git?.overwrite_generated === true;
+  const {
+    overrides: gitOverrides,
+    overrideAll,
+    overrideGroupVarsEnv,
+    overrideJtWf
+  } = resolveGitOverrideFlags(data?.git, varsOnly);
   // UI dropdown (ansible.verbosity in POST body) is authoritative — never fall back
   // to legacy top-level verbosity from imported JSON.
   if (!data.ansible) data.ansible = {};
@@ -4920,7 +5105,8 @@ app.post('/api/bootstrap', async (req, res) => {
   append(`Selected Component Apps: ${selectedComponentApps.join(',')}\n`);
   append(`Auto Git Push: ${autoGitPush}\n`);
   append(`Vars/Vault Only: ${varsOnly}\n`);
-  append(`Overwrite Generated Content: ${overwriteGenerated}\n`);
+  append(`Overwrite Generated Content (legacy all): ${overrideAll}\n`);
+  append(`Git overrides: group_vars=${overrideGroupVarsEnv} job_workflow=${overrideJtWf} all=${overrideAll}\n`);
   append(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}\n`);
   append(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}\n`);
   append(`Ansible Extra Args: ${ansibleExtraArgsRaw || '(none)'}\n`);
@@ -4936,7 +5122,7 @@ app.post('/api/bootstrap', async (req, res) => {
   event(`Selected component apps: ${selectedComponentApps.join(',')}`);
   event(`Auto Git Push: ${autoGitPush}`);
   event(`Vars/Vault Only: ${varsOnly}`);
-  event(`Overwrite Generated Content: ${overwriteGenerated}`);
+  event(`Git overrides: group_vars=${overrideGroupVarsEnv} job_workflow=${overrideJtWf} all=${overrideAll}`);
   event(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}`);
   event(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}`);
   event(`Ansible Extra Args: ${ansibleExtraArgsRaw || '(none)'}`);
@@ -4989,10 +5175,6 @@ app.post('/api/bootstrap', async (req, res) => {
   latestDebug.repoDir = repoDir;
   latestDebug.preflightPath = preflightPath;
   latestDebug.extraVarsPath = extraVarsPath;
-
-  event(`Cleaning repo directory ${repoDir}`);
-  fs.rmSync(repoDir, { recursive: true, force: true });
-  fs.mkdirSync(workRoot, { recursive: true });
 
   const collectionInstallScript = path.join(workRoot, 'install-collections.sh');
   const stageAdoSourceScript = path.join(workRoot, 'stage-ado-source.py');
@@ -5284,37 +5466,30 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     );
   }
 
-  const cloneArgs = buildGitCloneArgs({
+  const cloneCode = await prepareBootstrapGitRepo({
+    repoDir,
+    workRoot,
+    recloneRepo: overrideAll,
     repoUrl,
     branch: data.aap.git_branch,
-    repoDir,
     token: gitToken,
     scmTool,
-    gitSkipTlsVerify
+    gitSkipTlsVerify,
+    skipTlsVerify
   });
 
-  const cloneCode = await runStream(
-    'git',
-    cloneArgs,
-    workRoot,
-    gitUsesBearerAuth
-      ? 'Cloning Git repository with Authorization Bearer header'
-      : 'Cloning Git repository',
-    buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify)
-  );
-
   if (cloneCode !== 0 || !fs.existsSync(repoDir)) {
-    event(`Bootstrap failed during git clone exitCode=${cloneCode}`);
+    event(`Bootstrap failed during git prepare exitCode=${cloneCode}`);
     latestDebug.result = {
       status: 'failed',
       exitCode: cloneCode || 128,
       repoDir,
-      error: 'Git clone failed. Check logs.'
+      error: 'Git clone/prepare failed. Check logs.'
     };
     return res.json(latestDebug.result);
   }
 
-  event('Git repository cloned');
+  event(bootstrapRepoExists(repoDir) ? 'Git repository ready' : 'Git repository cloned');
 
   if (gitUsesBearerAuth && gitToken) {
     await runStream(
@@ -5355,7 +5530,10 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     component_options: data.component_options || {},
     machine_credential: data.aap.machine_credential || {},
     git_auto_push: autoGitPush,
-    git_overwrite_generated: overwriteGenerated,
+    git_overwrite_generated: overrideAll,
+    git_overrides: gitOverrides,
+    git_override_group_vars_env: overrideGroupVarsEnv,
+    git_override_job_workflow_templates: overrideJtWf,
     git_skip_tls_verify: gitSkipTlsVerify,
     git_vars_only: varsOnly,
     scm_tool: scmTool,
@@ -5376,6 +5554,22 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     vaultPassPath,
     data?.aap?.vault_password || data.vault_password || 'redhat123'
   );
+
+  const gitPrepBash = overrideAll
+    ? `echo "Git override (all): removing group_vars, playbooks, and configs"
+rm -rf group_vars playbooks configs`
+    : [
+      `echo "Incremental git update: preserving existing pod clone (env=${envName})"`,
+      `mkdir -p "group_vars/all/${envName}"`,
+      overrideGroupVarsEnv
+        ? `echo "Git override (group_vars): removing group_vars/all/${envName}"
+rm -rf "group_vars/all/${envName}"`
+        : '',
+      overrideJtWf
+        ? `echo "Git override (job/workflow templates): removing configs/job_templates and configs/workflows"
+rm -rf configs/job_templates configs/workflows`
+        : ''
+    ].filter(Boolean).join('\n');
 
   const code = await runStream('bash', ['-lc', `
 set -euo pipefail
@@ -5407,13 +5601,7 @@ rm -rf collections/ansible_collections/infra/ado
 
 echo ""
 echo "=== Prepare generated bootstrap content ==="
-${overwriteGenerated
-  ? `echo "Overwrite enabled: removing all group_vars, playbooks, and configs"
-rm -rf group_vars playbooks configs`
-  : `echo "Overwrite disabled: refreshing only group_vars/all/${envName} (sibling envs preserved)"
-rm -rf "group_vars/all/${envName}"
-# Shared playbooks/configs are regenerated with force; do not wipe sibling env dirs.
-mkdir -p group_vars/all`}
+${gitPrepBash}
 
 echo ""
 echo "=== Effective preflight JSON ==="
@@ -5469,8 +5657,10 @@ ansible-playbook \\
   -e generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e bootstrap_generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e generate_playbook_repo_git_commit_message="Generate ADO bootstrap content for ${envName}" \\
-  -e bootstrap_generate_env_vars_force=true \\
-  -e generate_env_vars_force=true \\
+  -e bootstrap_generate_env_vars_force=${overrideGroupVarsEnv ? 'true' : 'false'} \\
+  -e generate_env_vars_force=${overrideGroupVarsEnv ? 'true' : 'false'} \\
+  -e bootstrap_generate_playbook_repo_force=${overrideAll ? 'true' : 'false'} \\
+  -e bootstrap_controller_generate_aap_configs_force_job_workflows=${overrideJtWf ? 'true' : 'false'} \\
   -e generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
   -e bootstrap_generate_env_vars_encrypt_vault_files=${encryptVaultFiles ? 'true' : 'false'} \\
   -e bootstrap_generate_env_vars_vault_password_file=.vault_pass \\
@@ -5499,7 +5689,11 @@ ansible-playbook \\
     selectedComponentApps,
     autoGitPush,
     varsOnly,
-    overwriteGenerated,
+    gitOverrides,
+    overrideAll,
+    overrideGroupVarsEnv,
+    overrideJtWf,
+    overwriteGenerated: overrideAll,
     ansibleVerbosity,
     ansibleVerbosityFlag,
     ansibleExtraArgs: ansibleExtraArgsRaw,
