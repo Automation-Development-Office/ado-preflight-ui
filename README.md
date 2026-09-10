@@ -80,9 +80,14 @@ Recommended:
 
 Pull or build the UI image, then run it with Podman.
 
+`podman run` defaults to `--pull=missing`, so it reuses a local copy of
+`:latest` instead of fetching a newer image from the registry. Use
+`--pull=always` so each run pulls the current published image:
+
 ```bash
 podman run --rm -d \
   --name ado-preflight-ui \
+  --pull=always \
   -p 8080:8080 \
   ghcr.io/automation-development-office/ado-preflight-ui:latest
 ```
