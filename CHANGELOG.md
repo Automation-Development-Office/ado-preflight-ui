@@ -1,5 +1,15 @@
 # ADO Preflight UI Changelog
 
+## Unreleased
+
+### Minor Changes
+
+- **Dev Spaces**: custom getting-started sample form (display name, description, tags, git/devfile URL) plus bundled ADO sample icon or upload. Writes `custom_sample_*` into preflight JSON for `infra.ado.ocp_devspaces`.
+- Restore **Cert Manager** and **Default Ingress Cert** Component Configuration tabs (lost after an uncommitted UI reset). Selecting the `cert_manager` OpenShift app opens Cert Manager (IdM ACME / AWS PCA / Custom). OpenShift option **Default Ingress Cert** opens router-wildcard PEM upload and sets `update_default_ingress`.
+- Restore OpenShift **Console Banner** action (add / update / delete; default add), expand **LDAP Auth** with IdM `ldap_config` fields, and expand **OAuth / RHBK** with Keycloak hostname/realm/client, scopes, prepopulate button, and fetch-secret automation.
+- Show **Quay** and **MinIO** config tabs when selected (hostname/storage + Keycloak OIDC), matching Grafana-style OIDC options.
+- Header **?** menu → **Show known bugs** opens `known-bugs.md` (served at `/api/readme/known-bugs`). Index entries are short blurbs that link to the full bug write-up. Hub large-collection pulp wait and Hub EE skopeo 502 are documented as fixed/mitigated in `infra.ado` 1.3.16+ (rebuild tarball + restart pod).
+
 ## 1.2.0
 
 ### Minor Changes

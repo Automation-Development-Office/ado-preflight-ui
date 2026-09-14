@@ -209,7 +209,7 @@ const packageJson = require('./package.json');
 const openshiftApps = [
   'aap', 'acs', 'acm', 'bookstack', 'cert_manager', 'console', 'devspaces', 'dev_hub',
   'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio', 'netbox',
-  'oadp', 'openshift', 'pega', 'quay', 'rhbk'
+  'oadp', 'ocp_virtualization', 'openshift', 'pega', 'quay', 'rhbk', 'zabbix'
 ];
 const rhelApps = ['rhel', 'satellite', 'idm', 'aap', 'dirsrv', 'eck', 'gitlab', 'grafana', 'kafka', 'rhbk', 'compliance', 'stig'];
 const patchingApps = ['patching', 'satellite', 'idm'];
@@ -420,12 +420,14 @@ const gitlabOptionApps = {
   standalone: 'gitlab_standalone'
 };
 const grafanaOptionApps = {
+  install: 'grafana',
   standalone: 'grafana_standalone',
   oidc: 'grafana_oidc',
   email: 'grafana_email',
   datasources: 'grafana_datasources',
   folders: 'grafana_folders',
   dashboards: 'grafana_dashboards',
+  alerts: 'grafana_alerts',
   alternate_route: 'grafana_alternate_route'
 };
 const quayOptionApps = { oidc: 'quay_oidc' };
@@ -439,6 +441,18 @@ const DEFAULT_HUB_EE_IMAGE_NAME = 'ado-ee';
 app.use(express.json({ limit: '100mb' }));
 app.use(express.static(uiDir));
 app.use('/examples', express.static(path.join(__dirname, 'examples')));
+// Small Dev Spaces sample icon (bundled; not the full marketing PNG)
+app.get('/ado-sample-icon.png', (req, res) => {
+  const candidates = [
+    path.join(__dirname, 'ado-sample-icon.png'),
+    path.join(__dirname, 'public', 'ado-sample-icon.png'),
+    path.join(uiDir, 'ado-sample-icon.png')
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return res.sendFile(p);
+  }
+  return res.status(404).type('text/plain').send('ado-sample-icon.png not found');
+});
 
 let latestLog = '';
 let latestEvents = '';
@@ -1109,8 +1123,20 @@ function selectedComponentAppsFrom(data) {
     || (data.component_apps?.openshift || []).includes('grafana')
     || (data.component_apps?.rhel || []).includes('grafana');
   if (grafanaSelected) {
-    for (const option of data.component_options?.grafana || []) {
+    const grafanaOpts = (data.component_options?.grafana || []).map(o => String(o).toLowerCase());
+    for (const option of grafanaOpts) {
       if (grafanaOptionApps[option]) out.push(grafanaOptionApps[option]);
+    }
+    // Satellite-style: drop bare grafana (OCP install JT) unless install selected or no options.
+    const wantInstall = grafanaOpts.length === 0 || grafanaOpts.includes('install');
+    const wantStandalone = grafanaOpts.includes('standalone');
+    if (!wantInstall || wantStandalone) {
+      for (let i = out.length - 1; i >= 0; i -= 1) {
+        if (out[i] === 'grafana') out.splice(i, 1);
+      }
+    }
+    if (wantInstall && !wantStandalone && !out.includes('grafana')) {
+      out.push('grafana');
     }
   }
 
@@ -1214,9 +1240,9 @@ function defaultComponentConfig(component) {
       custom_cert_chain_file: '',
       admin_password: '',
       directory_manager_password: '',
-      ad_domain: 'ad.lab',
-      ad_dc_hostname: 'adwindows.ad.lab',
-      ad_dc_ip: '192.168.0.61',
+      ad_domain: '',
+      ad_dc_hostname: '',
+      ad_dc_ip: '',
       ad_admin: 'Administrator',
       ad_admin_password: '',
       ad_two_way: true,
@@ -1228,7 +1254,7 @@ function defaultComponentConfig(component) {
 
   if (component === 'grafana') {
     Object.assign(config, {
-      hostname: 'grafana-ado.server.lab',
+      hostname: '',
       folders: [
         { name: 'Openshift', source_type: 'path', source: '', dashboards_path: 'dashboards', alerts_path: 'alerts' }
       ],
@@ -1248,7 +1274,7 @@ function defaultComponentConfig(component) {
         issuer: ''
       },
       alerts_enabled: false,
-      standalone_hostname: 'grafana-ado.server.lab',
+      standalone_hostname: '',
       standalone_admin_user: 'admin',
       standalone_admin_password: 'redhat123',
       standalone_http_port: 3000,
@@ -1264,9 +1290,9 @@ function defaultComponentConfig(component) {
 
   if (component === 'gitlab') {
     Object.assign(config, {
-      hostname: 'gitlab-ado.server.lab',
-      standalone_hostname: 'gitlab-ado.server.lab',
-      standalone_external_url: 'http://gitlab-ado.server.lab',
+      hostname: '',
+      standalone_hostname: '',
+      standalone_external_url: '',
       standalone_root_password: 'redhat123',
       standalone_edition: 'ce',
       standalone_http_port: 80,
@@ -1315,7 +1341,17 @@ function defaultComponentConfig(component) {
       default_devfile_url: '',
       default_workspace_image: '',
       che_image_tag: '',
-      dashboard_image: ''
+      dashboard_image: '',
+      custom_sample_enabled: false,
+      custom_sample_display_name: 'ADO',
+      custom_sample_description: 'ADO default Dev Spaces workspace',
+      custom_sample_tags: 'ado',
+      custom_sample_url: '',
+      custom_sample_icon_source: 'bundled',
+      custom_sample_icon_filename: '',
+      custom_sample_icon_base64: '',
+      custom_sample_icon_mediatype: 'image/png',
+      status_exporter_enabled: true
     });
   }
 
@@ -1326,7 +1362,7 @@ function defaultComponentConfig(component) {
       group_mapper_claim: 'groups',
       group_mapper_group_path: '',
       group_mapper_sync_mode: 'IMPORT',
-      standalone_hostname: 'keycloak-ado.server.lab',
+      standalone_hostname: '',
       standalone_zip: '',
       standalone_zip_file: '',
       standalone_zip_upload_path: '',
@@ -1359,6 +1395,17 @@ function hostnameFromUrl(value) {
 }
 
 /** Hub Galaxy credential URLs must use Hub hostname, not Contoller hostname. */
+/** Hub API host defaults from Contoller AAP Hostname unless hub_hostname_manual. */
+function resolveHubHostnameFromAap(aap = {}, { honorManual = true } = {}) {
+  const controllerHost = hostnameFromUrl(aap?.hostname);
+  if (honorManual && aap?.hub_hostname_manual === true) {
+    const manual = hostnameFromUrl(aap?.hub_hostname) || String(aap?.hub_hostname || '').trim();
+    return manual || controllerHost;
+  }
+  return controllerHost;
+}
+
+
 function galaxyHubHostnameForCredentials(aap = {}) {
   const hub = hostnameFromUrl(aap.hub_hostname);
   if (hub) return hub;
@@ -1882,13 +1929,14 @@ function normalizePreflightPayload(input) {
   if (data.aap.hub_ee_tag === undefined) data.aap.hub_ee_tag = 'latest';
   if (data.aap.hub_ee_registry === undefined) data.aap.hub_ee_registry = '';
   if (data.aap.hub_hostname === undefined) data.aap.hub_hostname = '';
-  // Hub hostname required for Hub work — default from AAP hostname host.
-  if (!String(data.aap.hub_hostname || '').trim()) {
-    data.aap.hub_hostname = hostnameFromUrl(data.aap.hostname);
-  } else {
-    data.aap.hub_hostname = hostnameFromUrl(data.aap.hub_hostname) || String(data.aap.hub_hostname).trim();
-  }
-  if (!String(data.aap.hub_ee_registry || '').trim()) {
+  if (data.aap.hub_hostname_manual === undefined) data.aap.hub_hostname_manual = false;
+  data.aap.hub_hostname_manual = data.aap.hub_hostname_manual === true;
+  // Hub hostname auto-discovers from Contoller AAP Hostname unless operator set Hub manually.
+  data.aap.hub_hostname = resolveHubHostnameFromAap(data.aap);
+  if (
+    data.aap.hub_hostname_manual !== true
+    || !String(data.aap.hub_ee_registry || '').trim()
+  ) {
     data.aap.hub_ee_registry = data.aap.hub_hostname;
   } else {
     data.aap.hub_ee_registry = hostnameFromUrl(data.aap.hub_ee_registry)
@@ -2098,11 +2146,11 @@ function normalizePreflightPayload(input) {
     if (!data.component_config.satellite.oidc.realm) {
       data.component_config.satellite.oidc.realm = 'rhlab';
     }
-    if (!data.component_config.satellite.oidc.keycloak_url) {
-      data.component_config.satellite.oidc.keycloak_url = 'https://keycloak.apps.ocp.prod.rhlab';
+    if (data.component_config.satellite.oidc.keycloak_url === undefined) {
+      data.component_config.satellite.oidc.keycloak_url = '';
     }
-    if (!data.component_config.satellite.oidc.issuer) {
-      data.component_config.satellite.oidc.issuer = 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab';
+    if (data.component_config.satellite.oidc.issuer === undefined) {
+      data.component_config.satellite.oidc.issuer = '';
     }
     if (data.component_config.satellite.oidc.client_secret === undefined) {
       data.component_config.satellite.oidc.client_secret = '';
@@ -2139,9 +2187,9 @@ function normalizePreflightPayload(input) {
     if (data.component_config.idm.custom_cert_file === undefined) data.component_config.idm.custom_cert_file = '';
     if (data.component_config.idm.custom_cert_key_file === undefined) data.component_config.idm.custom_cert_key_file = '';
     if (data.component_config.idm.custom_cert_chain_file === undefined) data.component_config.idm.custom_cert_chain_file = '';
-    if (data.component_config.idm.ad_domain === undefined) data.component_config.idm.ad_domain = 'ad.lab';
-    if (data.component_config.idm.ad_dc_hostname === undefined) data.component_config.idm.ad_dc_hostname = 'adwindows.ad.lab';
-    if (data.component_config.idm.ad_dc_ip === undefined) data.component_config.idm.ad_dc_ip = '192.168.0.61';
+    if (data.component_config.idm.ad_domain === undefined) data.component_config.idm.ad_domain = '';
+    if (data.component_config.idm.ad_dc_hostname === undefined) data.component_config.idm.ad_dc_hostname = '';
+    if (data.component_config.idm.ad_dc_ip === undefined) data.component_config.idm.ad_dc_ip = '';
     if (data.component_config.idm.ad_admin === undefined) data.component_config.idm.ad_admin = 'Administrator';
     if (data.component_config.idm.ad_admin_password === undefined) data.component_config.idm.ad_admin_password = '';
     if (data.component_config.idm.ad_two_way === undefined) data.component_config.idm.ad_two_way = true;
@@ -2160,11 +2208,20 @@ function normalizePreflightPayload(input) {
   if (data.openshift.banner_location === undefined) data.openshift.banner_location = 'BannerTop';
   if (data.openshift.banner_background_color === undefined) data.openshift.banner_background_color = '#1f7a1f';
   if (data.openshift.banner_text_color === undefined) data.openshift.banner_text_color = '#ffffff';
+  if (data.openshift.banner_state === undefined) data.openshift.banner_state = 'add';
   if (!data.openshift.oauth_rhbk || typeof data.openshift.oauth_rhbk !== 'object') {
     data.openshift.oauth_rhbk = { idp_name: 'Keycloak' };
   }
   if (!String(data.openshift.oauth_rhbk.idp_name || '').trim()) {
     data.openshift.oauth_rhbk.idp_name = 'Keycloak';
+  }
+  if (data.openshift.oauth_rhbk.client_id === undefined) data.openshift.oauth_rhbk.client_id = '';
+  if (data.openshift.oauth_rhbk.keycloak_hostname === undefined) data.openshift.oauth_rhbk.keycloak_hostname = '';
+  if (data.openshift.oauth_rhbk.realm === undefined) data.openshift.oauth_rhbk.realm = 'rhlab';
+  if (data.openshift.oauth_rhbk.extra_scopes === undefined) data.openshift.oauth_rhbk.extra_scopes = 'groups';
+  if (data.openshift.oauth_rhbk.mapping_method === undefined) data.openshift.oauth_rhbk.mapping_method = 'claim';
+  if (data.openshift.oauth_rhbk.fetch_client_secret === undefined) {
+    data.openshift.oauth_rhbk.fetch_client_secret = true;
   }
   if (!data.openshift.ldap_auth || typeof data.openshift.ldap_auth !== 'object') {
     data.openshift.ldap_auth = { idp_name: 'LDAP_IDM' };
@@ -2172,6 +2229,25 @@ function normalizePreflightPayload(input) {
   if (!String(data.openshift.ldap_auth.idp_name || '').trim()) {
     data.openshift.ldap_auth.idp_name = 'LDAP_IDM';
   }
+  if (data.openshift.ldap_auth.connection_url === undefined) {
+    data.openshift.ldap_auth.connection_url = 'ldap://idm.server.lab';
+  }
+  if (data.openshift.ldap_auth.bind_dn === undefined) {
+    data.openshift.ldap_auth.bind_dn = 'cn=Directory Manager';
+  }
+  if (data.openshift.ldap_auth.bind_credential === undefined) {
+    data.openshift.ldap_auth.bind_credential = '';
+  }
+  if (data.openshift.ldap_auth.users_dn === undefined) {
+    data.openshift.ldap_auth.users_dn = 'cn=users,cn=accounts,dc=server,dc=lab';
+  }
+  if (data.openshift.ldap_auth.username_ldap_attribute === undefined) {
+    data.openshift.ldap_auth.username_ldap_attribute = 'uid';
+  }
+  if (data.openshift.ldap_auth.mapping_method === undefined) {
+    data.openshift.ldap_auth.mapping_method = 'claim';
+  }
+  if (data.openshift.ldap_auth.insecure === undefined) data.openshift.ldap_auth.insecure = false;
   data.openshift.agent_installer = normalizeAgentInstaller(data.openshift.agent_installer || {});
 
   if (!data.component_config.cert_manager) data.component_config.cert_manager = {};
@@ -2187,6 +2263,37 @@ function normalizePreflightPayload(input) {
   if (data.component_config.cert_manager.awspca_pca_arn === undefined) data.component_config.cert_manager.awspca_pca_arn = '';
   if (data.component_config.cert_manager.awspca_access_key_id === undefined) data.component_config.cert_manager.awspca_access_key_id = '';
   if (data.component_config.cert_manager.awspca_secret_access_key === undefined) data.component_config.cert_manager.awspca_secret_access_key = '';
+  if (data.component_config.cert_manager.idm_ca_bundle_filename === undefined) data.component_config.cert_manager.idm_ca_bundle_filename = '';
+  if (data.component_config.cert_manager.idm_ca_bundle_content_base64 === undefined) {
+    data.component_config.cert_manager.idm_ca_bundle_content_base64 = '';
+  }
+  if (data.component_config.cert_manager.update_default_ingress === undefined) {
+    data.component_config.cert_manager.update_default_ingress = false;
+  }
+  if (data.component_config.cert_manager.trust_ca_clusterwide === undefined) {
+    data.component_config.cert_manager.trust_ca_clusterwide = true;
+  }
+  if (data.component_config.cert_manager.ingress_tls_crt === undefined) data.component_config.cert_manager.ingress_tls_crt = '';
+  if (data.component_config.cert_manager.ingress_tls_key === undefined) data.component_config.cert_manager.ingress_tls_key = '';
+  if (data.component_config.cert_manager.ingress_ca_crt === undefined) data.component_config.cert_manager.ingress_ca_crt = '';
+
+  // UI option for Default Ingress Cert tab when only the config flag is set.
+  if (data.component_config.cert_manager.update_default_ingress === true) {
+    if (!Array.isArray(data.component_options?.openshift)) {
+      data.component_options = data.component_options || {};
+      data.component_options.openshift = [];
+    }
+    if (!data.component_options.openshift.includes('update_default_ingress')) {
+      data.component_options.openshift.push('update_default_ingress');
+    }
+    if (!Array.isArray(data.component_apps?.openshift)) {
+      data.component_apps = data.component_apps || {};
+      data.component_apps.openshift = [];
+    }
+    if (!data.component_apps.openshift.includes('cert_manager')) {
+      data.component_apps.openshift.push('cert_manager');
+    }
+  }
 
   if (!data.pre_installs) data.pre_installs = {};
   if (data.pre_installs.install_aap === undefined) data.pre_installs.install_aap = false;
@@ -4317,15 +4424,27 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, runtimeMs) {
     `Git SSL verify: ${data?.git?.skip_tls_verify === false ? 'enabled' : 'disabled (default)'}`
   ];
 
-  appendListRecap(lines, 'Components', selectedComponentApps);
-  appendListRecap(lines, 'Job Templates', readConfigNames([
-    path.join(controllerDir, 'job_templates.yml'),
-    ...listYamlFiles(jobTemplatesDir)
-  ]));
-  appendListRecap(lines, 'Workflow Templates', readConfigNames([
-    path.join(workflowsDir, 'bootstrap_workflows.yml'),
-    ...listYamlFiles(workflowsDir)
-  ]));
+  // Hub-only / standalone: do not list leftover JT/WF YAML from a prior full
+  // bootstrap in bootstrap-sample — those were not generated or applied.
+  if (aapStandaloneRun(data) || data?.aap?.hub_update_collection_only === true) {
+    appendListRecap(lines, 'Components', selectedComponentApps?.length ? selectedComponentApps : ['none (hub-only)']);
+    appendListRecap(lines, 'Job Templates', [
+      'skipped (hub-only — Contoller JT/WF apply not run; ignore leftover configs on disk)'
+    ]);
+    appendListRecap(lines, 'Workflow Templates', [
+      'skipped (hub-only)'
+    ]);
+  } else {
+    appendListRecap(lines, 'Components', selectedComponentApps);
+    appendListRecap(lines, 'Job Templates', readConfigNames([
+      path.join(controllerDir, 'job_templates.yml'),
+      ...listYamlFiles(jobTemplatesDir)
+    ]));
+    appendListRecap(lines, 'Workflow Templates', readConfigNames([
+      path.join(workflowsDir, 'bootstrap_workflows.yml'),
+      ...listYamlFiles(workflowsDir)
+    ]));
+  }
   const expectedObjects = expectedRecapObjects(data, selectedComponentApps);
   appendListRecap(lines, 'Credentials', mergeRecapValues(
     readControllerConfigNames(
@@ -4606,6 +4725,26 @@ app.get('/api/readme/ado', (req, res) => {
   if (!result.text) {
     event(`ADO collection README not found in: ${result.checked.join(', ')}`);
     res.type('text/plain').send(documentationFallback('ADO Collection Documentation', result.checked));
+    return;
+  }
+
+  res.type('text/plain').send(result.text);
+});
+
+app.get('/api/readme/known-bugs', (req, res) => {
+  const result = readTextFromCandidates([
+    process.env.ADO_PREFLIGHT_KNOWN_BUGS,
+    path.join(__dirname, 'known-bugs.md'),
+    path.join(__dirname, '..', 'known-bugs.md'),
+    path.join(process.cwd(), 'known-bugs.md'),
+    path.join('/opt', 'app-root', 'src', 'known-bugs.md'),
+    path.join('/opt', 'app-root', 'known-bugs.md'),
+    path.join('/workspace', 'ado-preflight-ui', 'known-bugs.md')
+  ]);
+
+  if (!result.text) {
+    event(`Known bugs markdown not found in: ${result.checked.join(', ')}`);
+    res.type('text/plain').send(documentationFallback('Known Bugs', result.checked));
     return;
   }
 
@@ -5213,6 +5352,9 @@ else
     mkdir -p /workspace/ado-source
     tar -xzf "$ado_archive" -C /workspace/ado-source
     python3 "${stageAdoSourceScript}"
+    # bootstrap_controller stages this path when present (avoids rebuild drift)
+    cp -f "$ado_archive" "/workspace/$(basename "$ado_archive")"
+    echo "Staged Hub publish tarball: /workspace/$(basename "$ado_archive")"
   else
     echo "Skipping ADO source staging (Hub collection update not requested)."
     rm -rf /workspace/ado-source

@@ -1,6 +1,6 @@
 FROM registry.access.redhat.com/ubi9/nodejs-20 AS build
 WORKDIR /opt/app-root/src
-COPY package.json index.html README.md ./
+COPY package.json index.html README.md known-bugs.md ./
 COPY ado-logo-redhat.png ./
 COPY src ./src
 RUN npm install && npm run build
@@ -20,7 +20,7 @@ RUN dnf install -y git python3 python3-pip skopeo gcc-c++ make python3-devel tar
 
 WORKDIR /opt/app-root/src
 
-COPY package.json README.md ./
+COPY package.json README.md known-bugs.md ./
 RUN npm install --omit=dev
 
 COPY server.js ./
@@ -41,7 +41,9 @@ RUN set -eux; \
     mkdir -p /workspace /opt/ado-collections/extracted /opt/ado-ee; \
     ado_archive="$(find /opt/ado-collections -maxdepth 1 -name 'infra-ado-*.tar.gz' | sort -V | tail -n 1)"; \
     if [ -n "$ado_archive" ]; then \
-      tar -xzf "$ado_archive" -C /opt/ado-collections/extracted README.md roles docs galaxy.yml meta plugins || true; \
+      tar -xzf "$ado_archive" -C /opt/ado-collections/extracted \
+        roles docs meta plugins README.md 2>/dev/null \
+        || tar -xzf "$ado_archive" -C /opt/ado-collections/extracted; \
     fi; \
     test -s /opt/ado-ee/ado-ee.docker.tar; \
     test -s /opt/ado-ee/gateway_authenticators_main.yml; \

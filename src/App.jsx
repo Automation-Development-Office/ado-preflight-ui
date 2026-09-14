@@ -37,7 +37,7 @@ import adoLogo from '../ado-logo-redhat.png';
 const openshiftApps = [
   'aap','acs','acm','bookstack','cert_manager','console','devspaces','dev_hub',
   'dirsrv','eck','gitops','gitlab','grafana','kafka','minio','netbox',
-  'oadp','openshift','pega','quay','rhbk'
+  'oadp','ocp_virtualization','openshift','pega','quay','rhbk','zabbix'
 ];
 
 const rhelApps = [
@@ -84,6 +84,17 @@ function hostnameFromUrl(value) {
   } catch {
     return raw.replace(/^https?:\/\//i, '').split('/')[0].trim();
   }
+}
+
+
+/** Hub API host defaults from Contoller AAP Hostname unless the operator set Hub manually. */
+function resolveHubHostnameFromAap(aap = {}, { honorManual = true } = {}) {
+  const controllerHost = hostnameFromUrl(aap?.hostname);
+  if (honorManual && aap?.hub_hostname_manual === true) {
+    const manual = hostnameFromUrl(aap?.hub_hostname) || String(aap?.hub_hostname || '').trim();
+    return manual || controllerHost;
+  }
+  return controllerHost;
 }
 
 function httpsOriginFromHost(value) {
@@ -674,7 +685,7 @@ function keycloakRealmUrlFromOidcUrl(url) {
 function keycloakRealmPublicKeyCurlHint(authorizationUrl, accessTokenUrl) {
   const realmUrl = keycloakRealmUrlFromOidcUrl(authorizationUrl)
     || keycloakRealmUrlFromOidcUrl(accessTokenUrl)
-    || 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab';
+    || '';
   return `curl -sk ${realmUrl} | jq -r '.public_key'`;
 }
 
@@ -696,7 +707,7 @@ function defaultOnboardKeycloak(aap) {
   const authUrl = oidc.authorization_url || oidc.access_token_url || '';
   return {
     create_groups: false,
-    base_url: keycloakBaseUrlFromOidcUrl(authUrl) || 'https://keycloak.apps.ocp.prod.rhlab',
+    base_url: keycloakBaseUrlFromOidcUrl(authUrl) || '',
     realm: keycloakRealmNameFromOidcUrl(authUrl) || 'rhlab',
     admin_username: 'admin',
     admin_password: '',
@@ -801,9 +812,10 @@ const componentOptionDefaults = {
     'oauth_rhbk',
     'discover_routes_print',
     'alternate_routes',
-    'update_pull_secret'
+    'update_pull_secret',
+    'update_default_ingress'
   ],
-  grafana: ['standalone', 'datasources', 'folders', 'dashboards', 'alternate_route', 'email', 'oidc'],
+  grafana: ['install', 'standalone', 'datasources', 'folders', 'dashboards', 'alerts', 'alternate_route', 'email', 'oidc'],
   quay: ['oidc'],
   minio: ['oidc'],
   dev_hub: ['oidc'],
@@ -845,11 +857,14 @@ const componentOptionLabels = {
   discover_routes_print: 'Discover Routes and Print',
   alternate_routes: 'Alternate Routes',
   update_pull_secret: 'Update Pull Secret',
+  update_default_ingress: 'Default Ingress Cert',
   oidc: 'OIDC Auth',
   saml: 'SAML SSO',
+  install: 'Install Grafana (OpenShift)',
   datasources: 'Datasources',
   folders: 'Folders',
   dashboards: 'Dashboards',
+  alerts: 'Alerts',
   alternate_route: 'Deploy Grafana Alternate Route',
   email: 'Email / SMTP',
   standalone: 'Standalone (RHEL VM install)',
@@ -884,6 +899,9 @@ const componentOptionLabels = {
   rhel_9_stig: 'RHEL 9 STIG',
   dev_hub: 'Dev Hub',
   minio: 'MinIO',
+  zabbix: 'Zabbix',
+  ocp_virtualization: 'OpenShift Virtualization',
+  openshift_virt: 'OpenShift Virt VM',
   ec2_ami_copy: 'EC2 AMI Copy'
 };
 
@@ -1239,13 +1257,30 @@ const defaults = {
 
   component_config: {
     grafana: {
-      hostname: 'grafana-ado.server.lab',
+      hostname: '',
       storage: '',
       replicas: 1,
       folder_name: '',
       dashboards_source: '',
+      admin_user: 'admin',
+      admin_password: '',
+      api_key: '',
       // Shared Openshift folder with K8S Prod/Dev dropdown (in addition to OpenshiftProd/OpenshiftDev).
       group_cluster_dashboards: true,
+      datasources: [
+        {
+          name: 'Openshift-Prod',
+          prometheus_route_name: 'thanos-querier',
+          prometheus_url: '',
+          bearer_token: ''
+        },
+        {
+          name: 'Openshift-Dev',
+          prometheus_url: '',
+          bearer_token: ''
+        }
+      ],
+      datasource_sources: [],
       folders: [
         {
           name: 'OpenshiftProd',
@@ -1297,7 +1332,7 @@ const defaults = {
         client_secret_manual: false
       },
       alerts_enabled: false,
-      standalone_hostname: 'grafana-ado.server.lab',
+      standalone_hostname: '',
       standalone_admin_user: 'admin',
       standalone_admin_password: 'redhat123',
       standalone_http_port: 3000,
@@ -1330,7 +1365,17 @@ const defaults = {
       clients: [
         { id: '', name: '', redirect_uris: '', web_origins: '' }
       ],
-      standalone_hostname: 'keycloak-ado.server.lab',
+      // OpenShift install TLS: edge | cert_manager | manual (own tls.crt/tls.key)
+      // Empty = default from cert-manager component selection (CM on → cert_manager, else edge).
+      tls_mode: '',
+      cert_manager: false,
+      admin_user: 'admin',
+      admin_password: '',
+      tls_crt: '',
+      tls_key: '',
+      ocp_rhbk_issuer_kind: 'ClusterIssuer',
+      ocp_rhbk_issuer_name: 'idm-acme',
+      standalone_hostname: '',
       standalone_zip: '',
       standalone_zip_file: '',
       standalone_zip_upload_path: '',
@@ -1358,7 +1403,10 @@ const defaults = {
       client_scope_name: 'groups',
       client_scope_protocol: 'openid-connect',
       client_mapper_name: '',
-      client_mapper_claim: ''
+      client_mapper_claim: '',
+      // Native RHBK user-event metrics (keycloak_user_events_total). Needs RHBK 26.2+.
+      // Default off — lab stable-v26.0 crash-loops if enabled without the feature.
+      event_metrics_user_enabled: false
     },
     satellite: {
       hostname: '',
@@ -1400,8 +1448,8 @@ const defaults = {
       oidc: {
         client_id: 'ado-satellite',
         realm: 'rhlab',
-        keycloak_url: 'https://keycloak.apps.ocp.prod.rhlab',
-        issuer: 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab',
+        keycloak_url: '',
+        issuer: '',
         client_secret: '',
         admin_user: 'admin',
         admin_password: '',
@@ -1422,9 +1470,9 @@ const defaults = {
       custom_cert_chain_file: '',
       admin_password: '',
       directory_manager_password: '',
-      ad_domain: 'ad.lab',
-      ad_dc_hostname: 'adwindows.ad.lab',
-      ad_dc_ip: '192.168.0.61',
+      ad_domain: '',
+      ad_dc_hostname: '',
+      ad_dc_ip: '',
       ad_admin: 'Administrator',
       ad_admin_password: '',
       ad_two_way: true,
@@ -1461,13 +1509,21 @@ const defaults = {
       tls_key: '',
       idm_acme_directory_url: '',
       idm_ca_bundle_file: '',
+      idm_ca_bundle_filename: '',
+      idm_ca_bundle_content_base64: '',
       awspca_namespace: 'cert-manager',
       awspca_secret_name: 'awspca-creds',
       awspca_issuer_name: 'awspca-clusterissuer',
       awspca_region: 'us-gov-west-1',
       awspca_pca_arn: '',
       awspca_access_key_id: '',
-      awspca_secret_access_key: ''
+      awspca_secret_access_key: '',
+      // Default ingress wildcard (router *.apps.<domain>)
+      update_default_ingress: false,
+      trust_ca_clusterwide: true,
+      ingress_tls_crt: '',
+      ingress_tls_key: '',
+      ingress_ca_crt: ''
     },
     console: { hostname: '', storage: '', replicas: 1 },
     devspaces: {
@@ -1480,7 +1536,19 @@ const defaults = {
       default_workspace_image: '',
       che_image_tag: '',
       dashboard_image: '',
-      customize_workspace: false
+      customize_workspace: false,
+      custom_sample_enabled: false,
+      custom_sample_display_name: 'ADO',
+      custom_sample_description: 'ADO default Dev Spaces workspace',
+      custom_sample_tags: 'ado',
+      custom_sample_url: '',
+      // bundled = role ships ado-sample-icon.png; upload = icon_base64 from file
+      custom_sample_icon_source: 'bundled',
+      custom_sample_icon_filename: '',
+      custom_sample_icon_base64: '',
+      custom_sample_icon_mediatype: 'image/png',
+      // Optional Grafana DevWorkspace phase/reason metrics (dw_* labels)
+      status_exporter_enabled: true
     },
     dev_hub: {
       hostname: '',
@@ -1498,11 +1566,11 @@ const defaults = {
     eck: { hostname: '', storage: '', replicas: 1 },
     gitops: { hostname: '', storage: '', replicas: 1 },
     gitlab: {
-      hostname: 'gitlab-ado.server.lab',
+      hostname: '',
       storage: '',
       replicas: 1,
-      standalone_hostname: 'gitlab-ado.server.lab',
-      standalone_external_url: 'http://gitlab-ado.server.lab',
+      standalone_hostname: '',
+      standalone_external_url: '',
       standalone_root_password: 'redhat123',
       standalone_edition: 'ce',
       standalone_http_port: 80,
@@ -1519,7 +1587,33 @@ const defaults = {
     oadp: { hostname: '', storage: '', replicas: 1 },
     openshift: { hostname: '', storage: '', replicas: 1 },
     pega: { hostname: '', storage: '', replicas: 1 },
-    quay: { hostname: '', storage: '', replicas: 1 },
+    quay: {
+      hostname: '',
+      storage: '',
+      replicas: 1,
+      admin_user: 'quayadmin',
+      admin_password: 'redhat123',
+      oidc_enabled: true,
+      oidc_client_id: 'quay',
+      keycloak_realm: 'rhlab',
+      oidc_client_secret: '',
+      fetch_oidc_secret_from_rhbk: true
+    },
+    minio: {
+      hostname: '',
+      storage: '',
+      replicas: 1,
+      root_user: 'minioadmin',
+      root_password: 'redhat123',
+      console_hostname: '',
+      api_hostname: '',
+      oidc_enabled: true,
+      oidc_client_id: 'minio',
+      oidc_display_name: 'Keycloak',
+      keycloak_realm: 'rhlab',
+      oidc_client_secret: '',
+      fetch_oidc_secret_from_rhbk: true
+    },
     bookstack: {
       hostname: 'bookstack',
       namespace: 'bookstack',
@@ -1527,13 +1621,13 @@ const defaults = {
       route_host: '',
       admin_password: '',
       oidc_enabled: true,
-      oidc_issuer: 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab',
+      oidc_issuer: '',
       oidc_client_id: 'bookstack',
       oidc_client_secret: ''
     },
     netbox: {
       oidc_enabled: true,
-      oidc_issuer: 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab',
+      oidc_issuer: '',
       oidc_client_id: 'netbox',
       oidc_client_secret: ''
     },
@@ -1572,6 +1666,11 @@ const defaults = {
       api_token: '',
       skip_tls_verify: true,
       ssh_public_key: ''
+    },
+    ocp_virtualization: {
+      hostname: '',
+      storage: '',
+      replicas: 1
     }
   },
 
@@ -1631,6 +1730,8 @@ const defaults = {
     standalone_run: false,
     // Hub API / registry hostname (defaults from AAP Hostname URL host)
     hub_hostname: '',
+    // When false/absent, Hub host tracks Contoller AAP Hostname (auto-discover).
+    hub_hostname_manual: false,
     // Optional Hub EE — default is baked docker-archive inside the UI image (disconnected).
     // hub_ee_pull enables an online/mirror docker:// pull instead (needs outbound registry access).
     hub_push_ee: false,
@@ -1657,8 +1758,8 @@ const defaults = {
         slug: 'keycloak-oidc',
         key: '',
         secret: '',
-        authorization_url: 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab/protocol/openid-connect/auth',
-        access_token_url: 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab/protocol/openid-connect/token',
+        authorization_url: '',
+        access_token_url: '',
         public_key: '',
         verify_ssl: false,
         groups_claim: 'Group',
@@ -1670,7 +1771,7 @@ const defaults = {
     },
     onboard: {
       enabled: false,
-      keycloak: defaultOnboardKeycloak({ auth: { keycloak_oidc: { authorization_url: 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab/protocol/openid-connect/auth' } } }),
+      keycloak: defaultOnboardKeycloak({ auth: { keycloak_oidc: { authorization_url: '' } } }),
       tenants: []
     },
     galaxy_user_account: {
@@ -1715,12 +1816,27 @@ const defaults = {
     banner_location: 'BannerTop',
     banner_background_color: '#1f7a1f',
     banner_text_color: '#ffffff',
+    // ocp_console_banner state: add (default) | update | delete
+    banner_state: 'add',
     token: '',
     oauth_rhbk: {
-      idp_name: 'Keycloak'
+      idp_name: 'Keycloak',
+      client_id: '',
+      keycloak_hostname: '',
+      realm: 'rhlab',
+      extra_scopes: 'groups',
+      mapping_method: 'claim',
+      fetch_client_secret: true
     },
     ldap_auth: {
-      idp_name: 'LDAP_IDM'
+      idp_name: 'LDAP_IDM',
+      connection_url: 'ldap://idm.server.lab',
+      bind_dn: 'cn=Directory Manager',
+      bind_credential: '',
+      users_dn: 'cn=users,cn=accounts,dc=server,dc=lab',
+      username_ldap_attribute: 'uid',
+      mapping_method: 'claim',
+      insecure: false
     },
     discover_routes: {
       scope: 'all',
@@ -1843,6 +1959,7 @@ function App() {
   const [uiVersion, setUiVersion] = useState(null);
   const [readmeMarkdown, setReadmeMarkdown] = useState('');
   const [adoReadmeMarkdown, setAdoReadmeMarkdown] = useState('');
+  const [knownBugsMarkdown, setKnownBugsMarkdown] = useState('');
   const [documentationOpen, setDocumentationOpen] = useState(false);
   const [documentationType, setDocumentationType] = useState('ui');
   const [collectionsToolsOpen, setCollectionsToolsOpen] = useState(false);
@@ -1889,6 +2006,8 @@ function App() {
   });
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
+  const [activeGrafanaDetailTab, setActiveGrafanaDetailTab] = useState('install');
+  const [activeCertManagerTab, setActiveCertManagerTab] = useState('idm_acme');
   const [rhbkAddClientOpen, setRhbkAddClientOpen] = useState(false);
   const [activePreInstallTab, setActivePreInstallTab] = useState('aap_license');
   const [importStatus, setImportStatus] = useState('');
@@ -1981,6 +2100,10 @@ function App() {
   }, [activeMainTab, focusSection]);
 
   useEffect(() => {
+    if (activeAapConfigTab === 'git') setActiveAapConfigTab('general');
+  }, [activeAapConfigTab]);
+
+  useEffect(() => {
     fetch('/api/collection-versions')
       .then(r => r.json())
       .then(d => setCollectionVersions(d.collections || []))
@@ -2006,6 +2129,14 @@ function App() {
       })
       .then(text => setAdoReadmeMarkdown(text))
       .catch(() => setAdoReadmeMarkdown('# ADO Collection documentation unavailable'));
+
+    fetch('/api/readme/known-bugs')
+      .then(r => {
+        if (!r.ok) throw new Error('Known bugs request failed');
+        return r.text();
+      })
+      .then(text => setKnownBugsMarkdown(text))
+      .catch(() => setKnownBugsMarkdown('# Known bugs unavailable'));
 
     try {
       setAgentInstallerProfiles(JSON.parse(localStorage.getItem('adoAgentInstallerProfiles') || '[]'));
@@ -2338,8 +2469,28 @@ function App() {
       const copy = JSON.parse(JSON.stringify(prev));
       if (!copy.aap) copy.aap = {};
       const previousHostname = copy.aap.hostname || '';
+      const previousHub = copy.aap.hub_hostname || '';
       copy.aap.hostname = value;
+      // Auto-discover Hub from Contoller AAP Hostname unless operator overrode Hub.
+      if (copy.aap.hub_hostname_manual !== true) {
+        copy.aap.hub_hostname = hostnameFromUrl(value);
+        if (!String(copy.aap.hub_ee_registry || '').trim()
+          || hostnameFromUrl(copy.aap.hub_ee_registry) === hostnameFromUrl(previousHub)
+          || hostnameFromUrl(copy.aap.hub_ee_registry) === hostnameFromUrl(previousHostname)) {
+          copy.aap.hub_ee_registry = copy.aap.hub_hostname;
+        }
+      }
       if (
+        Array.isArray(copy.aap.galaxy_credentials)
+        && copy.aap.galaxy_credentials.length > 0
+        && copy.aap.hub_hostname_manual !== true
+      ) {
+        copy.aap.galaxy_credentials = applyHostnameToGalaxyCredentials(
+          copy.aap.galaxy_credentials,
+          galaxyHubHostnameForCredentials(copy.aap),
+          galaxyHubHostnameForCredentials({ ...copy.aap, hostname: previousHostname, hub_hostname: previousHub })
+        );
+      } else if (
         Array.isArray(copy.aap.galaxy_credentials)
         && copy.aap.galaxy_credentials.length > 0
         && !String(copy.aap.hub_hostname || '').trim()
@@ -2350,7 +2501,13 @@ function App() {
           galaxyHubHostnameForCredentials({ ...copy.aap, hostname: previousHostname })
         );
       }
-      if (copy.aap.container_registry_credential && !String(copy.aap.hub_hostname || '').trim()) {
+      if (copy.aap.container_registry_credential && copy.aap.hub_hostname_manual !== true) {
+        copy.aap.container_registry_credential = applyHostnameToContainerRegistryCredential(
+          copy.aap.container_registry_credential,
+          value,
+          previousHostname
+        );
+      } else if (copy.aap.container_registry_credential && !String(copy.aap.hub_hostname || '').trim()) {
         copy.aap.container_registry_credential = applyHostnameToContainerRegistryCredential(
           copy.aap.container_registry_credential,
           value,
@@ -2367,6 +2524,14 @@ function App() {
       if (!copy.aap) copy.aap = {};
       const previousHub = copy.aap.hub_hostname || '';
       copy.aap.hub_hostname = value;
+      const controllerHost = hostnameFromUrl(copy.aap.hostname);
+      const hubHost = hostnameFromUrl(value) || String(value || '').trim();
+      // Empty Hub field → resume auto-discover from Contoller hostname.
+      copy.aap.hub_hostname_manual = Boolean(hubHost) && hubHost !== controllerHost;
+      if (!hubHost) {
+        copy.aap.hub_hostname = controllerHost;
+        copy.aap.hub_hostname_manual = false;
+      }
       if (Array.isArray(copy.aap.galaxy_credentials) && copy.aap.galaxy_credentials.length > 0) {
         copy.aap.galaxy_credentials = applyHostnameToGalaxyCredentials(
           copy.aap.galaxy_credentials,
@@ -2922,6 +3087,15 @@ function App() {
       allowedConfig.add('aws');
     }
 
+    const openshiftOptions = hydrated.component_options?.openshift || [];
+    const certManagerCfg = hydrated.component_config?.cert_manager || {};
+    if (
+      openshiftOptions.includes('update_default_ingress')
+      || certManagerCfg.update_default_ingress === true
+    ) {
+      allowedConfig.add('cert_manager');
+    }
+
     if (!hydrated.component_config) hydrated.component_config = {};
 
     [...allowedConfig].forEach(component => {
@@ -3050,6 +3224,23 @@ function App() {
         };
       }
     }
+    // Restore Default Ingress Cert option when legacy exports only set the config flag.
+    if (merged.component_config?.cert_manager?.update_default_ingress === true) {
+      if (!merged.component_options) merged.component_options = {};
+      if (!Array.isArray(merged.component_options.openshift)) {
+        merged.component_options.openshift = [];
+      }
+      if (!merged.component_options.openshift.includes('update_default_ingress')) {
+        merged.component_options.openshift.push('update_default_ingress');
+      }
+      if (!merged.component_apps) merged.component_apps = {};
+      if (!Array.isArray(merged.component_apps.openshift)) {
+        merged.component_apps.openshift = [];
+      }
+      if (!merged.component_apps.openshift.includes('cert_manager')) {
+        merged.component_apps.openshift.push('cert_manager');
+      }
+    }
     if (!merged.openshift) merged.openshift = {};
     if (!merged.openshift.discover_routes) {
       merged.openshift.discover_routes = { ...(defaults.openshift?.discover_routes || {}) };
@@ -3117,9 +3308,10 @@ function App() {
     syncAapStandaloneFields(merged.aap);
     if (merged.aap.hub_push_ee === undefined) merged.aap.hub_push_ee = false;
     if (merged.aap.hub_hostname === undefined) merged.aap.hub_hostname = '';
-    if (!String(merged.aap.hub_hostname || '').trim()) {
-      merged.aap.hub_hostname = hostnameFromUrl(merged.aap.hostname);
-    }
+    if (merged.aap.hub_hostname_manual === undefined) merged.aap.hub_hostname_manual = false;
+    // Imported JSON often carries a stale Hub host from another Contoller; auto-discover
+    // from Contoller AAP Hostname unless the operator marked Hub as manual.
+    merged.aap.hub_hostname = resolveHubHostnameFromAap(merged.aap);
     if (merged.aap.hub_ee_source_image === undefined) {
       merged.aap.hub_ee_source_image = defaults.aap.hub_ee_source_image;
     }
@@ -3260,6 +3452,8 @@ function App() {
       merged.git.auto_push = false;
     }
 
+    syncRhbkTlsDefaultFromCertManager(merged);
+
     return merged;
   };
 
@@ -3316,6 +3510,13 @@ function App() {
     if (selectedGroups.includes('all') || selectedGroups.includes('aws')) {
       allowedConfig.add('aws');
     }
+    const openshiftOptionsForPayload = payload.component_options?.openshift || [];
+    if (
+      openshiftOptionsForPayload.includes('update_default_ingress')
+      || payload.component_config?.cert_manager?.update_default_ingress === true
+    ) {
+      allowedConfig.add('cert_manager');
+    }
     const selectedConfig = {};
     const selectedOptions = {};
 
@@ -3333,6 +3534,28 @@ function App() {
         selectedOptions[component] = options;
       }
     });
+
+    syncRhbkTlsDefaultFromCertManager(payload);
+
+    // Keep Default Ingress Cert option ↔ cert_manager.update_default_ingress in sync.
+    if (selectedOptions.openshift || selectedConfig.cert_manager) {
+      const ocpOpts = Array.isArray(selectedOptions.openshift) ? [...selectedOptions.openshift] : [];
+      const ingressEnabled = ocpOpts.includes('update_default_ingress');
+      if (ingressEnabled) {
+        if (!selectedConfig.cert_manager) selectedConfig.cert_manager = {};
+        selectedConfig.cert_manager.update_default_ingress = true;
+        if (!payload.component_apps) payload.component_apps = {};
+        if (!Array.isArray(payload.component_apps.openshift)) payload.component_apps.openshift = [];
+        if (!payload.component_apps.openshift.includes('cert_manager')) {
+          payload.component_apps.openshift = [...payload.component_apps.openshift, 'cert_manager'];
+        }
+      } else if (selectedConfig.cert_manager) {
+        selectedConfig.cert_manager.update_default_ingress = false;
+        delete selectedConfig.cert_manager.ingress_tls_crt;
+        delete selectedConfig.cert_manager.ingress_tls_key;
+        delete selectedConfig.cert_manager.ingress_ca_crt;
+      }
+    }
 
     payload.selected_component_apps = [...new Set([...selectedGroups, ...selectedApps])];
     payload.component_config = selectedConfig;
@@ -3369,13 +3592,15 @@ function App() {
       if (!String(payload.aap.hub_ee_description || '').trim()) {
         payload.aap.hub_ee_description = defaults.aap.hub_ee_description;
       }
-      if (!String(payload.aap.hub_hostname || '').trim()) {
-        payload.aap.hub_hostname = hostnameFromUrl(payload.aap.hostname);
-      } else {
-        payload.aap.hub_hostname = hostnameFromUrl(payload.aap.hub_hostname)
-          || String(payload.aap.hub_hostname).trim();
+      if (payload.aap.hub_hostname_manual === undefined) {
+        payload.aap.hub_hostname_manual = false;
       }
-      if (!String(payload.aap.hub_ee_registry || '').trim()) {
+      payload.aap.hub_hostname_manual = payload.aap.hub_hostname_manual === true;
+      payload.aap.hub_hostname = resolveHubHostnameFromAap(payload.aap);
+      if (
+        payload.aap.hub_hostname_manual !== true
+        || !String(payload.aap.hub_ee_registry || '').trim()
+      ) {
         payload.aap.hub_ee_registry = payload.aap.hub_hostname;
       } else {
         payload.aap.hub_ee_registry = hostnameFromUrl(payload.aap.hub_ee_registry)
@@ -3506,12 +3731,30 @@ function App() {
           payload.openshift.admin_password = users[0].password || '';
           payload.openshift.admin_role = users[0].role || 'cluster-admin';
         }
+        const missingPw = (payload.openshift.htpasswd_users || []).find(
+          u => u && String(u.name || '').trim() && !String(u.password || '').trim()
+        );
+        if (missingPw) {
+          throw new Error(
+            `Admin HTPasswd user "${missingPw.name}" has an empty password. Set a password before bootstrap.`
+          );
+        }
+        if (
+          !(payload.openshift.htpasswd_users || []).some(
+            u => u && String(u.name || '').trim() && String(u.password || '').trim()
+          )
+        ) {
+          throw new Error(
+            'Admin HTPasswd is selected but no user with name and password is set.'
+          );
+        }
       }
       if (!allowedConfig.has('openshift') || !openshiftOptions.includes('console_banner')) {
         delete payload.openshift.banner_text;
         delete payload.openshift.banner_location;
         delete payload.openshift.banner_background_color;
         delete payload.openshift.banner_text_color;
+        delete payload.openshift.banner_state;
       }
       if (!agentEnabled && !(payload.component_options?.openshift || []).includes('agent_installer')) {
         delete payload.openshift.agent_installer;
@@ -3589,6 +3832,19 @@ function App() {
     }
 
     stripInactiveAapSections(payload);
+
+    // OpenShift installs: never ship any standalone_* fields unless Standalone is selected.
+    const stripAllStandaloneKeys = (component) => {
+      const opts = (payload.component_options?.[component] || []).map(x => String(x).toLowerCase());
+      if (opts.includes('standalone')) return;
+      const cfg = payload.component_config?.[component];
+      if (!cfg || typeof cfg !== 'object') return;
+      Object.keys(cfg).forEach((k) => {
+        if (k.startsWith('standalone_')) delete cfg[k];
+      });
+    };
+    ['rhbk', 'grafana', 'gitlab'].forEach(stripAllStandaloneKeys);
+
 
     // Form controls win over imported JSON — only ansible.verbosity is used at runtime.
     payload.ansible = payload.ansible || {};
@@ -3829,6 +4085,54 @@ function App() {
     openConfigPanel(component);
   };
 
+
+  const certManagerComponentSelected = source => {
+    const apps = selectedComponentAppsFrom(source);
+    return apps.includes('cert_manager')
+      || (source.component_apps?.openshift || []).includes('cert_manager')
+      || (source.components || []).includes('cert_manager');
+  };
+
+  /**
+   * Fill RHBK TLS default when unset: cert-manager component selected → cert_manager, else edge.
+   * Does not override an explicit edge / cert_manager / manual choice.
+   */
+  const syncRhbkTlsDefaultFromCertManager = copy => {
+    if (!copy.component_config) copy.component_config = {};
+    if (!copy.component_config.rhbk) copy.component_config.rhbk = {};
+    const rhbk = copy.component_config.rhbk;
+    const mode = String(rhbk.tls_mode || '').trim().toLowerCase();
+    if (mode === 'manual' || mode === 'edge' || mode === 'cert_manager') {
+      rhbk.cert_manager = mode === 'cert_manager';
+      return copy;
+    }
+    if (certManagerComponentSelected(copy)) {
+      rhbk.tls_mode = 'cert_manager';
+      rhbk.cert_manager = true;
+    } else {
+      rhbk.tls_mode = 'edge';
+      rhbk.cert_manager = false;
+    }
+    return copy;
+  };
+
+  /** When cert-manager is toggled, reset RHBK TLS default (keep manual). */
+  const applyRhbkTlsDefaultOnCertManagerToggle = copy => {
+    if (!copy.component_config) copy.component_config = {};
+    if (!copy.component_config.rhbk) copy.component_config.rhbk = {};
+    const rhbk = copy.component_config.rhbk;
+    const mode = String(rhbk.tls_mode || '').trim().toLowerCase();
+    if (mode === 'manual') return copy;
+    if (certManagerComponentSelected(copy)) {
+      rhbk.tls_mode = 'cert_manager';
+      rhbk.cert_manager = true;
+    } else {
+      rhbk.tls_mode = 'edge';
+      rhbk.cert_manager = false;
+    }
+    return copy;
+  };
+
   const appSelectedInAnyGroup = (componentApps, app, exceptGroup = null) => {
     return Object.entries(componentApps || {}).some(([group, apps]) => {
       if (group === exceptGroup) return false;
@@ -3882,6 +4186,10 @@ function App() {
 
       if (!isSelected && app === 'dev_hub') {
         syncDevHubGitlabTokenFromGit(copy);
+      }
+
+      if (app === 'cert_manager') {
+        applyRhbkTlsDefaultOnCertManagerToggle(copy);
       }
 
       return copy;
@@ -5108,6 +5416,7 @@ echo $TOKEN
     tlsKey: 'PEM-formatted TLS private key for the custom certificate source.',
     idmAcmeDirectoryUrl: 'ACME directory URL from IdM. Example: https://idm.server.lab/acme/directory.',
     idmCaBundleFile: 'Path to the IdM CA bundle file used to trust the ACME endpoint.',
+    idmCaBundleUpload: 'Upload IdM /etc/ipa/ca.crt. Bootstrap writes it under files/certs/ and embeds the PEM for Contoller jobs.',
     awspcaNamespace: 'Kubernetes namespace for AWS PCA issuer resources. Example: cert-manager.',
     awspcaSecretName: 'Kubernetes secret containing AWS PCA credentials.',
     awspcaIssuerName: 'ClusterIssuer or Issuer name for AWS PCA. Example: aws-pca-cluster-issuer.',
@@ -5286,9 +5595,30 @@ echo $TOKEN
   );
 
   const renderGrafanaConfig = () => {
+    const grafanaOpts = data.component_options?.grafana || [];
     const folders = data.component_config?.grafana?.folders || [];
+    const datasources = data.component_config?.grafana?.datasources || [];
+    const datasourceSources = data.component_config?.grafana?.datasource_sources || [];
     const email = data.component_config?.grafana?.email || {};
     const oidc = data.component_config?.grafana?.oidc || {};
+    const hasInstall = grafanaOpts.includes('install');
+    const hasStandalone = grafanaOpts.includes('standalone');
+    const contentTabs = [
+      ['install', hasInstall || (!hasStandalone && grafanaOpts.length === 0)],
+      ['standalone', hasStandalone],
+      ['datasources', grafanaOpts.includes('datasources')],
+      ['folders', grafanaOpts.includes('folders') || grafanaOpts.includes('dashboards') || grafanaOpts.includes('alerts')],
+      ['dashboards', grafanaOpts.includes('dashboards')],
+      ['alerts', grafanaOpts.includes('alerts')],
+      ['email', grafanaOpts.includes('email')],
+      ['oidc', grafanaOpts.includes('oidc')],
+      ['alternate_route', grafanaOpts.includes('alternate_route')]
+    ].filter(([, show]) => show).map(([id]) => id);
+    const grafanaTabs = contentTabs.length > 0 ? contentTabs : ['install'];
+    const activeGrafanaTab = grafanaTabs.includes(activeGrafanaDetailTab)
+      ? activeGrafanaDetailTab
+      : grafanaTabs[0];
+
     const updateFolder = (index, key, value) => {
       setData(prev => {
         const copy = JSON.parse(JSON.stringify(prev));
@@ -5297,6 +5627,9 @@ echo $TOKEN
           ...(copy.component_config.grafana.folders[index] || {}),
           [key]: value
         };
+        if (key === 'use_general_folder' && value) {
+          copy.component_config.grafana.folders[index].name = 'General';
+        }
         return copy;
       });
     };
@@ -5308,74 +5641,108 @@ echo $TOKEN
         return copy;
       });
     };
-    return (
-      <>
-        {renderComponentOptions('grafana', 'Grafana Options', 'Select which Grafana resources to configure. Choose Standalone for the RHEL VM RPM install (ADO | Install Grafana Standalone) — inventory host grafana-ado / 192.168.0.66.')}
-        <Grid hasGutter>
-          {renderTextField('Hostname / URL', 'component_config.grafana.hostname', 'text', grafanaHelp.hostname)}
-          {renderStorageClassField('Storage Class', 'component_config.grafana.storage', grafanaHelp.storage)}
-          {renderTextField('Replicas', 'component_config.grafana.replicas', 'number')}
-        </Grid>
-      {(data.component_options?.grafana || []).includes('standalone') && (
-        <Grid hasGutter style={{ marginTop: '12px' }}>
-          <GridItem span={12}>
-            <Title headingLevel="h3">Standalone RHEL Grafana</Title>
-            <p style={{ color: mutedTextColor }}>
-              Lab defaults: hostname <code>grafana-ado.server.lab</code>, IP note <code>192.168.0.66</code>,
-              admin password <code>redhat123</code>. Airgap: set RPM path on Contoller or RPM URL.
-            </p>
-          </GridItem>
-          {renderTextField('VM hostname', 'component_config.grafana.standalone_hostname', 'text')}
-          {renderTextField('IP note (inventory)', 'component_config.grafana.standalone_ip_note', 'text')}
-          {renderTextField('Admin user', 'component_config.grafana.standalone_admin_user', 'text')}
-          {renderTextField('Admin password', 'component_config.grafana.standalone_admin_password', 'password')}
-          {renderTextField('HTTP port', 'component_config.grafana.standalone_http_port', 'number')}
-          {renderTextField('Airgap RPM path (Contoller)', 'component_config.grafana.standalone_rpm_path', 'text')}
-          {renderTextField('Airgap RPM URL', 'component_config.grafana.standalone_rpm_url', 'text')}
-          {renderStandaloneTlsAndRhn('grafana', { showTls: false })}
-        </Grid>
-      )}
-        <Grid hasGutter>
-          <GridItem span={12}>
-            <Title headingLevel="h3">Dashboard / Alert Folders</Title>
-            <p style={{ color: mutedTextColor }}>
-              Each folder can point at a git repo or path. Use .json as-is or .json.j2 templates.
-              Default layout: <code>OpenshiftProd</code> / <code>OpenshiftDev</code> (pinned per cluster),
-              optional shared <code>Openshift</code> (K8S dropdown), and <code>RHACS</code>.
-            </p>
-          </GridItem>
-          <GridItem span={12}>
-            <Checkbox
-              id="grafana-group-cluster-dashboards"
-              label="Also deploy shared Openshift folder with K8S Prod/Dev dropdown"
-              isChecked={data.component_config.grafana.group_cluster_dashboards !== false}
-              onChange={(_, v) => set('component_config.grafana.group_cluster_dashboards', v)}
-            />
-            <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 8px' }}>
-              When enabled, ADO also uploads a shared <code>Openshift</code> folder where each dashboard
-              has a <strong>K8S</strong> dropdown to switch <code>Openshift-Prod</code> /
-              <code>Openshift-Dev</code>. <code>OpenshiftProd</code> and <code>OpenshiftDev</code>
-              folders (one dashboard set per cluster) are always deployed.
-            </div>
-          </GridItem>
-          {folders.map((folder, index) => (
-            <GridItem span={12} key={`grafana-folder-${index}`}>
-              <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
-                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                  <Tooltip content="Remove folder">
-                    <Button
-                      variant="plain"
-                      onClick={() => removeGrafanaFolder(index)}
-                      aria-label={`Remove folder ${folder.name || index + 1}`}
-                    >
-                      X
-                    </Button>
-                  </Tooltip>
-                </div>
-                <Grid hasGutter>
+    const updateDatasource = (index, key, value) => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config.grafana.datasources) copy.component_config.grafana.datasources = [];
+        copy.component_config.grafana.datasources[index] = {
+          ...(copy.component_config.grafana.datasources[index] || {}),
+          [key]: value
+        };
+        return copy;
+      });
+    };
+    const removeDatasource = index => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config?.grafana?.datasources) return copy;
+        copy.component_config.grafana.datasources = copy.component_config.grafana.datasources.filter((_, i) => i !== index);
+        return copy;
+      });
+    };
+    const updateDsSource = (index, key, value) => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config.grafana.datasource_sources) copy.component_config.grafana.datasource_sources = [];
+        copy.component_config.grafana.datasource_sources[index] = {
+          ...(copy.component_config.grafana.datasource_sources[index] || {}),
+          [key]: value
+        };
+        return copy;
+      });
+    };
+    const removeDsSource = index => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config?.grafana?.datasource_sources) return copy;
+        copy.component_config.grafana.datasource_sources = copy.component_config.grafana.datasource_sources.filter((_, i) => i !== index);
+        return copy;
+      });
+    };
+
+    const renderAuthFields = () => (
+      <Grid hasGutter style={{ marginTop: '8px' }}>
+        <GridItem span={12}>
+          <Title headingLevel="h3">Grafana API auth</Title>
+          <p style={{ color: mutedTextColor, fontSize: '13px' }}>
+            Required for datasources / folders / dashboards / alerts when Grafana is already installed.
+            Prefer admin password or a Grafana service-account API token (not the Prometheus bearer).
+          </p>
+        </GridItem>
+        {renderTextField('Admin user', 'component_config.grafana.admin_user', 'text')}
+        {renderTextField('Admin password', 'component_config.grafana.admin_password', 'password')}
+        {renderTextField('Grafana API token (optional)', 'component_config.grafana.api_key', 'password', 'Bearer token for Grafana HTTP API. Overrides admin password when set.')}
+      </Grid>
+    );
+
+    const renderFoldersPanel = () => (
+      <Grid hasGutter>
+        <GridItem span={12}>
+          <Title headingLevel="h3">Dashboard / Alert Folders</Title>
+          <p style={{ color: mutedTextColor }}>
+            Each row can point at a git repo or path. Leave folder name empty / General / Main / Root
+            to upload into Grafana&apos;s General (root) folder. Use separate rows for different git URLs
+            (dashboards vs alerts paths).
+          </p>
+        </GridItem>
+        <GridItem span={12}>
+          <Checkbox
+            id="grafana-group-cluster-dashboards"
+            label="Also deploy shared Openshift folder with K8S Prod/Dev dropdown"
+            isChecked={data.component_config.grafana.group_cluster_dashboards !== false}
+            onChange={(_, v) => set('component_config.grafana.group_cluster_dashboards', v)}
+          />
+        </GridItem>
+        {folders.map((folder, index) => (
+          <GridItem span={12} key={`grafana-folder-${index}`}>
+            <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <Tooltip content="Remove folder">
+                  <Button
+                    variant="plain"
+                    onClick={() => removeGrafanaFolder(index)}
+                    aria-label={`Remove folder ${folder.name || index + 1}`}
+                  >
+                    X
+                  </Button>
+                </Tooltip>
+              </div>
+              <Grid hasGutter>
+                <GridItem span={12}>
+                  <Checkbox
+                    id={`grafana-folder-general-${index}`}
+                    label="Use Grafana General (root) folder"
+                    isChecked={!!folder.use_general_folder || ['', 'general', 'main', 'root'].includes(String(folder.name || '').trim().toLowerCase())}
+                    onChange={(_, v) => updateFolder(index, 'use_general_folder', v)}
+                  />
+                </GridItem>
                 <GridItem span={3}>
                   <FormGroup label="Folder name">
-                    <TextInput value={folder.name || ''} onChange={(_, v) => updateFolder(index, 'name', v)} />
+                    <TextInput
+                      value={folder.use_general_folder ? 'General' : (folder.name || '')}
+                      isDisabled={!!folder.use_general_folder}
+                      onChange={(_, v) => updateFolder(index, 'name', v)}
+                    />
                   </FormGroup>
                 </GridItem>
                 <GridItem span={2}>
@@ -5401,94 +5768,336 @@ echo $TOKEN
                     <TextInput value={folder.alerts_path || 'alerts'} onChange={(_, v) => updateFolder(index, 'alerts_path', v)} />
                   </FormGroup>
                 </GridItem>
-                </Grid>
+              </Grid>
+            </div>
+          </GridItem>
+        ))}
+        <GridItem span={12}>
+          <Button variant="secondary" onClick={() => setData(prev => {
+            const copy = JSON.parse(JSON.stringify(prev));
+            if (!copy.component_config.grafana.folders) copy.component_config.grafana.folders = [];
+            copy.component_config.grafana.folders.push({
+              name: '',
+              source_type: 'git',
+              source: '',
+              dashboards_path: 'dashboards',
+              alerts_path: 'alerts',
+              use_general_folder: false
+            });
+            return copy;
+          })}>Add Folder</Button>
+        </GridItem>
+      </Grid>
+    );
+
+    const renderDatasourcesPanel = () => (
+      <Grid hasGutter>
+        {renderAuthFields()}
+        <GridItem span={12}>
+          <Title headingLevel="h3">Prometheus datasources (structured)</Title>
+          <p style={{ color: mutedTextColor, fontSize: '13px' }}>
+            Local OpenShift can discover thanos-querier via Route + SA token when prometheus URL / bearer
+            are empty. Remote / standalone: set Prometheus URL and bearer token (or leave token empty and
+            use a K8s secret name in group_vars).
+          </p>
+        </GridItem>
+        {datasources.map((ds, index) => (
+          <GridItem span={12} key={`grafana-ds-${index}`}>
+            <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <Button variant="plain" onClick={() => removeDatasource(index)} aria-label={`Remove datasource ${index + 1}`}>X</Button>
               </div>
-            </GridItem>
-          ))}
-          <GridItem span={12}>
-            <Button variant="secondary" onClick={() => setData(prev => {
-              const copy = JSON.parse(JSON.stringify(prev));
-              if (!copy.component_config.grafana.folders) copy.component_config.grafana.folders = [];
-              copy.component_config.grafana.folders.push({ name: '', source_type: 'git', source: '', dashboards_path: 'dashboards', alerts_path: 'alerts' });
-              return copy;
-            })}>Add Folder</Button>
+              <Grid hasGutter>
+                <GridItem span={3}>
+                  <FormGroup label="Name">
+                    <TextInput value={ds.name || ''} onChange={(_, v) => updateDatasource(index, 'name', v)} />
+                  </FormGroup>
+                </GridItem>
+                <GridItem span={4}>
+                  <FormGroup label="Prometheus URL (optional)">
+                    <TextInput value={ds.prometheus_url || ''} onChange={(_, v) => updateDatasource(index, 'prometheus_url', v)} placeholder="https://thanos-querier-..." />
+                  </FormGroup>
+                </GridItem>
+                <GridItem span={3}>
+                  <FormGroup label="Route name (local OCP)">
+                    <TextInput value={ds.prometheus_route_name || ''} onChange={(_, v) => updateDatasource(index, 'prometheus_route_name', v)} placeholder="thanos-querier" />
+                  </FormGroup>
+                </GridItem>
+                <GridItem span={2}>
+                  <FormGroup label="Bearer token">
+                    <TextInput type="password" value={ds.bearer_token || ''} onChange={(_, v) => updateDatasource(index, 'bearer_token', v)} />
+                  </FormGroup>
+                </GridItem>
+              </Grid>
+            </div>
           </GridItem>
-          <GridItem span={12}>
-            <Checkbox id="grafana-alerts-enabled" label="Enable alerts upload from folder alerts_path" isChecked={!!data.component_config.grafana.alerts_enabled} onChange={(_, v) => set('component_config.grafana.alerts_enabled', v)} />
+        ))}
+        <GridItem span={12}>
+          <Button variant="secondary" onClick={() => setData(prev => {
+            const copy = JSON.parse(JSON.stringify(prev));
+            if (!copy.component_config.grafana.datasources) copy.component_config.grafana.datasources = [];
+            copy.component_config.grafana.datasources.push({
+              name: '',
+              prometheus_url: '',
+              prometheus_route_name: 'thanos-querier',
+              bearer_token: ''
+            });
+            return copy;
+          })}>Add Datasource</Button>
+        </GridItem>
+        <GridItem span={12}>
+          <Title headingLevel="h3">Datasource JSON from git / path</Title>
+          <p style={{ color: mutedTextColor, fontSize: '13px' }}>
+            Import <code>.json</code> / <code>.json.j2</code> Grafana datasource definitions from a repo
+            (e.g. <code>gitlab.com/project/datasource-folder</code>).
+          </p>
+        </GridItem>
+        {datasourceSources.map((src, index) => (
+          <GridItem span={12} key={`grafana-ds-src-${index}`}>
+            <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <Button variant="plain" onClick={() => removeDsSource(index)} aria-label={`Remove datasource source ${index + 1}`}>X</Button>
+              </div>
+              <Grid hasGutter>
+                <GridItem span={2}>
+                  <FormGroup label="Label">
+                    <TextInput value={src.name || ''} onChange={(_, v) => updateDsSource(index, 'name', v)} />
+                  </FormGroup>
+                </GridItem>
+                <GridItem span={2}>
+                  <FormGroup label="Source type">
+                    <select value={src.source_type || 'git'} onChange={e => updateDsSource(index, 'source_type', e.target.value)} style={{ width: '100%', height: '36px' }}>
+                      <option value="path">path</option>
+                      <option value="git">git</option>
+                    </select>
+                  </FormGroup>
+                </GridItem>
+                <GridItem span={5}>
+                  <FormGroup label="Source (git URL or path)">
+                    <TextInput value={src.source || ''} onChange={(_, v) => updateDsSource(index, 'source', v)} />
+                  </FormGroup>
+                </GridItem>
+                <GridItem span={3}>
+                  <FormGroup label="Datasources path">
+                    <TextInput value={src.datasources_path || 'datasources'} onChange={(_, v) => updateDsSource(index, 'datasources_path', v)} />
+                  </FormGroup>
+                </GridItem>
+              </Grid>
+            </div>
           </GridItem>
-          <GridItem span={12}><Title headingLevel="h3">Email / SMTP</Title></GridItem>
-          <GridItem span={12}>
-            <Checkbox id="grafana-email-enabled" label="Configure Grafana email" isChecked={!!email.enabled} onChange={(_, v) => set('component_config.grafana.email.enabled', v)} />
-          </GridItem>
-          {email.enabled && (
+        ))}
+        <GridItem span={12}>
+          <Button variant="secondary" onClick={() => setData(prev => {
+            const copy = JSON.parse(JSON.stringify(prev));
+            if (!copy.component_config.grafana.datasource_sources) copy.component_config.grafana.datasource_sources = [];
+            copy.component_config.grafana.datasource_sources.push({
+              name: 'datasources',
+              source_type: 'git',
+              source: '',
+              datasources_path: 'datasources'
+            });
+            return copy;
+          })}>Add Datasource Source</Button>
+        </GridItem>
+      </Grid>
+    );
+
+    const renderTabBody = () => {
+      switch (activeGrafanaTab) {
+        case 'install':
+          return (
+            <Grid hasGutter>
+              <GridItem span={12}>
+                <p style={{ color: mutedTextColor }}>
+                  OpenShift operator install. Leave unchecked (and do not select Standalone) for
+                  content-only runs against an existing Grafana.
+                </p>
+              </GridItem>
+              {renderTextField('Hostname / URL', 'component_config.grafana.hostname', 'text', grafanaHelp.hostname)}
+              {renderStorageClassField('Storage Class', 'component_config.grafana.storage', grafanaHelp.storage)}
+              {renderTextField('Replicas', 'component_config.grafana.replicas', 'number')}
+              {renderAuthFields()}
+            </Grid>
+          );
+        case 'standalone':
+          return (
+            <Grid hasGutter>
+              <GridItem span={12}>
+                <Title headingLevel="h3">Standalone RHEL Grafana</Title>
+                <p style={{ color: mutedTextColor }}>
+                  Inventory host grafana-ado. Content options (datasources/folders/dashboards/alerts)
+                  still run after install when selected.
+                </p>
+              </GridItem>
+              {renderTextField('VM hostname', 'component_config.grafana.standalone_hostname', 'text')}
+              {renderTextField('IP note (inventory)', 'component_config.grafana.standalone_ip_note', 'text')}
+              {renderTextField('Admin user', 'component_config.grafana.standalone_admin_user', 'text')}
+              {renderTextField('Admin password', 'component_config.grafana.standalone_admin_password', 'password')}
+              {renderTextField('HTTP port', 'component_config.grafana.standalone_http_port', 'number')}
+              {renderTextField('Airgap RPM path (Contoller)', 'component_config.grafana.standalone_rpm_path', 'text')}
+              {renderTextField('Airgap RPM URL', 'component_config.grafana.standalone_rpm_url', 'text')}
+              {renderStandaloneTlsAndRhn('grafana', { showTls: false })}
+              {renderAuthFields()}
+            </Grid>
+          );
+        case 'datasources':
+          return renderDatasourcesPanel();
+        case 'folders':
+          return (
             <>
-              {renderTextField('SMTP Host', 'component_config.grafana.email.smtp_host')}
-              {renderTextField('SMTP Port', 'component_config.grafana.email.smtp_port')}
-              {renderTextField('SMTP User', 'component_config.grafana.email.smtp_user')}
-              {renderTextField('SMTP Password', 'component_config.grafana.email.smtp_password', 'password')}
-              {renderTextField('From Address', 'component_config.grafana.email.from_address')}
-              {renderTextField('From Name', 'component_config.grafana.email.from_name')}
+              {renderAuthFields()}
+              {renderFoldersPanel()}
             </>
-          )}
-          <GridItem span={12}><Title headingLevel="h3">OIDC</Title></GridItem>
-          <GridItem span={12}>
-            <Checkbox id="grafana-oidc-enabled" label="Enable Grafana OIDC" isChecked={!!oidc.enabled} onChange={(_, v) => set('component_config.grafana.oidc.enabled', v)} />
-          </GridItem>
-          {oidc.enabled && isRhbkSelected(data) && !(data.component_options?.grafana || []).includes('standalone') && (
-            <GridItem span={12}>
-              <p style={{ color: mutedTextColor, margin: '0 0 8px 0', fontSize: '13px' }}>
-                Client ID and issuer are filled from your RHBK settings. The client secret is
-                not stored here — the Grafana OIDC job fetches it from Keycloak at deploy time
-                (same pattern as OpenShift OAuth).
-              </p>
-            </GridItem>
-          )}
-          {oidc.enabled && (
-            <>
-              {renderTextField(
-                'OIDC Client ID',
-                'component_config.grafana.oidc.client_id',
-                'text',
-                isRhbkSelected(data) ? 'From RHBK client list (grafana*) or default grafana-client.' : undefined
+          );
+        case 'dashboards':
+          return (
+            <Grid hasGutter>
+              {renderAuthFields()}
+              <GridItem span={12}>
+                <p style={{ color: mutedTextColor }}>
+                  Dashboards upload from the folder rows (git/path + dashboards_path). Configure folders
+                  under the Folders tab; this option only enables the Contoller JT.
+                </p>
+              </GridItem>
+              {renderFoldersPanel()}
+            </Grid>
+          );
+        case 'alerts':
+          return (
+            <Grid hasGutter>
+              {renderAuthFields()}
+              <GridItem span={12}>
+                <Checkbox
+                  id="grafana-alerts-enabled"
+                  label="Enable alerts upload from folder alerts_path"
+                  isChecked={data.component_config.grafana.alerts_enabled !== false}
+                  onChange={(_, v) => set('component_config.grafana.alerts_enabled', v)}
+                />
+                <p style={{ color: mutedTextColor, fontSize: '13px' }}>
+                  Alert JSON is read from each folder row&apos;s alerts_path (same git/path as dashboards,
+                  or a dedicated row pointing at an alerts repo).
+                </p>
+              </GridItem>
+              {renderFoldersPanel()}
+            </Grid>
+          );
+        case 'email':
+          return (
+            <Grid hasGutter>
+              <GridItem span={12}>
+                <Checkbox id="grafana-email-enabled" label="Configure Grafana email" isChecked={!!email.enabled} onChange={(_, v) => set('component_config.grafana.email.enabled', v)} />
+              </GridItem>
+              {email.enabled && (
+                <>
+                  {renderTextField('SMTP Host', 'component_config.grafana.email.smtp_host')}
+                  {renderTextField('SMTP Port', 'component_config.grafana.email.smtp_port')}
+                  {renderTextField('SMTP User', 'component_config.grafana.email.smtp_user')}
+                  {renderTextField('SMTP Password', 'component_config.grafana.email.smtp_password', 'password')}
+                  {renderTextField('From Address', 'component_config.grafana.email.from_address')}
+                  {renderTextField('From Name', 'component_config.grafana.email.from_name')}
+                </>
               )}
-              {(!isRhbkSelected(data) || oidc.client_secret_manual) && (
-                renderTextField(
-                  'OIDC Client Secret',
-                  'component_config.grafana.oidc.client_secret',
-                  'password',
-                  isRhbkSelected(data) ? 'Optional override — leave empty to fetch from Keycloak at deploy.' : undefined
-                )
-              )}
-              {isRhbkSelected(data) && !(data.component_options?.grafana || []).includes('standalone') && (
+            </Grid>
+          );
+        case 'oidc':
+          return (
+            <Grid hasGutter>
+              <GridItem span={12}>
+                <Checkbox id="grafana-oidc-enabled" label="Enable Grafana OIDC" isChecked={!!oidc.enabled} onChange={(_, v) => set('component_config.grafana.oidc.enabled', v)} />
+              </GridItem>
+              {oidc.enabled && isRhbkSelected(data) && !hasStandalone && (
                 <GridItem span={12}>
-                  <Checkbox
-                    id="grafana-oidc-secret-manual"
-                    label="Enter client secret manually (optional override)"
-                    isChecked={!!oidc.client_secret_manual}
-                    onChange={(_, v) => {
-                      setData(prev => {
-                        const copy = JSON.parse(JSON.stringify(prev));
-                        if (!copy.component_config?.grafana?.oidc) return copy;
-                        copy.component_config.grafana.oidc.client_secret_manual = v;
-                        if (!v) {
-                          copy.component_config.grafana.oidc.client_secret = '';
-                          copy.component_config.grafana.oidc.fetch_secret_from_rhbk = true;
-                        }
-                        return copy;
-                      });
-                    }}
-                  />
+                  <p style={{ color: mutedTextColor, margin: '0 0 8px 0', fontSize: '13px' }}>
+                    Client ID and issuer are filled from your RHBK settings. The client secret is
+                    not stored here — the Grafana OIDC job fetches it from Keycloak at deploy time
+                    (same pattern as OpenShift OAuth).
+                  </p>
                 </GridItem>
               )}
-              {renderTextField(
-                'OIDC Issuer URL',
-                'component_config.grafana.oidc.issuer',
-                'text',
-                isRhbkSelected(data) ? 'https://<keycloak-host>/realms/<realm> from RHBK hostname + realm.' : undefined
+              {oidc.enabled && (
+                <>
+                  {renderTextField(
+                    'OIDC Client ID',
+                    'component_config.grafana.oidc.client_id',
+                    'text',
+                    isRhbkSelected(data) ? 'From RHBK client list (grafana*) or default grafana-client.' : undefined
+                  )}
+                  {(!isRhbkSelected(data) || oidc.client_secret_manual) && (
+                    renderTextField(
+                      'OIDC Client Secret',
+                      'component_config.grafana.oidc.client_secret',
+                      'password',
+                      isRhbkSelected(data) ? 'Optional override — leave empty to fetch from Keycloak at deploy.' : undefined
+                    )
+                  )}
+                  {isRhbkSelected(data) && !hasStandalone && (
+                    <GridItem span={12}>
+                      <Checkbox
+                        id="grafana-oidc-secret-manual"
+                        label="Enter client secret manually (optional override)"
+                        isChecked={!!oidc.client_secret_manual}
+                        onChange={(_, v) => {
+                          setData(prev => {
+                            const copy = JSON.parse(JSON.stringify(prev));
+                            if (!copy.component_config?.grafana?.oidc) return copy;
+                            copy.component_config.grafana.oidc.client_secret_manual = v;
+                            if (!v) {
+                              copy.component_config.grafana.oidc.client_secret = '';
+                              copy.component_config.grafana.oidc.fetch_secret_from_rhbk = true;
+                            }
+                            return copy;
+                          });
+                        }}
+                      />
+                    </GridItem>
+                  )}
+                  {renderTextField(
+                    'OIDC Issuer URL',
+                    'component_config.grafana.oidc.issuer',
+                    'text',
+                    isRhbkSelected(data) ? 'https://<keycloak-host>/realms/<realm> from RHBK hostname + realm.' : undefined
+                  )}
+                </>
               )}
-            </>
-          )}
-        </Grid>
+            </Grid>
+          );
+        case 'alternate_route':
+          return (
+            <Grid hasGutter>
+              <GridItem span={12}>
+                <p style={{ color: mutedTextColor }}>
+                  Creates the alternate Grafana Route after install. OpenShift only.
+                </p>
+              </GridItem>
+              {renderTextField('Hostname / URL', 'component_config.grafana.hostname', 'text', grafanaHelp.hostname)}
+            </Grid>
+          );
+        default:
+          return null;
+      }
+    };
+
+    return (
+      <>
+        {renderComponentOptions(
+          'grafana',
+          'Grafana Options',
+          'Install (OpenShift) and Standalone are mutually exclusive. Datasources, Folders, Dashboards, and Alerts can run alone against an existing Grafana (config-only), or after either install. Leave Install unchecked for content-only.'
+        )}
+        <Tabs
+          activeKey={activeGrafanaTab}
+          onSelect={(_, key) => setActiveGrafanaDetailTab(String(key))}
+          style={{ marginTop: '12px', marginBottom: '12px' }}
+        >
+          {grafanaTabs.map(tab => (
+            <Tab key={tab} eventKey={tab} title={componentOptionLabels[tab] || tab}>
+              <div style={{ paddingTop: '12px' }}>{tab === activeGrafanaTab ? renderTabBody() : null}</div>
+            </Tab>
+          ))}
+        </Tabs>
+        {grafanaTabs.length === 0 && (
+          <p style={{ color: mutedTextColor }}>Select at least one Grafana option above.</p>
+        )}
       </>
     );
   };
@@ -5714,6 +6323,12 @@ echo $TOKEN
     const selected = data.component_options?.rhbk || [];
     const showStandalone = selected.includes('standalone');
     const showOpenshiftInstall = !showStandalone;
+    // Default TLS: cert-manager component selected → cert_manager; else edge.
+    // Explicit edge / cert_manager / manual from the form always wins.
+    const storedRhbkTls = String(data.component_config?.rhbk?.tls_mode || '').trim().toLowerCase();
+    const rhbkTlsMode = ['manual', 'edge', 'cert_manager'].includes(storedRhbkTls)
+      ? storedRhbkTls
+      : (certManagerComponentSelected(data) ? 'cert_manager' : 'edge');
 
     return (
     <>
@@ -5724,6 +6339,56 @@ echo $TOKEN
           {renderStorageClassField('Storage Class', 'component_config.rhbk.storage', rhbkHelp.storage)}
           {renderTextField('Replicas', 'component_config.rhbk.replicas', 'number')}
           {renderTextField('Realm', 'component_config.rhbk.realm', 'text', rhbkHelp.realm)}
+          {renderTextField('Admin user', 'component_config.rhbk.admin_user', 'text')}
+          {renderTextField('Admin password', 'component_config.rhbk.admin_password', 'password', 'Keycloak bootstrap admin password for the OpenShift install. Stored in vault_rhbk.yml.')}
+          <GridItem span={12}>
+            <Checkbox
+              id="rhbk-event-metrics-user"
+              label="Enable user-event metrics (login / logout for Grafana)"
+              description="RHBK 26.2+ native keycloak_user_events_total (feature user-event-metrics). Requires operator/image that lists that feature — current lab stable-v26.0 crash-loops if enabled. Upgrade RHBK channel first, then check this and re-run Deploy RHBK."
+              isChecked={!!data.component_config?.rhbk?.event_metrics_user_enabled}
+              onChange={(_, v) => set('component_config.rhbk.event_metrics_user_enabled', v)}
+            />
+          </GridItem>
+          <GridItem span={12}>
+            <FormGroup label="TLS for Keycloak route">
+              <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
+                Edge uses the cluster router cert. Cert-manager requests from a ClusterIssuer (e.g. idm-acme).
+                Own cert uploads tls.crt + tls.key into the Keycloak TLS secret.
+              </div>
+              {[['edge', 'OpenShift edge (router TLS)'], ['cert_manager', 'Use cert-manager (IdM ACME / ClusterIssuer)'], ['manual', 'Upload own cert (tls.crt + tls.key)']].map(([value, label]) => (
+                <Radio
+                  key={value}
+                  id={`rhbk-tls-mode-${value}`}
+                  label={label}
+                  name="rhbk-tls-mode"
+                  isChecked={rhbkTlsMode === value}
+                  onChange={() => {
+                    setData(prev => {
+                      const copy = JSON.parse(JSON.stringify(prev));
+                      if (!copy.component_config) copy.component_config = {};
+                      if (!copy.component_config.rhbk) copy.component_config.rhbk = {};
+                      copy.component_config.rhbk.tls_mode = value;
+                      copy.component_config.rhbk.cert_manager = value === 'cert_manager';
+                      return copy;
+                    });
+                  }}
+                />
+              ))}
+            </FormGroup>
+          </GridItem>
+          {rhbkTlsMode === 'cert_manager' && (
+            <>
+              {renderTextField('Issuer kind', 'component_config.rhbk.ocp_rhbk_issuer_kind', 'text', 'cert-manager Issuer or ClusterIssuer kind. Lab default: ClusterIssuer.')}
+              {renderTextField('Issuer name', 'component_config.rhbk.ocp_rhbk_issuer_name', 'text', 'Issuer name. Lab default: idm-acme.')}
+            </>
+          )}
+          {rhbkTlsMode === 'manual' && (
+            <>
+              {renderPemFileField('TLS Certificate (tls.crt)', 'component_config.rhbk.tls_crt', 'PEM certificate (leaf + optional chain) for Keycloak. Stored in vault_rhbk.yml.')}
+              {renderPemFileField('TLS Private Key (tls.key)', 'component_config.rhbk.tls_key', 'PEM private key paired with tls.crt. Stored in vault_rhbk.yml.')}
+            </>
+          )}
         </Grid>
       )}
       {showStandalone && (
@@ -5950,29 +6615,222 @@ echo $TOKEN
     </Grid>
   );
 
-  const renderCredentialConfigCard = () => (
-    <Card style={cardStyle}>
-      <CardBody>
-        <Title headingLevel="h2">Credentials</Title>
-        <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '4px' }}>
-          Configure AAP credentials created during bootstrap.
-        </div>
+  const renderCredentialConfigContent = () => (
+    <>
+      <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '4px' }}>
+        Configure AAP credentials created during bootstrap.
+      </div>
 
-        <br />
+      <br />
 
-        <Tabs activeKey={activeCredentialConfigTab} onSelect={(_, key) => setActiveCredentialConfigTab(key)}>
-          <Tab eventKey="vault" title="Vault" />
-          <Tab eventKey="machine" title="Machine" />
-          <Tab eventKey="additional" title="Additional" />
-        </Tabs>
+      <Tabs activeKey={activeCredentialConfigTab} onSelect={(_, key) => setActiveCredentialConfigTab(key)}>
+        <Tab eventKey="vault" title="Vault" />
+        <Tab eventKey="machine" title="Machine" />
+        <Tab eventKey="additional" title="Additional" />
+      </Tabs>
 
-        <div style={{ marginTop: '16px' }}>
-          {activeCredentialConfigTab === 'vault' && renderVaultCredentialConfig()}
-          {activeCredentialConfigTab === 'machine' && renderMachineCredentialConfig()}
-          {activeCredentialConfigTab === 'additional' && renderAdditionalAapCredentials()}
-        </div>
-      </CardBody>
-    </Card>
+      <div style={{ marginTop: '16px' }}>
+        {activeCredentialConfigTab === 'vault' && renderVaultCredentialConfig()}
+        {activeCredentialConfigTab === 'machine' && renderMachineCredentialConfig()}
+        {activeCredentialConfigTab === 'additional' && renderAdditionalAapCredentials()}
+      </div>
+    </>
+  );
+
+  const renderGitConfigurationContent = () => (
+    <>
+              <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '12px' }}>
+                Bootstrap repo SCM URL, branch, token, and git overwrite options used by Contoller project sync.
+              </div>
+              <Grid hasGutter>
+                <GridItem span={4}>
+                  <FormGroup label="SCM Tool" isRequired>
+                    {['gitlab','bitbucket','github','other'].map(v =>
+                      <Radio
+                        key={v}
+                        label={v}
+                        name="scm"
+                        isChecked={data.scm_tool === v}
+                        onChange={() => set('scm_tool', v)}
+                      />
+                    )}
+                  </FormGroup>
+                  {data.scm_tool === 'bitbucket' && (
+                    <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
+                      Local bootstrap git uses <code>Authorization: Bearer</code>. Controller project sync uses your Bitbucket username plus HTTP access token (not OAuth2).
+                    </p>
+                  )}
+
+                  <br />
+
+                  <Checkbox
+                    label="Automatically commit and push generated content to Git"
+                    isChecked={data.git.auto_push}
+                    isDisabled={standaloneRun}
+                    onChange={(_, v) => set('git.auto_push', v)}
+                  />
+                  {standaloneRun && (
+                    <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
+                      Auto-push is off for Run AAP tabs only (Hub/Galaxy/auth). Re-enable here if you need a git push.
+                    </p>
+                  )}
+
+                  <br />
+
+                  <Title headingLevel="h4">
+                    {labelWithHelp('Git overrides (local pod git repo)', gitHelp.gitOverrides)}
+                  </Title>
+                  <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: '8px', fontSize: '13px' }}>
+                    Default is all unchecked: bootstrap only applies changes to the pod clone (no remove or force overwrite).
+                  </p>
+
+                  <Checkbox
+                    id="git-override-group-vars-env"
+                    label={labelWithHelp(
+                      `Override group_vars/all/${data.environment || 'env'} (current Environment Type)`,
+                      gitHelp.overrideGroupVarsEnv
+                    )}
+                    isChecked={data.git?.overrides?.group_vars_current_env === true}
+                    isDisabled={data.git.vars_only === true || data.git?.overrides?.all === true}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.git) copy.git = {};
+                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
+                        copy.git.overrides.group_vars_current_env = v === true;
+                        if (!v) copy.git.overrides.all = false;
+                        copy.git.overwrite_generated = copy.git.overrides.all === true;
+                        return copy;
+                      });
+                    }}
+                  />
+
+                  <br />
+
+                  <Checkbox
+                    id="git-override-job-workflow-templates"
+                    label={labelWithHelp(
+                      'Override job and workflow templates (configs/job_templates and configs/workflows)',
+                      gitHelp.overrideJobWorkflowTemplates
+                    )}
+                    isChecked={data.git?.overrides?.job_and_workflow_templates === true}
+                    isDisabled={data.git.vars_only === true || data.git?.overrides?.all === true}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.git) copy.git = {};
+                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
+                        copy.git.overrides.job_and_workflow_templates = v === true;
+                        if (!v) copy.git.overrides.all = false;
+                        copy.git.overwrite_generated = copy.git.overrides.all === true;
+                        return copy;
+                      });
+                    }}
+                  />
+
+                  <br />
+
+                  <Checkbox
+                    id="git-override-all"
+                    label={labelWithHelp(
+                      'Override all (re-clone and wipe group_vars, playbooks, and configs)',
+                      gitHelp.overrideAll
+                    )}
+                    isChecked={data.git?.overrides?.all === true}
+                    isDisabled={data.git.vars_only === true}
+                    onChange={(_, v) => {
+                      setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.git) copy.git = {};
+                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
+                        copy.git.overrides.all = v === true;
+                        if (v === true) {
+                          copy.git.overrides.group_vars_current_env = true;
+                          copy.git.overrides.job_and_workflow_templates = true;
+                        } else {
+                          copy.git.overrides.group_vars_current_env = false;
+                          copy.git.overrides.job_and_workflow_templates = false;
+                        }
+                        copy.git.overwrite_generated = copy.git.overrides.all === true;
+                        return copy;
+                      });
+                    }}
+                  />
+                  {data.git.vars_only === true && (
+                    <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
+                      Git overrides are disabled while Vars / Vault files only is checked (vars for the current env are always regenerated).
+                    </p>
+                  )}
+
+                  <br />
+
+                  <Checkbox
+                    id="git-skip-tls-verify"
+                    label={labelWithHelp('Skip TLS/SSL verification for Git (self-signed certificates)', gitHelp.skipTlsVerify)}
+                    isChecked={data.git.skip_tls_verify !== false}
+                    onChange={(_, v) => set('git.skip_tls_verify', v)}
+                  />
+                </GridItem>
+
+                <GridItem span={8}>
+                  <FormGroup label="Project Git Source URL">
+                    <TextInput value={data.aap.git_url} onChange={(_, v) => set('aap.git_url', v)} />
+                  </FormGroup>
+
+                  <br />
+
+                  <FormGroup label="Git Branch">
+                    <TextInput value={data.aap.git_branch} onChange={(_, v) => set('aap.git_branch', v)} />
+                  </FormGroup>
+
+                  <br />
+
+                  {data.scm_tool === 'bitbucket' && (
+                    <>
+                      <FormGroup label="Bitbucket username" isRequired>
+                        <TextInput
+                          value={data.git.username}
+                          onChange={(_, v) => set('git.username', v)}
+                          placeholder="Account username for HTTP access token"
+                        />
+                      </FormGroup>
+
+                      <br />
+                    </>
+                  )}
+
+                  <FormGroup label="Git Token">
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <TextInput
+                        type={showGitToken ? 'text' : 'password'}
+                        value={data.git.token}
+                        onChange={(_, v) => {
+                          setData(prev => {
+                            const copy = JSON.parse(JSON.stringify(prev));
+                            copy.git.token = v;
+                            const devHubSelected = (copy.component_apps?.openshift || []).includes('dev_hub')
+                              || selectedComponentAppsFrom(copy).includes('dev_hub');
+                            if (devHubSelected) {
+                              if (!copy.component_config) copy.component_config = {};
+                              if (!copy.component_config.dev_hub) copy.component_config.dev_hub = {};
+                              const cur = String(copy.component_config.dev_hub.gitlab_token || '').trim();
+                              const prevGit = String(prev.git?.token || '').trim();
+                              if (!cur || cur === prevGit) {
+                                copy.component_config.dev_hub.gitlab_token = v;
+                              }
+                            }
+                            return copy;
+                          });
+                        }}
+                      />
+                      <Button variant="secondary" onClick={() => setShowGitToken(!showGitToken)}>
+                        {showGitToken ? 'Hide' : 'Show'}
+                      </Button>
+                    </div>
+                  </FormGroup>
+                </GridItem>
+              </Grid>
+    </>
   );
 
   const addAapCredential = () => {
@@ -6701,13 +7559,22 @@ echo $TOKEN
     );
   };
 
-    const toggleComponentOption = (component, option) => {
+  const toggleComponentOption = (component, option) => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
       const current = copy.component_options?.[component] || [];
-      const next = current.includes(option)
+      let next = current.includes(option)
         ? current.filter(item => item !== option)
         : [...current, option];
+      if (component === 'grafana' && next.includes(option)) {
+        if (option === 'install') next = next.filter(item => item !== 'standalone');
+        if (option === 'standalone') next = next.filter(item => item !== 'install');
+        if (option === 'alerts' && !copy.component_config) copy.component_config = {};
+        if (option === 'alerts') {
+          if (!copy.component_config.grafana) copy.component_config.grafana = {};
+          copy.component_config.grafana.alerts_enabled = true;
+        }
+      }
       copy.component_options = {
         ...(copy.component_options || {}),
         [component]: next
@@ -6722,6 +7589,22 @@ echo $TOKEN
       if (component === 'satellite' && option === 'satellite_dynamic_inventory') {
         copy.component_config.satellite.dynamic_inventory_enabled = next.includes('satellite_dynamic_inventory');
       }
+      if (component === 'openshift' && option === 'update_default_ingress') {
+        copy.component_config.cert_manager = deepMerge(
+          defaultComponentConfig('cert_manager'),
+          copy.component_config.cert_manager || {}
+        );
+        const enabled = next.includes('update_default_ingress');
+        copy.component_config.cert_manager.update_default_ingress = enabled;
+        if (enabled) {
+          if (!copy.component_apps) copy.component_apps = {};
+          const apps = copy.component_apps.openshift || [];
+          if (!apps.includes('cert_manager')) {
+            copy.component_apps.openshift = [...apps, 'cert_manager'];
+          }
+          applyRhbkTlsDefaultOnCertManagerToggle(copy);
+        }
+      }
       return copy;
     });
   };
@@ -6731,7 +7614,14 @@ echo $TOKEN
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
       if (!copy.component_options) copy.component_options = {};
-      copy.component_options[component] = enabled ? [...(componentOptionDefaults[component] || [])] : [];
+      if (enabled && component === 'grafana') {
+        copy.component_options[component] = (componentOptionDefaults[component] || []).filter(o => o !== 'standalone');
+        if (!copy.component_config) copy.component_config = {};
+        if (!copy.component_config.grafana) copy.component_config.grafana = {};
+        copy.component_config.grafana.alerts_enabled = true;
+      } else {
+        copy.component_options[component] = enabled ? [...(componentOptionDefaults[component] || [])] : [];
+      }
       if (enabled && ['satellite', 'idm', 'grafana', 'gitlab', 'rhbk'].includes(component)) {
         if (!copy.component_config) copy.component_config = {};
         copy.component_config[component] = deepMerge(
@@ -6748,6 +7638,23 @@ echo $TOKEN
         copy.component_config.satellite.dynamic_inventory_enabled =
           copy.component_options.satellite.includes('satellite_dynamic_inventory');
       }
+      if (component === 'openshift') {
+        copy.component_config = copy.component_config || {};
+        copy.component_config.cert_manager = deepMerge(
+          defaultComponentConfig('cert_manager'),
+          copy.component_config.cert_manager || {}
+        );
+        const ingressOn = copy.component_options.openshift.includes('update_default_ingress');
+        copy.component_config.cert_manager.update_default_ingress = ingressOn;
+        if (ingressOn) {
+          if (!copy.component_apps) copy.component_apps = {};
+          const apps = copy.component_apps.openshift || [];
+          if (!apps.includes('cert_manager')) {
+            copy.component_apps.openshift = [...apps, 'cert_manager'];
+          }
+          applyRhbkTlsDefaultOnCertManagerToggle(copy);
+        }
+      }
       return copy;
     });
   };
@@ -6757,7 +7664,10 @@ echo $TOKEN
     if (options.length === 0) return null;
 
     const selected = data.component_options?.[component] || [];
-    const allSelected = options.length > 0 && options.every(option => selected.includes(option));
+    const optionsForAll = component === 'grafana'
+      ? options.filter(option => option !== 'standalone')
+      : options;
+    const allSelected = optionsForAll.length > 0 && optionsForAll.every(option => selected.includes(option));
 
     return (
       <div
@@ -7307,11 +8217,7 @@ echo $TOKEN
     </>
   );
 
-  const renderOpenShiftIntegration = () => {
-    const certManagerSelected = (data.component_apps?.openshift || []).includes('cert_manager');
-    const certMode = data.component_config?.cert_manager?.mode || 'cert';
-
-    return (
+  const renderOpenShiftIntegration = () => (
     <>
       <p style={{ color: mutedTextColor }}>This section is opened by clicking <strong>openshift</strong>.</p>
       <Grid hasGutter>
@@ -7358,62 +8264,263 @@ echo $TOKEN
             </div>
           </FormGroup>
         </GridItem>
+      </Grid>
+      {(data.component_apps?.openshift || []).includes('cert_manager') && (
+        <p style={{ color: mutedTextColor, marginTop: '12px' }}>
+          Cert-manager issuer settings are on the <strong>Cert Manager</strong> tab.
+          Router wildcard PEMs are on <strong>Default Ingress Cert</strong> (OpenShift Options).
+        </p>
+      )}
+    </>
+  );
 
+  const loadPemFileIntoPath = (file, path) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      set(path, String(reader.result || ''));
+    };
+    reader.readAsText(file);
+  };
 
-        {certManagerSelected && (
+  const renderPemFileField = (label, path, help) => {
+    const value = path.split('.').reduce((acc, key) => (acc == null ? undefined : acc[key]), data) || '';
+    return (
+      <GridItem span={12}>
+        <FormGroup label={labelWithHelp(label, help)}>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+            <input
+              type="file"
+              accept=".crt,.pem,.cer,.key,.txt,application/x-pem-file,application/x-x509-ca-cert,text/plain"
+              onChange={event => {
+                const file = event.target.files?.[0];
+                if (file) loadPemFileIntoPath(file, path);
+                event.target.value = '';
+              }}
+            />
+            {value ? (
+              <Button variant="link" isInline onClick={() => set(path, '')}>
+                Clear
+              </Button>
+            ) : null}
+          </div>
+          <TextArea
+            value={value}
+            onChange={(_, v) => set(path, v)}
+            resizeOrientation="vertical"
+            rows={6}
+            placeholder="Paste PEM here, or choose a file above"
+          />
+        </FormGroup>
+      </GridItem>
+    );
+  };
+
+  const renderOpenShiftCertIdmConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={12}>
+        <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
+          <strong>IdM ACME</strong> — cert-manager gets certificates from FreeIPA ACME.
+          Use this for per-app issuance, not the cluster router wildcard (that is Default Ingress Cert).
+        </div>
+      </GridItem>
+      {renderTextField('IdM ACME Directory URL', 'component_config.cert_manager.idm_acme_directory_url', 'text', openshiftHelp.idmAcmeDirectoryUrl)}
+      <GridItem span={12}>
+        <FormGroup label={labelWithHelp('Upload IdM CA (ca.crt)', openshiftHelp.idmCaBundleUpload)}>
+          <input
+            type="file"
+            accept=".crt,.pem,.cer,application/x-pem-file,application/x-x509-ca-cert,text/plain"
+            onChange={event => {
+              const file = event.target.files?.[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = () => {
+                const result = String(reader.result || '');
+                const base64 = result.includes(',') ? result.split(',')[1] : result;
+                setData(prev => {
+                  const copy = JSON.parse(JSON.stringify(prev));
+                  copy.component_config = copy.component_config || {};
+                  copy.component_config.cert_manager = {
+                    ...(copy.component_config.cert_manager || {}),
+                    mode: 'idm_acme',
+                    idm_ca_bundle_filename: file.name || 'idm-root-ca.crt',
+                    idm_ca_bundle_content_base64: base64,
+                    idm_ca_bundle_file: `files/certs/${(file.name || 'idm-root-ca.crt').replace(/[^A-Za-z0-9._-]+/g, '-')}`
+                  };
+                  return copy;
+                });
+              };
+              reader.readAsDataURL(file);
+            }}
+          />
+          {(data.component_config?.cert_manager?.idm_ca_bundle_filename
+            || data.component_config?.cert_manager?.idm_ca_bundle_content_base64) && (
+            <div style={{ marginTop: '8px', fontSize: '13px', color: mutedTextColor }}>
+              Selected: {data.component_config.cert_manager.idm_ca_bundle_filename || 'ca.crt'}
+              {' '}(written to bootstrap git under files/certs/)
+              <Button
+                variant="link"
+                isInline
+                style={{ marginLeft: '8px' }}
+                onClick={() => {
+                  set('component_config.cert_manager.idm_ca_bundle_filename', '');
+                  set('component_config.cert_manager.idm_ca_bundle_content_base64', '');
+                }}
+              >
+                Clear
+              </Button>
+            </div>
+          )}
+        </FormGroup>
+      </GridItem>
+      {renderTextField('IdM CA Bundle Path (optional override)', 'component_config.cert_manager.idm_ca_bundle_file', 'text', openshiftHelp.idmCaBundleFile)}
+    </Grid>
+  );
+
+  const renderOpenShiftCertAwsConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={12}>
+        <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
+          <strong>AWS PCA</strong> — cert-manager issues certs from AWS Private CA (not the router wildcard).
+        </div>
+      </GridItem>
+      {renderTextField('AWS PCA Namespace', 'component_config.cert_manager.awspca_namespace', 'text', openshiftHelp.awspcaNamespace)}
+      {renderTextField('AWS PCA Secret Name', 'component_config.cert_manager.awspca_secret_name', 'text', openshiftHelp.awspcaSecretName)}
+      {renderTextField('AWS PCA Issuer Name', 'component_config.cert_manager.awspca_issuer_name', 'text', openshiftHelp.awspcaIssuerName)}
+      {renderTextField('AWS Region', 'component_config.cert_manager.awspca_region', 'text', openshiftHelp.awspcaRegion)}
+      {renderTextField('AWS PCA ARN', 'component_config.cert_manager.awspca_pca_arn', 'text', openshiftHelp.awspcaPcaArn)}
+      {renderTextField('AWS Access Key ID', 'component_config.cert_manager.awspca_access_key_id', 'password', openshiftHelp.awspcaAccessKeyId)}
+      {renderTextField('AWS Secret Access Key', 'component_config.cert_manager.awspca_secret_access_key', 'password', openshiftHelp.awspcaSecretAccessKey)}
+    </Grid>
+  );
+
+  const renderOpenShiftCertCustomConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={12}>
+        <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
+          <strong>Custom cert</strong> — static PEMs for cert-manager custom mode (app issuers).
+          Router wildcard PEMs go under <strong>Default Ingress Cert</strong>.
+        </div>
+      </GridItem>
+      {renderPemFileField('TLS Certificate', 'component_config.cert_manager.tls_crt', openshiftHelp.tlsCrt)}
+      {renderPemFileField('TLS Private Key', 'component_config.cert_manager.tls_key', openshiftHelp.tlsKey)}
+    </Grid>
+  );
+
+  const renderCertManagerConfig = () => {
+    const mode = data.component_config?.cert_manager?.mode || 'cert';
+    const certTab =
+      activeCertManagerTab === 'aws_pca' || activeCertManagerTab === 'custom'
+        ? activeCertManagerTab
+        : mode === 'aws_pca'
+          ? 'aws_pca'
+          : mode === 'cert'
+            ? 'custom'
+            : 'idm_acme';
+
+    return (
+      <>
+        <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '12px' }}>
+          How cert-manager issues or supplies <em>per-app</em> certificates (IdM ACME, AWS PCA, or custom PEMs).
+          The OpenShift router wildcard is configured separately under <strong>Default Ingress Cert</strong>.
+        </div>
+        <Tabs
+          activeKey={certTab}
+          onSelect={(_, key) => {
+            setActiveCertManagerTab(key);
+            if (key === 'idm_acme') set('component_config.cert_manager.mode', 'idm_acme');
+            else if (key === 'aws_pca') set('component_config.cert_manager.mode', 'aws_pca');
+            else if (key === 'custom') set('component_config.cert_manager.mode', 'cert');
+          }}
+        >
+          <Tab eventKey="idm_acme" title="IdM ACME" />
+          <Tab eventKey="aws_pca" title="AWS PCA" />
+          <Tab eventKey="custom" title="Custom cert" />
+        </Tabs>
+        <br />
+        {certTab === 'idm_acme' && renderOpenShiftCertIdmConfig()}
+        {certTab === 'aws_pca' && renderOpenShiftCertAwsConfig()}
+        {certTab === 'custom' && renderOpenShiftCertCustomConfig()}
+      </>
+    );
+  };
+
+  const renderDefaultIngressCertConfig = () => {
+    const cm = data.component_config?.cert_manager || {};
+    return (
+      <Grid hasGutter>
+        <GridItem span={12}>
+          <Title headingLevel="h3">Default ingress certificate (router wildcard)</Title>
+          <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
+            Replaces the OpenShift IngressController default certificate for
+            {' '}<code>*.apps.&lt;domain&gt;</code>. This does not configure cert-manager issuers.
+            Enabling this option sets <code>update_default_ingress</code> and selects the cert_manager app
+            so Contoller can run the Update Default Ingress Certificate job.
+          </div>
+          <Checkbox
+            id="cert-manager-update-default-ingress"
+            label="Update default ingress certificate"
+            isChecked={cm.update_default_ingress === true}
+            onChange={(_, v) => {
+              const enabled = v === true;
+              setData(prev => {
+                const copy = JSON.parse(JSON.stringify(prev));
+                if (!copy.component_config) copy.component_config = {};
+                copy.component_config.cert_manager = {
+                  ...(defaultComponentConfig('cert_manager')),
+                  ...(copy.component_config.cert_manager || {}),
+                  update_default_ingress: enabled
+                };
+                if (!copy.component_options) copy.component_options = {};
+                const opts = copy.component_options.openshift || [];
+                copy.component_options.openshift = enabled
+                  ? (opts.includes('update_default_ingress') ? opts : [...opts, 'update_default_ingress'])
+                  : opts.filter(item => item !== 'update_default_ingress');
+                if (enabled) {
+                  if (!copy.component_apps) copy.component_apps = {};
+                  const apps = copy.component_apps.openshift || [];
+                  if (!apps.includes('cert_manager')) {
+                    copy.component_apps.openshift = [...apps, 'cert_manager'];
+                  }
+                  applyRhbkTlsDefaultOnCertManagerToggle(copy);
+                }
+                return copy;
+              });
+            }}
+          />
+        </GridItem>
+        {cm.update_default_ingress === true && (
           <>
             <GridItem span={12}>
-              <FormGroup label={labelWithHelp('Cert-Manager Certificate Source', openshiftHelp.certSource)}>
-                <Radio
-                  label="Custom certificate"
-                  name="cert-manager-mode"
-                  isChecked={certMode === 'cert'}
-                  onChange={() => set('component_config.cert_manager.mode', 'cert')}
-                />
-                <Radio
-                  label="IdM ACME"
-                  name="cert-manager-mode"
-                  isChecked={certMode === 'idm_acme'}
-                  onChange={() => set('component_config.cert_manager.mode', 'idm_acme')}
-                />
-                <Radio
-                  label="AWS PCA"
-                  name="cert-manager-mode"
-                  isChecked={certMode === 'aws_pca'}
-                  onChange={() => set('component_config.cert_manager.mode', 'aws_pca')}
-                />
-              </FormGroup>
+              <Checkbox
+                id="cert-manager-trust-ca-clusterwide"
+                label="Trust issuing CA cluster-wide (Proxy trustedCA)"
+                isChecked={cm.trust_ca_clusterwide !== false}
+                onChange={(_, v) => set('component_config.cert_manager.trust_ca_clusterwide', v === true)}
+              />
+              <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '4px', marginBottom: '8px' }}>
+                Creates an openshift-config ConfigMap and patches Proxy/cluster so workloads trust the CA.
+                Requires the ingress CA PEM below, or IdM CA upload on the Cert Manager tab.
+              </div>
             </GridItem>
-
-            {certMode === 'cert' && (
-              <>
-                {renderTextAreaField('TLS Certificate', 'component_config.cert_manager.tls_crt', openshiftHelp.tlsCrt)}
-                {renderTextAreaField('TLS Private Key', 'component_config.cert_manager.tls_key', openshiftHelp.tlsKey)}
-              </>
+            {renderPemFileField(
+              'Ingress wildcard TLS certificate (PEM)',
+              'component_config.cert_manager.ingress_tls_crt',
+              'Router wildcard / SAN cert for *.apps.<domain>. Stored in vault_cert_manager.yml.'
             )}
-
-            {certMode === 'idm_acme' && (
-              <>
-                {renderTextField('IdM ACME Directory URL', 'component_config.cert_manager.idm_acme_directory_url', 'text', openshiftHelp.idmAcmeDirectoryUrl)}
-                {renderTextField('IdM CA Bundle File', 'component_config.cert_manager.idm_ca_bundle_file', 'text', openshiftHelp.idmCaBundleFile)}
-              </>
+            {renderPemFileField(
+              'Ingress wildcard TLS private key (PEM)',
+              'component_config.cert_manager.ingress_tls_key',
+              'Private key for the router wildcard cert. Stored in vault_cert_manager.yml.'
             )}
-
-            {certMode === 'aws_pca' && (
-              <>
-                {renderTextField('AWS PCA Namespace', 'component_config.cert_manager.awspca_namespace', 'text', openshiftHelp.awspcaNamespace)}
-                {renderTextField('AWS PCA Secret Name', 'component_config.cert_manager.awspca_secret_name', 'text', openshiftHelp.awspcaSecretName)}
-                {renderTextField('AWS PCA Issuer Name', 'component_config.cert_manager.awspca_issuer_name', 'text', openshiftHelp.awspcaIssuerName)}
-                {renderTextField('AWS Region', 'component_config.cert_manager.awspca_region', 'text', openshiftHelp.awspcaRegion)}
-                {renderTextField('AWS PCA ARN', 'component_config.cert_manager.awspca_pca_arn', 'text', openshiftHelp.awspcaPcaArn)}
-                {renderTextField('AWS Access Key ID', 'component_config.cert_manager.awspca_access_key_id', 'password', openshiftHelp.awspcaAccessKeyId)}
-                {renderTextField('AWS Secret Access Key', 'component_config.cert_manager.awspca_secret_access_key', 'password', openshiftHelp.awspcaSecretAccessKey)}
-              </>
+            {renderPemFileField(
+              'Issuing CA / chain (PEM)',
+              'component_config.cert_manager.ingress_ca_crt',
+              'CA/chain appended to router tls.crt and used for cluster-wide trust when enabled.'
             )}
           </>
         )}
       </Grid>
-    </>
     );
   };
 
@@ -7459,7 +8566,7 @@ echo $TOKEN
                 </FormGroup>
               </GridItem>
               <GridItem span={4}>
-                <FormGroup label="Password">
+                <FormGroup label="Password" isRequired>
                   <div style={{ display: 'flex', gap: '8px' }}>
                     <TextInput
                       type={showHtpasswdPassword ? 'text' : 'password'}
@@ -7470,6 +8577,11 @@ echo $TOKEN
                       {showHtpasswdPassword ? 'Hide' : 'Show'}
                     </Button>
                   </div>
+                  {!String(user.password || '').trim() && (
+                    <div style={{ color: '#c9190b', fontSize: '12px', marginTop: '4px' }}>
+                      Required — empty password is not accepted (no silent redhat123 default).
+                    </div>
+                  )}
                 </FormGroup>
               </GridItem>
               <GridItem span={4}>
@@ -7518,11 +8630,31 @@ echo $TOKEN
   const renderOpenShiftConsoleBannerConfig = () => (
     <Grid hasGutter>
       <GridItem span={6}>
+        <FormGroup label={labelWithHelp(
+          'Banner action',
+          'add — create a new ADO banner for this text (default; leaves other ADO banners). '
+          + 'update — delete all ADO-managed banners, then create one replacement. '
+          + 'delete — remove all ADO-managed banners (label/prefix ado-banner).'
+        )}>
+          <select
+            value={data.openshift.banner_state || 'add'}
+            onChange={e => set('openshift.banner_state', e.target.value)}
+            style={{ width: '100%', height: '36px' }}
+          >
+            <option value="add">Add (keep existing ADO banners)</option>
+            <option value="update">Update (replace all ADO banners)</option>
+            <option value="delete">Delete (remove all ADO banners)</option>
+          </select>
+        </FormGroup>
+      </GridItem>
+
+      <GridItem span={6}>
         <FormGroup label={labelWithHelp('Console Banner Location', openshiftHelp.bannerLocation)}>
           <select
             value={data.openshift.banner_location || 'BannerTop'}
             onChange={e => set('openshift.banner_location', e.target.value)}
             style={{ width: '100%', height: '36px' }}
+            disabled={(data.openshift.banner_state || 'add') === 'delete'}
           >
             <option value="BannerTop">BannerTop</option>
             <option value="BannerBottom">BannerBottom</option>
@@ -7530,42 +8662,46 @@ echo $TOKEN
         </FormGroup>
       </GridItem>
 
-      <GridItem span={12}>
-        <FormGroup label={labelWithHelp('Console Banner Text', openshiftHelp.bannerText)}>
-          <TextInput
-            value={data.openshift.banner_text || ''}
-            onChange={(_, v) => set('openshift.banner_text', v)}
-          />
-        </FormGroup>
-      </GridItem>
+      {(data.openshift.banner_state || 'add') !== 'delete' && (
+        <>
+          <GridItem span={12}>
+            <FormGroup label={labelWithHelp('Console Banner Text', openshiftHelp.bannerText)}>
+              <TextInput
+                value={data.openshift.banner_text || ''}
+                onChange={(_, v) => set('openshift.banner_text', v)}
+              />
+            </FormGroup>
+          </GridItem>
 
-      <GridItem span={6}>
-        <FormGroup label={labelWithHelp('Console Banner Background Color', openshiftHelp.bannerBackgroundColor)}>
-          <select
-            value={data.openshift.banner_background_color || '#1f7a1f'}
-            onChange={e => set('openshift.banner_background_color', e.target.value)}
-            style={{ width: '100%', height: '36px' }}
-          >
-            {bannerColorPresets.map(color => (
-              <option key={`bg-${color.value}`} value={color.value}>{color.label} ({color.value})</option>
-            ))}
-          </select>
-        </FormGroup>
-      </GridItem>
+          <GridItem span={6}>
+            <FormGroup label={labelWithHelp('Console Banner Background Color', openshiftHelp.bannerBackgroundColor)}>
+              <select
+                value={data.openshift.banner_background_color || '#1f7a1f'}
+                onChange={e => set('openshift.banner_background_color', e.target.value)}
+                style={{ width: '100%', height: '36px' }}
+              >
+                {bannerColorPresets.map(color => (
+                  <option key={`bg-${color.value}`} value={color.value}>{color.label} ({color.value})</option>
+                ))}
+              </select>
+            </FormGroup>
+          </GridItem>
 
-      <GridItem span={6}>
-        <FormGroup label={labelWithHelp('Console Banner Text Color', openshiftHelp.bannerTextColor)}>
-          <select
-            value={data.openshift.banner_text_color || '#ffffff'}
-            onChange={e => set('openshift.banner_text_color', e.target.value)}
-            style={{ width: '100%', height: '36px' }}
-          >
-            {bannerColorPresets.map(color => (
-              <option key={`fg-${color.value}`} value={color.value}>{color.label} ({color.value})</option>
-            ))}
-          </select>
-        </FormGroup>
-      </GridItem>
+          <GridItem span={6}>
+            <FormGroup label={labelWithHelp('Console Banner Text Color', openshiftHelp.bannerTextColor)}>
+              <select
+                value={data.openshift.banner_text_color || '#ffffff'}
+                onChange={e => set('openshift.banner_text_color', e.target.value)}
+                style={{ width: '100%', height: '36px' }}
+              >
+                {bannerColorPresets.map(color => (
+                  <option key={`fg-${color.value}`} value={color.value}>{color.label} ({color.value})</option>
+                ))}
+              </select>
+            </FormGroup>
+          </GridItem>
+        </>
+      )}
     </Grid>
   );
 
@@ -8213,39 +9349,294 @@ echo $TOKEN
     );
   };
 
-  const renderOpenShiftOAuthRhbkConfig = () => (
-    <>
-      <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
-        Name shown in the OpenShift login screen for the Keycloak/RHBK OIDC identity provider.
-        Requires RHBK deployed and an OpenShift client configured in the realm.
-      </p>
-      <Grid hasGutter>
-        {renderTextField(
-          'OAuth IdP display name',
-          'openshift.oauth_rhbk.idp_name',
-          'text',
-          'Identity provider name in OAuth cluster config. Example: Keycloak, RH-SSO.'
-        )}
-      </Grid>
-    </>
-  );
+  const renderOpenShiftOAuthRhbkConfig = () => {
+    const oauth = data.openshift?.oauth_rhbk || {};
+    const rhbk = data.component_config?.rhbk || {};
+    const appsDomain = String(data.openshift?.apps_domain || '').trim();
+    const defaultHost = String(
+      rhbk.hostname
+      || (appsDomain ? `keycloak.${appsDomain}` : '')
+      || ''
+    ).replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    const defaultRealm = String(rhbk.realm || oauth.realm || 'rhlab');
+    const defaultClient = String(
+      oauth.client_id
+      || rhbk.client
+      || rhbk.openshift_oidc_client_id
+      || ''
+    );
+    const prepopulateFromRhbk = () => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.openshift) copy.openshift = {};
+        if (!copy.openshift.oauth_rhbk) copy.openshift.oauth_rhbk = {};
+        const cfg = copy.openshift.oauth_rhbk;
+        const r = copy.component_config?.rhbk || {};
+        const domain = String(copy.openshift?.apps_domain || '').trim();
+        cfg.idp_name = cfg.idp_name || 'Keycloak';
+        cfg.keycloak_hostname = String(
+          r.hostname || (domain ? `keycloak.${domain}` : '') || ''
+        ).replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        cfg.realm = String(r.realm || cfg.realm || 'rhlab');
+        cfg.client_id = String(
+          r.client || r.openshift_oidc_client_id || cfg.client_id || ''
+        );
+        if (!String(cfg.extra_scopes || '').trim()) cfg.extra_scopes = 'groups';
+        cfg.fetch_client_secret = true;
+        cfg.mapping_method = cfg.mapping_method || 'claim';
+        return copy;
+      });
+    };
 
-  const renderOpenShiftLdapAuthConfig = () => (
-    <>
-      <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
-        Name shown in the OpenShift login screen for the LDAP identity provider.
-        Bind DN and LDAP URL come from vault <code>ldap_config</code> unless overridden in generated vars.
-      </p>
-      <Grid hasGutter>
-        {renderTextField(
-          'LDAP IdP display name',
-          'openshift.ldap_auth.idp_name',
-          'text',
-          'Identity provider name in OAuth cluster config. Example: LDAP_IDM, IdM.'
+    return (
+      <>
+        <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+          Configure the OpenShift OAuth OIDC IdP against Keycloak/RHBK.
+          The Contoller job fetches the client secret from Keycloak automatically
+          (no paste required when <strong>Fetch client secret from Keycloak</strong> is on).
+        </p>
+        <Grid hasGutter>
+          <GridItem span={12}>
+            <Button variant="secondary" onClick={prepopulateFromRhbk}>
+              Prepopulate from RHBK settings
+            </Button>
+            <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
+              Uses RHBK hostname/realm/OpenShift client when RHBK is configured
+              (defaults: {defaultHost || 'keycloak.&lt;apps_domain&gt;'}, realm {defaultRealm}
+              {defaultClient ? `, client ${defaultClient}` : ''}).
+            </div>
+          </GridItem>
+          {renderTextField(
+            'OAuth IdP display name',
+            'openshift.oauth_rhbk.idp_name',
+            'text',
+            'Identity provider name in OAuth cluster config. Example: Keycloak, RH-SSO.'
+          )}
+          {renderTextField(
+            'Keycloak hostname',
+            'openshift.oauth_rhbk.keycloak_hostname',
+            'text',
+            `Keycloak route host (no https://). Example: ${defaultHost || 'keycloak.apps.ocp.prod.rhlab'}`
+          )}
+          {renderTextField(
+            'Realm',
+            'openshift.oauth_rhbk.realm',
+            'text',
+            `Keycloak realm. Default: ${defaultRealm}`
+          )}
+          {renderTextField(
+            'OpenShift OIDC client ID',
+            'openshift.oauth_rhbk.client_id',
+            'text',
+            'Confidential client in the realm used by OpenShift OAuth. Example: OpenshiftDev.'
+          )}
+          {renderTextField(
+            'Extra scopes',
+            'openshift.oauth_rhbk.extra_scopes',
+            'text',
+            'Comma-separated scopes beyond openid. Default: groups'
+          )}
+          <GridItem span={6}>
+            <FormGroup label="Mapping method">
+              <select
+                value={oauth.mapping_method || 'claim'}
+                onChange={e => set('openshift.oauth_rhbk.mapping_method', e.target.value)}
+                style={selectStyle}
+              >
+                <option value="claim">claim</option>
+                <option value="lookup">lookup</option>
+                <option value="add">add</option>
+              </select>
+            </FormGroup>
+          </GridItem>
+          <GridItem span={12}>
+            <Checkbox
+              id="oauth-rhbk-fetch-secret"
+              label="Fetch client secret from Keycloak (automation)"
+              description="Contoller job uses RHBK admin credentials to read the client secret — leave on unless you must paste a secret."
+              isChecked={oauth.fetch_client_secret !== false}
+              onChange={(_, v) => set('openshift.oauth_rhbk.fetch_client_secret', v === true)}
+            />
+          </GridItem>
+        </Grid>
+      </>
+    );
+  };
+
+  const renderOpenShiftLdapAuthConfig = () => {
+    const ldap = data.openshift?.ldap_auth || {};
+    return (
+      <>
+        <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+          IdM / LDAP settings written to <code>vault_*ldap*</code> as <code>ldap_config</code>
+          for the OpenShift LDAP identity provider job. Defaults match lab IdM
+          (<code>idm.server.lab</code>).
+        </p>
+        <Grid hasGutter>
+          {renderTextField(
+            'LDAP IdP display name',
+            'openshift.ldap_auth.idp_name',
+            'text',
+            'Identity provider name in OAuth cluster config. Example: LDAP_IDM, IdM.'
+          )}
+          {renderTextField(
+            'LDAP connection URL',
+            'openshift.ldap_auth.connection_url',
+            'text',
+            'Example: ldap://idm.server.lab or ldaps://idm.server.lab'
+          )}
+          {renderTextField(
+            'Bind DN',
+            'openshift.ldap_auth.bind_dn',
+            'text',
+            'Service bind DN. Example: cn=Directory Manager'
+          )}
+          {renderTextField(
+            'Bind password',
+            'openshift.ldap_auth.bind_credential',
+            'password',
+            'Bind credential stored in vault ldap_config.bindCredential'
+          )}
+          {renderTextField(
+            'Users DN',
+            'openshift.ldap_auth.users_dn',
+            'text',
+            'Search base for users. Example: cn=users,cn=accounts,dc=server,dc=lab'
+          )}
+          {renderTextField(
+            'Username LDAP attribute',
+            'openshift.ldap_auth.username_ldap_attribute',
+            'text',
+            'Attribute used as preferredUsername. Default: uid'
+          )}
+          <GridItem span={6}>
+            <FormGroup label="Mapping method">
+              <select
+                value={ldap.mapping_method || 'claim'}
+                onChange={e => set('openshift.ldap_auth.mapping_method', e.target.value)}
+                style={selectStyle}
+              >
+                <option value="claim">claim</option>
+                <option value="lookup">lookup</option>
+                <option value="add">add</option>
+              </select>
+            </FormGroup>
+          </GridItem>
+          <GridItem span={12}>
+            <Checkbox
+              id="ldap-auth-insecure"
+              label="Allow insecure LDAP (ldap:// without TLS)"
+              isChecked={ldap.insecure === true || String(ldap.connection_url || '').toLowerCase().startsWith('ldap://')}
+              onChange={(_, v) => set('openshift.ldap_auth.insecure', v === true)}
+            />
+          </GridItem>
+        </Grid>
+      </>
+    );
+  };
+
+  const renderQuayConfig = () => {
+    const quay = data.component_config?.quay || {};
+    const showOidc = (data.component_options?.quay || []).includes('oidc') || quay.oidc_enabled !== false;
+    return (
+      <>
+        {renderComponentOptions('quay', 'Quay Options', 'Optional Quay workflow steps. OIDC configures Keycloak login after install.')}
+        <Grid hasGutter>
+          {renderTextField('Hostname / route', 'component_config.quay.hostname', 'text', 'Quay registry route. Example: quay.apps.ocp.prod.rhlab')}
+          {renderStorageClassField('Storage Class', 'component_config.quay.storage', defaultComponentHelp.storage)}
+          {renderTextField('Replicas', 'component_config.quay.replicas', 'number')}
+          {renderTextField('Admin user', 'component_config.quay.admin_user', 'text')}
+          {renderTextField('Admin password', 'component_config.quay.admin_password', 'password')}
+        </Grid>
+        {showOidc && (
+          <Grid hasGutter style={{ marginTop: '12px' }}>
+            <GridItem span={12}>
+              <Title headingLevel="h3">Keycloak / OIDC</Title>
+              <p style={{ color: mutedTextColor }}>
+                When RHBK is selected, the Quay OIDC job can fetch the client secret from Keycloak.
+              </p>
+            </GridItem>
+            <GridItem span={12}>
+              <Checkbox
+                id="quay-oidc-enabled"
+                label="Enable Quay OIDC (Keycloak)"
+                isChecked={quay.oidc_enabled !== false}
+                onChange={(_, v) => set('component_config.quay.oidc_enabled', v)}
+              />
+            </GridItem>
+            {quay.oidc_enabled !== false && (
+              <>
+                {renderTextField('OIDC client ID', 'component_config.quay.oidc_client_id', 'text', 'Default: quay')}
+                {renderTextField('Keycloak realm', 'component_config.quay.keycloak_realm', 'text', 'Default: rhlab')}
+                <GridItem span={12}>
+                  <Checkbox
+                    id="quay-fetch-oidc-secret"
+                    label="Fetch OIDC client secret from Keycloak"
+                    isChecked={quay.fetch_oidc_secret_from_rhbk !== false}
+                    onChange={(_, v) => set('component_config.quay.fetch_oidc_secret_from_rhbk', v)}
+                  />
+                </GridItem>
+                {quay.fetch_oidc_secret_from_rhbk === false && (
+                  renderTextField('OIDC client secret', 'component_config.quay.oidc_client_secret', 'password')
+                )}
+              </>
+            )}
+          </Grid>
         )}
-      </Grid>
-    </>
-  );
+      </>
+    );
+  };
+
+  const renderMinioConfig = () => {
+    const minio = data.component_config?.minio || {};
+    const showOidc = (data.component_options?.minio || []).includes('oidc') || minio.oidc_enabled !== false;
+    return (
+      <>
+        {renderComponentOptions('minio', 'MinIO Options', 'Optional MinIO workflow steps. OIDC configures Keycloak console login.')}
+        <Grid hasGutter>
+          {renderTextField('Console hostname', 'component_config.minio.console_hostname', 'text', 'MinIO console route. Leave blank to derive from apps domain.')}
+          {renderTextField('API hostname', 'component_config.minio.api_hostname', 'text', 'MinIO S3 API route. Leave blank to derive from apps domain.')}
+          {renderTextField('Hostname (legacy)', 'component_config.minio.hostname', 'text', 'Optional alias used when console hostname is empty.')}
+          {renderStorageClassField('Storage Class', 'component_config.minio.storage', defaultComponentHelp.storage)}
+          {renderTextField('Root user', 'component_config.minio.root_user', 'text')}
+          {renderTextField('Root password', 'component_config.minio.root_password', 'password')}
+        </Grid>
+        {showOidc && (
+          <Grid hasGutter style={{ marginTop: '12px' }}>
+            <GridItem span={12}>
+              <Title headingLevel="h3">Keycloak / OIDC</Title>
+            </GridItem>
+            <GridItem span={12}>
+              <Checkbox
+                id="minio-oidc-enabled"
+                label="Enable MinIO console OIDC (Keycloak)"
+                isChecked={minio.oidc_enabled !== false}
+                onChange={(_, v) => set('component_config.minio.oidc_enabled', v)}
+              />
+            </GridItem>
+            {minio.oidc_enabled !== false && (
+              <>
+                {renderTextField('OIDC client ID', 'component_config.minio.oidc_client_id', 'text', 'Default: minio')}
+                {renderTextField('OIDC display name', 'component_config.minio.oidc_display_name', 'text', 'Default: Keycloak')}
+                {renderTextField('Keycloak realm', 'component_config.minio.keycloak_realm', 'text', 'Default: rhlab')}
+                <GridItem span={12}>
+                  <Checkbox
+                    id="minio-fetch-oidc-secret"
+                    label="Fetch OIDC client secret from Keycloak"
+                    isChecked={minio.fetch_oidc_secret_from_rhbk !== false}
+                    onChange={(_, v) => set('component_config.minio.fetch_oidc_secret_from_rhbk', v)}
+                  />
+                </GridItem>
+                {minio.fetch_oidc_secret_from_rhbk === false && (
+                  renderTextField('OIDC client secret', 'component_config.minio.oidc_client_secret', 'password')
+                )}
+              </>
+            )}
+          </Grid>
+        )}
+      </>
+    );
+  };
 
   const renderOpenShiftDiscoverRoutesConfig = () => {
     const scope = data.openshift?.discover_routes?.scope || 'all';
@@ -8862,10 +10253,10 @@ echo $TOKEN
                   textDecoration: 'underline'
                 }}
               >
-                Core Environment → Git Configuration
+                Git Configuration
               </button>
               {' '}
-              (project Git URL is under Ansible Automation Platform Configuration on that tab).
+              (Core Environment → Git Configuration).
             </div>
             {!standaloneRun
               && !String(data.git?.token || '').trim()
@@ -8944,6 +10335,8 @@ echo $TOKEN
 
   const renderDevspacesConfig = () => {
     const ds = data.component_config?.devspaces || {};
+    const customEnabled = !!ds.custom_sample_enabled;
+    const iconSource = ds.custom_sample_icon_source || 'bundled';
     return (
     <Grid hasGutter>
       {renderTextField('Hostname / Route host', 'component_config.devspaces.hostname')}
@@ -8960,6 +10353,123 @@ echo $TOKEN
           />
         </FormGroup>
       </GridItem>
+      {ds.disable_default_samples !== false && (
+        <>
+          <GridItem span={12}>
+            <FormGroup label="Custom getting-started sample">
+              <Checkbox
+                id="devspaces-custom-sample"
+                label="Add one custom sample card (e.g. ADO with logo)"
+                isChecked={customEnabled}
+                onChange={(_, v) => set('component_config.devspaces.custom_sample_enabled', v)}
+              />
+            </FormGroup>
+          </GridItem>
+          {customEnabled && (
+            <>
+              {renderTextField('Sample display name', 'component_config.devspaces.custom_sample_display_name')}
+              {renderTextField('Sample description', 'component_config.devspaces.custom_sample_description')}
+              {renderTextField(
+                'Sample tags (comma-separated)',
+                'component_config.devspaces.custom_sample_tags',
+                'text',
+                'Example: ado,ansible'
+              )}
+              {renderTextField(
+                'Sample git / devfile URL',
+                'component_config.devspaces.custom_sample_url',
+                'text',
+                'HTTPS or SSH URL to a repo that contains a root (or .devfile.yaml) for the workspace'
+              )}
+              <GridItem span={12}>
+                <FormGroup label="Sample icon">
+                  <Checkbox
+                    id="devspaces-icon-bundled"
+                    label="Use bundled ADO logo (recommended — fits ConfigMap size limits)"
+                    isChecked={iconSource !== 'upload'}
+                    onChange={(_, v) => {
+                      set('component_config.devspaces.custom_sample_icon_source', v ? 'bundled' : 'upload');
+                      if (v) {
+                        set('component_config.devspaces.custom_sample_icon_base64', '');
+                        set('component_config.devspaces.custom_sample_icon_filename', '');
+                      }
+                    }}
+                  />
+                </FormGroup>
+              </GridItem>
+              {iconSource === 'upload' && (
+                <GridItem span={12}>
+                  <FormGroup label="Upload sample icon (PNG/SVG, keep under ~100KB)">
+                    <input
+                      type="file"
+                      accept="image/png,image/svg+xml,image/webp,image/jpeg,.png,.svg,.webp,.jpg,.jpeg"
+                      onChange={event => {
+                        const file = event.target.files?.[0];
+                        if (!file) return;
+                        if (file.size > 120000) {
+                          // eslint-disable-next-line no-alert
+                          alert('Icon is larger than 120KB. Resize it or use the bundled ADO logo — Dev Spaces ConfigMaps are limited to ~1MB.');
+                          return;
+                        }
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                          const result = String(reader.result || '');
+                          const base64 = result.includes(',') ? result.split(',')[1] : result;
+                          const mediatype = file.type || 'image/png';
+                          setData(prev => {
+                            const copy = JSON.parse(JSON.stringify(prev));
+                            copy.component_config = copy.component_config || {};
+                            copy.component_config.devspaces = {
+                              ...(copy.component_config.devspaces || {}),
+                              custom_sample_icon_source: 'upload',
+                              custom_sample_icon_filename: file.name || 'sample-icon.png',
+                              custom_sample_icon_base64: base64,
+                              custom_sample_icon_mediatype: mediatype
+                            };
+                            return copy;
+                          });
+                        };
+                        reader.readAsDataURL(file);
+                      }}
+                    />
+                    {ds.custom_sample_icon_filename && (
+                      <div style={{ marginTop: '8px', fontSize: '13px', color: mutedTextColor }}>
+                        Selected: {ds.custom_sample_icon_filename}
+                        <Button
+                          variant="link"
+                          isInline
+                          style={{ marginLeft: '8px' }}
+                          onClick={() => {
+                            set('component_config.devspaces.custom_sample_icon_base64', '');
+                            set('component_config.devspaces.custom_sample_icon_filename', '');
+                            set('component_config.devspaces.custom_sample_icon_source', 'bundled');
+                          }}
+                        >
+                          Clear / use bundled
+                        </Button>
+                      </div>
+                    )}
+                  </FormGroup>
+                </GridItem>
+              )}
+              {iconSource !== 'upload' && (
+                <GridItem span={12}>
+                  <div style={{ fontSize: '13px', color: mutedTextColor }}>
+                    Bundled icon preview:{' '}
+                    <img
+                      src="/ado-sample-icon.png"
+                      alt="ADO sample icon"
+                      width={48}
+                      height={48}
+                      style={{ verticalAlign: 'middle', borderRadius: 4 }}
+                    />
+                  </div>
+                </GridItem>
+              )}
+            </>
+          )}
+        </>
+      )}
       <GridItem span={12}>
         <FormGroup label="Customize default workspace">
           <Checkbox
@@ -8976,6 +10486,17 @@ echo $TOKEN
           {renderTextField('Default workspace container image', 'component_config.devspaces.default_workspace_image')}
         </>
       )}
+      <GridItem span={12}>
+        <FormGroup label="Observability">
+          <Checkbox
+            id="devspaces-status-exporter"
+            label="Deploy DevWorkspace status metrics exporter (for Grafana Dev Spaces dashboards)"
+            description="Default on. Exposes workspace phase, failure reason, and VS Code extensions (devworkspace_vscode_extension) via Prometheus. Needs pods/exec RBAC; disable only if you do not use the Dev Spaces Grafana boards."
+            isChecked={!!ds.status_exporter_enabled}
+            onChange={(_, v) => set('component_config.devspaces.status_exporter_enabled', v)}
+          />
+        </FormGroup>
+      </GridItem>
       {renderTextField('Che / Dev Spaces image tag (optional)', 'component_config.devspaces.che_image_tag')}
       {renderTextField('Dashboard image (optional)', 'component_config.devspaces.dashboard_image')}
     </Grid>
@@ -9093,7 +10614,7 @@ echo $TOKEN
           'Hostname / URL',
           'component_config.gitlab.hostname',
           'text',
-          'OpenShift GitLab route. Lab default: gitlab-ado.server.lab.'
+          'OpenShift GitLab route hostname (required when using GitLab on OpenShift).'
         )}
         {renderStorageClassField('Storage Class', 'component_config.gitlab.storage', defaultComponentHelp.storage)}
         {renderTextField('Replicas', 'component_config.gitlab.replicas', 'number')}
@@ -9104,7 +10625,7 @@ echo $TOKEN
           <GridItem span={12}>
             <Title headingLevel="h3">Standalone RHEL GitLab</Title>
             <p style={{ color: mutedTextColor }}>
-              Lab defaults: hostname <code>gitlab-ado.server.lab</code>, IP note <code>192.168.0.65</code>,
+              Example values (not defaults): hostname <code>gitlab.example.com</code>,
               root password <code>redhat123</code>, edition CE. Prefer gitlab-ce unless licensed for EE.
             </p>
           </GridItem>
@@ -9155,6 +10676,14 @@ echo $TOKEN
         return renderOpenShiftDiscoverRoutesConfig();
       case 'alternate_routes':
         return renderOpenShiftAlternateRoutesConfig();
+      case 'cert_manager':
+        return renderCertManagerConfig();
+      case 'update_default_ingress':
+        return renderDefaultIngressCertConfig();
+      case 'quay':
+        return renderQuayConfig();
+      case 'minio':
+        return renderMinioConfig();
       case 'devspaces':
         return renderDevspacesConfig();
       case 'dev_hub':
@@ -9398,7 +10927,8 @@ ${vaultYaml}
           'oauth_rhbk',
           'ldap_auth',
           'discover_routes_print',
-          'alternate_routes'
+          'alternate_routes',
+          'update_default_ingress'
         ];
         if (!optionTabs.includes(option)) {
           return;
@@ -9408,7 +10938,7 @@ ${vaultYaml}
         }
       });
       (data.component_apps?.openshift || []).forEach(app => {
-        if (['acm', 'acs', 'devspaces', 'dev_hub'].includes(app) && !tabs.includes(app)) {
+        if (['acm', 'acs', 'devspaces', 'dev_hub', 'cert_manager', 'quay', 'minio'].includes(app) && !tabs.includes(app)) {
           tabs.push(app);
         }
         if (simpleComponents.includes(app) && !tabs.includes(app)) {
@@ -9462,6 +10992,10 @@ ${vaultYaml}
     if (tab === 'devspaces') return 'Dev Spaces';
     if (tab === 'dev_hub') return 'Dev Hub';
     if (tab === 'console_banner') return 'Console Banner';
+    if (tab === 'cert_manager') return 'Cert Manager';
+    if (tab === 'update_default_ingress') return 'Default Ingress Cert';
+    if (tab === 'quay') return 'Quay';
+    if (tab === 'minio') return 'MinIO';
     if (tab === 'rhel') return 'RHEL';
     if (tab === 'patching') return 'Patching';
     if (tab === 'aws') return 'AWS';
@@ -9543,6 +11077,28 @@ ${vaultYaml}
     return true;
   };
 
+  const markdownHeadingId = text => String(text || '')
+    .replace(/`[^`]*`/g, m => m.slice(1, -1))
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  const openMarkdownHashLink = href => {
+    const raw = String(href || '');
+    if (!raw.startsWith('#')) return false;
+    const id = decodeURIComponent(raw.slice(1)).trim();
+    if (!id) return false;
+    window.setTimeout(() => {
+      document.getElementById(id)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start'
+      });
+    }, 0);
+    return true;
+  };
+
   const renderInlineMarkdown = text => {
     const parts = String(text || '').split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g);
 
@@ -9562,7 +11118,7 @@ ${vaultYaml}
             key={index}
             href={href}
             onClick={event => {
-              if (openAdoMarkdownLink(href)) {
+              if (openAdoMarkdownLink(href) || openMarkdownHashLink(href)) {
                 event.preventDefault();
               }
             }}
@@ -9737,17 +11293,21 @@ ${vaultYaml}
         flushTable();
         const level = heading[1].length;
         const fontSize = level === 1 ? '24px' : level === 2 ? '20px' : '17px';
+        const headingText = heading[2];
+        const headingId = markdownHeadingId(headingText);
         elements.push(
           <div
             key={`h-${elements.length}`}
+            id={headingId || undefined}
             style={{
               fontSize,
               fontWeight: 700,
               marginTop: level === 1 ? '18px' : '16px',
-              marginBottom: '8px'
+              marginBottom: '8px',
+              scrollMarginTop: '12px'
             }}
           >
-            {renderInlineMarkdown(heading[2])}
+            {renderInlineMarkdown(headingText)}
           </div>
         );
         return;
@@ -9798,14 +11358,26 @@ ${vaultYaml}
     return elements;
   };
 
+  const documentationTitle = () => {
+    if (documentationType === 'ado') return 'ADO Collection Documentation';
+    if (documentationType === 'bugs') return 'Known Bugs';
+    return 'ADO Preflight UI Documentation';
+  };
+
+  const documentationMarkdown = () => {
+    if (documentationType === 'ado') return adoReadmeMarkdown;
+    if (documentationType === 'bugs') return knownBugsMarkdown;
+    return readmeMarkdown;
+  };
+
   const renderDocumentation = () => (
     <Card style={cardStyle}>
       <CardBody>
         <Title headingLevel="h2">
-          {documentationType === 'ado' ? 'ADO Collection Documentation' : 'ADO Preflight UI Documentation'}
+          {documentationTitle()}
         </Title>
         <div style={{ marginTop: '16px', maxWidth: '980px' }}>
-          {renderMarkdownDocument(documentationType === 'ado' ? adoReadmeMarkdown : readmeMarkdown)}
+          {renderMarkdownDocument(documentationMarkdown())}
         </div>
       </CardBody>
     </Card>
@@ -10048,6 +11620,16 @@ ${vaultYaml}
 
                 <DropdownItem
                   onClick={() => {
+                    setDocumentationType('bugs');
+                    setDocumentationOpen(true);
+                    setHelpOpen(false);
+                  }}
+                >
+                  Show known bugs
+                </DropdownItem>
+
+                <DropdownItem
+                  onClick={() => {
                     setCollectionsToolsOpen(true);
                     setHelpOpen(false);
                   }}
@@ -10130,7 +11712,7 @@ ${vaultYaml}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <Title headingLevel="h2">
-                {documentationType === 'ado' ? 'ADO Collection Documentation' : 'ADO Preflight UI Documentation'}
+                {documentationTitle()}
               </Title>
               <Button variant="plain" onClick={() => setDocumentationOpen(false)}>
                 ×
@@ -10358,202 +11940,12 @@ ${vaultYaml}
 
           {renderActiveConfigPanel()}
 
-          {renderCredentialConfigCard()}
-
           <br />
 
           <Card style={cardStyle} id="git-configuration">
             <CardBody>
               <Title headingLevel="h2">Git Configuration</Title>
-
-              <Grid hasGutter>
-                <GridItem span={4}>
-                  <FormGroup label="SCM Tool" isRequired>
-                    {['gitlab','bitbucket','github','other'].map(v =>
-                      <Radio
-                        key={v}
-                        label={v}
-                        name="scm"
-                        isChecked={data.scm_tool === v}
-                        onChange={() => set('scm_tool', v)}
-                      />
-                    )}
-                  </FormGroup>
-                  {data.scm_tool === 'bitbucket' && (
-                    <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
-                      Local bootstrap git uses <code>Authorization: Bearer</code>. Controller project sync uses your Bitbucket username plus HTTP access token (not OAuth2).
-                    </p>
-                  )}
-
-                  <br />
-
-                  <Checkbox
-                    label="Automatically commit and push generated content to Git"
-                    isChecked={data.git.auto_push}
-                    isDisabled={standaloneRun}
-                    onChange={(_, v) => set('git.auto_push', v)}
-                  />
-                  {standaloneRun && (
-                    <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
-                      Auto-push is off for Run AAP tabs only (Hub/Galaxy/auth). Re-enable here if you need a git push.
-                    </p>
-                  )}
-
-                  <br />
-
-                  <Title headingLevel="h4">
-                    {labelWithHelp('Git overrides (local pod git repo)', gitHelp.gitOverrides)}
-                  </Title>
-                  <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: '8px', fontSize: '13px' }}>
-                    Default is all unchecked: bootstrap only applies changes to the pod clone (no remove or force overwrite).
-                  </p>
-
-                  <Checkbox
-                    id="git-override-group-vars-env"
-                    label={labelWithHelp(
-                      `Override group_vars/all/${data.environment || 'env'} (current Environment Type)`,
-                      gitHelp.overrideGroupVarsEnv
-                    )}
-                    isChecked={data.git?.overrides?.group_vars_current_env === true}
-                    isDisabled={data.git.vars_only === true || data.git?.overrides?.all === true}
-                    onChange={(_, v) => {
-                      setData(prev => {
-                        const copy = JSON.parse(JSON.stringify(prev));
-                        if (!copy.git) copy.git = {};
-                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
-                        copy.git.overrides.group_vars_current_env = v === true;
-                        if (!v) copy.git.overrides.all = false;
-                        copy.git.overwrite_generated = copy.git.overrides.all === true;
-                        return copy;
-                      });
-                    }}
-                  />
-
-                  <br />
-
-                  <Checkbox
-                    id="git-override-job-workflow-templates"
-                    label={labelWithHelp(
-                      'Override job and workflow templates (configs/job_templates and configs/workflows)',
-                      gitHelp.overrideJobWorkflowTemplates
-                    )}
-                    isChecked={data.git?.overrides?.job_and_workflow_templates === true}
-                    isDisabled={data.git.vars_only === true || data.git?.overrides?.all === true}
-                    onChange={(_, v) => {
-                      setData(prev => {
-                        const copy = JSON.parse(JSON.stringify(prev));
-                        if (!copy.git) copy.git = {};
-                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
-                        copy.git.overrides.job_and_workflow_templates = v === true;
-                        if (!v) copy.git.overrides.all = false;
-                        copy.git.overwrite_generated = copy.git.overrides.all === true;
-                        return copy;
-                      });
-                    }}
-                  />
-
-                  <br />
-
-                  <Checkbox
-                    id="git-override-all"
-                    label={labelWithHelp(
-                      'Override all (re-clone and wipe group_vars, playbooks, and configs)',
-                      gitHelp.overrideAll
-                    )}
-                    isChecked={data.git?.overrides?.all === true}
-                    isDisabled={data.git.vars_only === true}
-                    onChange={(_, v) => {
-                      setData(prev => {
-                        const copy = JSON.parse(JSON.stringify(prev));
-                        if (!copy.git) copy.git = {};
-                        if (!copy.git.overrides) copy.git.overrides = { ...defaults.git.overrides };
-                        copy.git.overrides.all = v === true;
-                        if (v === true) {
-                          copy.git.overrides.group_vars_current_env = true;
-                          copy.git.overrides.job_and_workflow_templates = true;
-                        } else {
-                          copy.git.overrides.group_vars_current_env = false;
-                          copy.git.overrides.job_and_workflow_templates = false;
-                        }
-                        copy.git.overwrite_generated = copy.git.overrides.all === true;
-                        return copy;
-                      });
-                    }}
-                  />
-                  {data.git.vars_only === true && (
-                    <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
-                      Git overrides are disabled while Vars / Vault files only is checked (vars for the current env are always regenerated).
-                    </p>
-                  )}
-
-                  <br />
-
-                  <Checkbox
-                    id="git-skip-tls-verify"
-                    label={labelWithHelp('Skip TLS/SSL verification for Git (self-signed certificates)', gitHelp.skipTlsVerify)}
-                    isChecked={data.git.skip_tls_verify !== false}
-                    onChange={(_, v) => set('git.skip_tls_verify', v)}
-                  />
-                </GridItem>
-
-                <GridItem span={8}>
-                  <FormGroup label="Project Git Source URL">
-                    <TextInput value={data.aap.git_url} onChange={(_, v) => set('aap.git_url', v)} />
-                  </FormGroup>
-
-                  <br />
-
-                  <FormGroup label="Git Branch">
-                    <TextInput value={data.aap.git_branch} onChange={(_, v) => set('aap.git_branch', v)} />
-                  </FormGroup>
-
-                  <br />
-
-                  {data.scm_tool === 'bitbucket' && (
-                    <>
-                      <FormGroup label="Bitbucket username" isRequired>
-                        <TextInput
-                          value={data.git.username}
-                          onChange={(_, v) => set('git.username', v)}
-                          placeholder="Account username for HTTP access token"
-                        />
-                      </FormGroup>
-
-                      <br />
-                    </>
-                  )}
-
-                  <FormGroup label="Git Token">
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      <TextInput
-                        type={showGitToken ? 'text' : 'password'}
-                        value={data.git.token}
-                        onChange={(_, v) => {
-                          setData(prev => {
-                            const copy = JSON.parse(JSON.stringify(prev));
-                            copy.git.token = v;
-                            const devHubSelected = (copy.component_apps?.openshift || []).includes('dev_hub')
-                              || selectedComponentAppsFrom(copy).includes('dev_hub');
-                            if (devHubSelected) {
-                              if (!copy.component_config) copy.component_config = {};
-                              if (!copy.component_config.dev_hub) copy.component_config.dev_hub = {};
-                              const cur = String(copy.component_config.dev_hub.gitlab_token || '').trim();
-                              const prevGit = String(prev.git?.token || '').trim();
-                              if (!cur || cur === prevGit) {
-                                copy.component_config.dev_hub.gitlab_token = v;
-                              }
-                            }
-                            return copy;
-                          });
-                        }}
-                      />
-                      <Button variant="secondary" onClick={() => setShowGitToken(!showGitToken)}>
-                        {showGitToken ? 'Hide' : 'Show'}
-                      </Button>
-                    </div>
-                  </FormGroup>
-                </GridItem>
-              </Grid>
+              {renderGitConfigurationContent()}
             </CardBody>
           </Card>
 
@@ -10612,6 +12004,7 @@ ${vaultYaml}
                     <Tab eventKey="galaxy" title="Galaxy" />
                     <Tab eventKey="authentication" title="Add authentication" />
                     <Tab eventKey="onboard" title="Onboard" />
+                    <Tab eventKey="credentials" title="Credentials" />
                   </Tabs>
                   <br />
                   {activeAapConfigTab === 'install' && (
@@ -10928,7 +12321,9 @@ ${vaultYaml}
                           />
                           <div style={{ color: mutedTextColor, fontSize: '13px', margin: '4px 0 0' }}>
                             API/registry host for Private Automation Hub (host only, no path). Used for
-                            collection publish and EE push.
+                            collection publish and EE push. Defaults from General AAP Hostname; leave
+                            blank or matching Contoller host for auto-discover. Only a different Hub
+                            host counts as a manual override.
                           </div>
                         </FormGroup>
                       </GridItem>
@@ -12293,6 +13688,11 @@ ${vaultYaml}
                       </Button>
                       </>
                       )}
+                    </div>
+                  )}
+                  {activeAapConfigTab === 'credentials' && (
+                    <div>
+                      {renderCredentialConfigContent()}
                     </div>
                   )}
                 </>
