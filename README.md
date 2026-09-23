@@ -1099,3 +1099,144 @@ For a RHEL + Satellite environment by hand:
 ADO Pre-Flight UI is the guided front end for creating repeatable ADO bootstrap repositories. It collects answers, writes a preflight JSON, runs Ansible roles, generates selected component automation, and can configure AAP objects for the environment.
 
 Use it when you want a consistent, repeatable way to move from preflight answers to generated automation without manually building the repo structure by hand.
+
+### Bootstrap profiles
+
+The Profiles section follows Target Platform → Profile, with the selected components shown in the existing
+Component Configuration section below.
+Select multiple targets for hybrid environments. OpenShift presets include Core,
+Platform Essentials, DevSecOps, Virtualization, and Full Platform; RHEL presets
+include AAP, Satellite, Identity / IdM, Monitoring, and Full Platform. Custom keeps
+individual selection available. Full Platform is the curated union of the presets,
+not every optional application. Patching, AWS, and Provisioning remain available.
+
+Profiles expand to the existing `components`, `component_apps`, and
+`component_options` contract. They select components, not credentials or complete
+application configuration. Use Component Configuration to review and edit the selected applications.
+Imported JSON keeps its selections and initially displays Custom. Legacy `all`
+selections remain intact until edited; applying a profile materializes other
+selected targets. Profile names are UI state and are not exported. Deployment Mode
+is also UI-only, defaults to Disconnected, and does not change registry, Hub,
+networking, or bootstrap behavior; it is not exported in preflight JSON.
+
+Run selection regression checks with `node --test tests/profileSelection.test.mjs`.
+
+### Disconnected Pega
+
+Select Pega under OpenShift, then configure its local chart and values paths in the
+Pega tab. These are absolute paths inside the Controller execution environment,
+not files uploaded from the browser. Stage the charts with all dependencies and
+preinstall Helm in the EE. Supply mirrored image references and pull secrets in
+values files and enter the exact allowed registry hosts. Optional local OpenSearch
+and Pega Backing Services releases deploy before Pega. New database mode is the
+default: provide a local database chart and matching values; Pega initialization
+runs only on the first Pega Helm installation. Existing database mode skips database
+provisioning and requires an initialized schema. Failed releases require inspection
+before retrying; normal reruns deploy without reinstalling the schema. See `infra.ado/roles/ocp_pega/README.md` for prerequisites.
+
+### ADO Assistant preview
+
+Use **ADO Assistant** in the top bar to open a side drawer. Guided walkthroughs
+cover **Install AAP on OpenShift** and **Not using AAP** (generate + run playbooks
+in the pod). Ask phrases such as “Show me how to use without AAP” or use the
+**Start Not using AAP walkthrough** button. **Show me** jumps to the matching form
+controls and highlights them. It does not change form values or start bootstrap.
+Progress indicates populated fields, not validated connectivity. On narrow screens,
+Show me closes the drawer to expose the field.
+
+This preview is deterministic guidance, **not an installed AI model**. Questions
+can also look up any bundled role README and its examples (for example,
+`How do I use infra.ado.install_rhbk?`). Unknown roles are not invented.
+Questions remain in browser memory; no inference service or external request is
+used. Further AI instructions and a model/runtime bundle for the same pod are
+pending. No new deployment mode or bootstrap payload fields are introduced.
+
+All README files shipped in the selected `infra.ado` archive and tracked Preflight
+READMEs are bundled as searchable plain text in `public/assistant-knowledge.json`.
+The bundle records the collection filename and SHA-256, and excludes other source
+files and preflight exports. Refresh it after documentation or collection updates:
+
+```bash
+python3 scripts/build-assistant-knowledge.py
+npm run build
+```
+
+The container refreshes collection README content from its baked archive during
+image build. Runtime startup needs no documentation downloads. Documentation is
+visible to anyone able to access the UI, so only distributable READMEs belong in
+this bundle.
+
+See [assistant design and model/license candidates](docs/ADO_ASSISTANT.md).
+
+### GitOps and ACM policy generation preview
+
+In Dev Spaces, choose **Generate GitOps files for review** and enter an internal
+Git repository URL/revision and Argo CD destination. Bootstrap renders a Namespace
+and CheCluster plus a manual-sync Application. The operator must already exist
+before syncing. Sample cards, exporter, and additional route management are not
+included in this first export; those controls apply to direct installation only.
+
+Under ACM, enable **Generate namespace-label policy** and specify the target
+namespace/label, cluster set, and cluster-selection label. Bootstrap writes the
+policy and placement bundle with **Inform only** as the default. Selecting Enforce
+changes the generated YAML, not the live cluster. Applying it later can create
+the target namespace or add/update the required label.
+
+Generated files live in the bootstrap repository under `gitops/<environment>/`,
+`gitops-applications/`, and `policies/<environment>/`. Use an environment-specific
+path if overriding the resource path. Publish through the configured normal Git
+workflow and review before registering/syncing the Application or applying policies
+on the ACM hub. Existing ACM installation options still install ACM normally;
+policy generation does not apply the policy or change that install workflow.
+No plaintext Git credentials should be embedded in repository URLs. Disconnected
+Git access, pull secrets, trusted CAs, operators, and mirrored images remain
+prerequisites. Switching modes or disabling generation does not remove older
+artifacts or automatically transfer resource ownership.
+
+Public Galaxy access is controlled by `aap.galaxy_credentials`: set the public
+credential entry to `enabled: false` and `attach_to_org: false` for local Hub
+only operation. Mirror the complete dependency closure into Hub first. Existing
+JSON exports retain their explicit settings; importing an older export can
+re-enable its public source. New Preflight defaults leave public Galaxy disabled.
+
+### Run generated components without AAP
+
+Choose **Not using AAP**, configure your components and their additional
+options, then use **Run Bootstrap** to generate the repository. Generation does
+not launch the new component runner. After successful generation, use the
+separate **Run Components** button in the console toolbar. Review the selected
+steps and any required inputs, then **Preview selected commands** and **Run
+Components**. Output appears in the existing console; execution stops on the
+first failed step. For example, selecting RHBK installation and its realm option
+generates separate installation and realm-management steps, ordered by ADO's
+existing workflow definitions.
+
+The runner uses the last successfully generated environment, inventory, and
+vault files. Regenerate bootstrap after changing component configuration. The
+shared **Additional ansible-playbook options** apply to each selected step,
+including tags, limits, check mode, and extra-variable overrides. Review those
+options because they can change the requested actions. AAP credentials are not
+required; target OpenShift/host credentials and the necessary collections are
+still required in the pod. Controller-templated extra variables that cannot be
+resolved locally are shown as unavailable rather than executed incorrectly.
+The execution plan is available only while this pod retains its successful
+bootstrap context; after a pod restart, regenerate bootstrap.
+
+The same generated `local_components.py` runner is available for CLI use. See
+`infra.ado.bootstrap_generate_playbook_repo` documentation for its request format.
+
+### Local tests
+
+```bash
+npm install
+npx playwright install chromium   # once per machine
+npm run test:unit                 # node:test under tests/
+npm run test:e2e                  # build + Playwright smoke (e2e/)
+npm test                          # unit then e2e
+```
+
+Playwright starts `node server.js` on port 8080. If a local preflight pod already
+binds that port, stop it first or set `PW_REUSE_SERVER=1` only when that server
+serves a current `dist/`. Point at an already-running UI with
+`PREFLIGHT_BASE_URL=http://127.0.0.1:8080 npm run test:e2e` (skips the webServer
+spawn; still builds unless you run `npx playwright test` alone after `npm run build`).

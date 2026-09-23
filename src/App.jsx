@@ -2,6 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@patternfly/react-core/dist/styles/base.css';
 import PodTerminal from './PodTerminal.jsx';
+import BootstrapProfiles from './BootstrapProfiles.jsx';
+import AdoAssistant from './AdoAssistant.jsx';
+import { selectProfileApps } from './profileSelection.mjs';
+import { explainLocalPlaybookCommand } from './playbookExplain.mjs';
 import {
   Page,
   PageSection,
@@ -13,6 +17,7 @@ import {
   CardBody,
   Form,
   FormGroup,
+  ExpandableSection,
   TextInput,
   TextArea,
   Radio,
@@ -29,15 +34,26 @@ import {
   Popover,
   Tooltip,
   Modal,
-  ModalVariant
+  ModalVariant,
+  ModalHeader,
+  ModalBody,
+  ModalFooter
 } from '@patternfly/react-core';
 
 import adoLogo from '../ado-logo-redhat.png';
 
 const openshiftApps = [
   'aap','acs','acm','bookstack','cert_manager','console','devspaces','dev_hub',
-  'dirsrv','eck','gitops','gitlab','grafana','kafka','minio','netbox',
-  'oadp','ocp_virtualization','openshift','pega','quay','rhbk','zabbix'
+  'dirsrv','eck','gitops','gitlab','grafana','kafka','minio','mtv','netbox',
+  'oadp','ocp_compliance','ocp_virtualization','openshift','pega','quay','rhbk','zabbix'
+];
+
+// Collection playbook apps not exposed as UI checkboxes. Stale imports leave
+// these in components[] and must not reappear in the local run plan.
+const orphanOpenShiftPlaybookApps = [
+  'gitlab_runner',
+  'web_terminal',
+  'ocp_descheduler'
 ];
 
 const rhelApps = [
@@ -530,9 +546,78 @@ function aapAuthDownloadTags(payload) {
     .map(({ tag }) => tag);
 }
 
+function sanitizeDownloadToken(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+const DOWNLOAD_GROUP_NAMES = new Set(['openshift', 'rhel', 'patching', 'aws', 'provision', 'all']);
+
+/** Apps actually selected under component_apps / components (no stale leftovers). */
+function preflightComponentNameParts(payload) {
+  const groupKeys = ['openshift', 'rhel', 'patching', 'aws', 'provision'];
+  const seen = new Set();
+  const parts = [];
+  const push = (raw) => {
+    const token = sanitizeDownloadToken(raw);
+    if (!token || seen.has(token)) return;
+    seen.add(token);
+    parts.push(token);
+  };
+
+  const components = Array.isArray(payload?.components) ? payload.components : [];
+  if (components.includes('all')) {
+    return ['all'];
+  }
+
+  let anyApp = false;
+  for (const group of groupKeys) {
+    const apps = payload?.component_apps?.[group];
+    if (!Array.isArray(apps)) continue;
+    apps.forEach(app => {
+      anyApp = true;
+      push(app);
+    });
+  }
+
+  // Standalone / non-group components still listed in components[].
+  components.forEach(component => {
+    if (DOWNLOAD_GROUP_NAMES.has(component)) return;
+    push(component);
+  });
+
+  // Options-only (e.g. Console Banner with no OpenShift apps): keep the group name.
+  if (!anyApp) {
+    groupKeys.forEach(group => {
+      if (components.includes(group)) push(group);
+    });
+  }
+
+  return parts;
+}
+
+/** Option tokens (console_banner, oidc, …) for download names. */
+function preflightOptionNameParts(payload) {
+  const seen = new Set();
+  const parts = [];
+  Object.values(payload?.component_options || {}).forEach(list => {
+    if (!Array.isArray(list)) return;
+    list.forEach(option => {
+      const token = sanitizeDownloadToken(option);
+      if (!token || seen.has(token)) return;
+      seen.add(token);
+      parts.push(token);
+    });
+  });
+  return parts;
+}
+
 function preflightDownloadBasename(payload, { scrubbed = false } = {}) {
-  const env = payload?.environment || 'env';
+  const env = sanitizeDownloadToken(payload?.environment) || 'env';
   const parts = [`ado-preflight-${env}`];
+  const notUsingAap = payload?.aap?.enabled === false;
   if (installAapFullRequested(payload)) {
     parts.push('install-aap-ocp');
   } else if (attachAapLicenseRequested(payload)) {
@@ -555,26 +640,35 @@ function preflightDownloadBasename(payload, { scrubbed = false } = {}) {
     || payload?.hub?.push_ee === true
   );
   const galaxyWork = payload?.aap?.galaxy_setup_enabled === true;
-  // Hub-only clears components[], so name the download from Hub / Galaxy work.
-  if (hubWork && galaxyWork) {
-    parts.push('hub-galaxycreds');
-  } else if (hubWork) {
-    parts.push('hub');
-  } else if (galaxyWork) {
-    parts.push('galaxycreds');
+  // Only tag Hub/Galaxy work when Using AAP (or hub-only). Never confuse with Dev Hub.
+  if (!notUsingAap) {
+    if (hubWork && galaxyWork) {
+      parts.push('hub-galaxycreds');
+    } else if (hubWork) {
+      parts.push('hub');
+    } else if (galaxyWork) {
+      parts.push('galaxycreds');
+    }
+    aapAuthDownloadTags(payload).forEach(tag => parts.push(tag));
+    if (aapOnboardRequested(payload)) parts.push('onboard');
   }
-  aapAuthDownloadTags(payload).forEach(tag => parts.push(tag));
-  if (aapOnboardRequested(payload)) parts.push('onboard');
-  const components = Array.isArray(payload?.components)
-    ? payload.components.filter(Boolean)
-    : [];
-  if (components.includes('all')) {
+  const componentParts = preflightComponentNameParts(payload);
+  const optionParts = preflightOptionNameParts(payload);
+  if (componentParts.includes('all')) {
     parts.push('all');
-  } else if (components.length > 0 && !hubOnly) {
-    parts.push(components.join('-'));
+  } else if (!hubOnly) {
+    componentParts.forEach(part => parts.push(part));
+    optionParts.forEach(part => parts.push(part));
   }
   if (scrubbed) parts.push('scrubbed');
-  return `${parts.join('-')}.json`;
+  let name = `${parts.join('-')}.json`;
+  if (name.length > 180) {
+    const head = parts.slice(0, 2).join('-');
+    const apps = componentParts.slice(0, 6).join('-') || 'selection';
+    const opts = optionParts.slice(0, 4).join('-');
+    name = `${head}-${apps}${opts ? `-${opts}` : ''}-truncated.json`;
+  }
+  return name;
 }
 
 /** Any Add authentication tab method enabled (Keycloak OIDC, LDAP, SAML, …). */
@@ -804,17 +898,23 @@ const simpleComponents = [
   'compliance','stig'
 ];
 
+const CERT_MANAGER_ISSUER_OPTIONS = ['idm_acme', 'aws_pca', 'custom'];
+
 const componentOptionDefaults = {
   openshift: [
     'admin_htpasswd',
     'console_banner',
     'ldap_auth',
     'oauth_rhbk',
+    'storage_class',
+    'integrated_image_registry',
     'discover_routes_print',
     'alternate_routes',
     'update_pull_secret',
     'update_default_ingress'
   ],
+  // Mutually exclusive issuer modes (operator-only = none selected → mode cert).
+  cert_manager: [...CERT_MANAGER_ISSUER_OPTIONS],
   grafana: ['install', 'standalone', 'datasources', 'folders', 'dashboards', 'alerts', 'alternate_route', 'email', 'oidc'],
   quay: ['oidc'],
   minio: ['oidc'],
@@ -848,16 +948,75 @@ const componentOptionDefaults = {
   stig: ['rhel_8_stig', 'rhel_9_stig']
 };
 
+/** Resolve issuer checkbox → ocp_cert_manager_mode (none → cert). */
+const certManagerModeFromOptions = options => {
+  const selected = (Array.isArray(options) ? options : []).find(item =>
+    CERT_MANAGER_ISSUER_OPTIONS.includes(item)
+  );
+  return selected || 'cert';
+};
+
+/**
+ * Keep component_options.cert_manager and component_config.cert_manager.mode aligned.
+ * Legacy exports used mode=cert with PEMs for custom; promote those to mode=custom
+ * only when issuer options were never set.
+ */
+const syncCertManagerIssuerState = copy => {
+  if (!copy || typeof copy !== 'object') return copy;
+  if (!copy.component_config) copy.component_config = {};
+  if (!copy.component_options) copy.component_options = {};
+  const cm = { ...(copy.component_config.cert_manager || {}) };
+  copy.component_config.cert_manager = cm;
+  const rawOpts = copy.component_options.cert_manager;
+  const optionsWereSet = Array.isArray(rawOpts);
+  let options = optionsWereSet
+    ? rawOpts.filter(item => CERT_MANAGER_ISSUER_OPTIONS.includes(item))
+    : [];
+  let mode = String(cm.mode || 'cert').trim().toLowerCase();
+  if (options.length > 1) {
+    options = [options[0]];
+  }
+  if (options.length === 0) {
+    if (!optionsWereSet && (mode === 'idm_acme' || mode === 'aws_pca' || mode === 'custom')) {
+      options = [mode];
+    } else if (
+      !optionsWereSet
+      && mode === 'cert'
+      && (String(cm.tls_crt || '').trim() || String(cm.tls_key || '').trim())
+    ) {
+      options = ['custom'];
+      mode = 'custom';
+    } else {
+      mode = 'cert';
+    }
+  } else {
+    mode = options[0];
+  }
+  if (!CERT_MANAGER_ISSUER_OPTIONS.includes(mode) && mode !== 'cert') {
+    mode = 'cert';
+  }
+  cm.mode = mode || 'cert';
+  copy.component_options.cert_manager = options;
+  return copy;
+};
+
 const componentOptionLabels = {
   admin_htpasswd: 'Admin HTPasswd',
   console_banner: 'Console Banner',
   ldap_auth: 'Configure LDAP in OpenShift',
   oauth_rhbk: 'Configure OAuth/RHBK (Keycloak) in OpenShift',
+  nfs_csi: 'NFS CSI',
+  iscsi_csi: 'Synology iSCSI CSI',
+  storage_class: 'Storage class',
+  integrated_image_registry: 'Integrated Image Registry',
   rhbk: 'RHBK (Keycloak)',
   discover_routes_print: 'Discover Routes and Print',
   alternate_routes: 'Alternate Routes',
   update_pull_secret: 'Update Pull Secret',
   update_default_ingress: 'Default Ingress Cert',
+  idm_acme: 'IdM ACME',
+  aws_pca: 'AWS PCA',
+  custom: 'Custom cert',
   oidc: 'OIDC Auth',
   saml: 'SAML SSO',
   install: 'Install Grafana (OpenShift)',
@@ -876,6 +1035,7 @@ const componentOptionLabels = {
   client_scopes: 'Client Scopes',
   client_mappers: 'Client Mappers',
   acs_report: 'RHACS vulnerability reports (job templates + workflow)',
+  ocp_compliance: 'OpenShift Compliance Operator',
   satellite_server_install: 'Satellite Server Install',
   satellite_client_tools: 'Satellite Client Tools',
   satellite_content_view: 'Satellite Content View',
@@ -901,6 +1061,7 @@ const componentOptionLabels = {
   minio: 'MinIO',
   zabbix: 'Zabbix',
   ocp_virtualization: 'OpenShift Virtualization',
+  mtv: 'Migration Toolkit for Virtualization (MTV)',
   openshift_virt: 'OpenShift Virt VM',
   ec2_ami_copy: 'EC2 AMI Copy'
 };
@@ -1043,8 +1204,8 @@ const buildDefaultGalaxyCredentials = (org = 'ADO', hubHostname = '') => {
       url: 'https://galaxy.ansible.com/',
       auth_url: '',
       token: '',
-      enabled: true,
-      attach_to_org: true,
+      enabled: false,
+      attach_to_org: false,
       order: 5
     }
   ];
@@ -1223,7 +1384,9 @@ const defaults = {
     verbosity: 0,
     // Freeform ansible-playbook CLI options appended when the pod runs bootstrap
     // (for example: -e some_var=value --tags bootstrap).
-    extra_args: ''
+    extra_args: '',
+    // Not using AAP only: common -e state=present|absent for install/uninstall playbooks.
+    state: 'present'
   },
 
   git: {
@@ -1260,6 +1423,16 @@ const defaults = {
       hostname: '',
       storage: '',
       replicas: 1,
+      // sqlite (default) | postgres — ADO-managed or external PostgreSQL.
+      database_type: 'sqlite',
+      database_provision: true,
+      postgres_storage: '',
+      postgres_storage_size: '5Gi',
+      postgres_image: '',
+      postgres_database: 'grafana',
+      postgres_user: 'grafana',
+      postgres_password: '',
+      postgres_host: '',
       folder_name: '',
       dashboards_source: '',
       admin_user: 'admin',
@@ -1345,7 +1518,15 @@ const defaults = {
       standalone_rhn_activation_key: ''
     },
     acm: {
-      channel: 'release-2.17'
+      policy_enabled: false, policy_name: 'namespace-label', policy_namespace: 'policies', policy_target_namespace: '', policy_label_key: '', policy_label_value: '', policy_cluster_set: '', policy_selector_key: '', policy_selector_value: '', policy_remediation: 'inform',
+      channel: 'release-2.17',
+      observability_enabled: false,
+      observability_storage_class: '',
+      observability_s3_bucket: '',
+      observability_s3_endpoint: '',
+      observability_s3_insecure: true,
+      observability_s3_access_key: '',
+      observability_s3_secret_key: ''
     },
     acs: {
       hostname: '',
@@ -1355,6 +1536,11 @@ const defaults = {
       policies_source: '',
       reports_source_type: 'git',
       reports_source: ''
+    },
+    ocp_compliance: {
+      namespace: 'openshift-compliance',
+      operator_namespace: 'openshift-compliance',
+      operator_channel: 'stable'
     },
     rhbk: {
       hostname: '',
@@ -1527,6 +1713,7 @@ const defaults = {
     },
     console: { hostname: '', storage: '', replicas: 1 },
     devspaces: {
+      delivery_mode: 'direct', gitops_repo_url: '', gitops_revision: 'main', gitops_path: '', gitops_namespace: 'openshift-gitops', gitops_project: 'default', gitops_destination: 'https://kubernetes.default.svc',
       hostname: '',
       storage: '',
       replicas: 1,
@@ -1586,7 +1773,7 @@ const defaults = {
     kafka: { hostname: '', storage: '', replicas: 1 },
     oadp: { hostname: '', storage: '', replicas: 1 },
     openshift: { hostname: '', storage: '', replicas: 1 },
-    pega: { hostname: '', storage: '', replicas: 1 },
+    pega: {"database_mode": "new", "database_chart_path": "", "database_values_file": "", "namespace": "pega", "release_name": "pega", "chart_path": "", "values_file": "", "allowed_registries": "", "helm_binary": "helm", "timeout": "20m0s", "opensearch_chart_path": "", "opensearch_values_file": "", "backingservices_chart_path": "", "backingservices_values_file": ""},
     quay: {
       hostname: '',
       storage: '',
@@ -1668,14 +1855,18 @@ const defaults = {
       ssh_public_key: ''
     },
     ocp_virtualization: {
-      hostname: '',
-      storage: '',
-      replicas: 1
+      channel: 'stable',
+      enable_kube_secondary_dns: false
+    },
+    mtv: {
+      channel: 'release-v2.12',
+      namespace: 'openshift-mtv'
     }
   },
 
   component_options: {
     openshift: [],
+    cert_manager: [],
     grafana: [],
     gitlab: [],
     rhbk: [],
@@ -1798,7 +1989,7 @@ const defaults = {
     oauth_token: '',
     admin_username: 'admin',
     admin_password: '',
-    vault_password: 'redhat123'
+    vault_password: ''
   },
 
   openshift: {
@@ -1809,6 +2000,8 @@ const defaults = {
     admin_password: '',
     admin_role: 'cluster-admin',
     htpasswd_action: 'add',
+    // Console login button label (OAuth identityProviders[].name)
+    htpasswd_idp_name: 'htpasswd-admin',
     htpasswd_users: [
       { name: 'admin', password: '', role: 'cluster-admin' }
     ],
@@ -1818,6 +2011,29 @@ const defaults = {
     banner_text_color: '#ffffff',
     // ocp_console_banner state: add (default) | update | delete
     banner_state: 'add',
+    // Storage class option → NFS CSI and/or Synology iSCSI CSI drivers
+    storage_class_nfs: true,
+    storage_class_iscsi: false,
+    install_nfs_during_bootstrap: true,
+    install_image_registry_during_bootstrap: true,
+    integrated_registry_default_route: true,
+    nfs_server: '',
+    nfs_share: '',
+    nfs_storage_class_name: 'synology-nfs-csi',
+    nfs_driver_version: '4.11.0',
+    nfs_version: '4.1',
+    nfs_create_test_namespace: true,
+    nfs_create_test_pvc: false,
+    install_iscsi_during_bootstrap: true,
+    iscsi_dsm_host: '',
+    iscsi_dsm_port: 5000,
+    iscsi_dsm_https: false,
+    iscsi_dsm_username: '',
+    iscsi_dsm_password: '',
+    iscsi_storage_class_name: 'synology-iscsi-storage',
+    iscsi_location: '/volume1',
+    iscsi_is_default: true,
+    iscsi_install_snapshotter: true,
     token: '',
     oauth_rhbk: {
       idp_name: 'Keycloak',
@@ -1850,6 +2066,10 @@ const defaults = {
       route_labels: [],
       ingress_controller_name: 'default',
       force_replace: false
+    },
+    // Catalog-only OLM installs (subscription only — not full ADO app configure).
+    catalog_operators: {
+      operators: []
     },
     agent_installer: agentInstallerDefaults
   },
@@ -1941,6 +2161,22 @@ class ErrorBoundary extends React.Component {
 
 function App() {
   const [data, setData] = useState(defaults);
+  const [componentPlan, setComponentPlan] = useState(null);
+  const [componentSteps, setComponentSteps] = useState([]);
+  const [componentValues, setComponentValues] = useState({});
+  const [componentRunnerOpen, setComponentRunnerOpen] = useState(false);
+  const [componentCommandPreview, setComponentCommandPreview] = useState('');
+  const [componentPreviewCommands, setComponentPreviewCommands] = useState([]);
+  const [componentStepOptions, setComponentStepOptions] = useState({});
+  const [componentStepOptionsEditId, setComponentStepOptionsEditId] = useState(null);
+  const [componentRunError, setComponentRunError] = useState('');
+  // After no-AAP bootstrap succeeds, open the playbook runner (form already chose components).
+  const [openPlaybookRunnerAfterBootstrap, setOpenPlaybookRunnerAfterBootstrap] = useState(true);
+  // AAP-card black console: scaffolding command vs selected playbook commands.
+  const [localPreviewMode, setLocalPreviewMode] = useState('bootstrap');
+  // Which run drives the Bootstrap Console ticker / live logs.
+  const [activeRunKind, setActiveRunKind] = useState('bootstrap');
+  const [assistantExplain, setAssistantExplain] = useState(null);
   const [preview, setPreview] = useState('Click "Run Bootstrap" to generate output.');
   const [events, setEvents] = useState('');
   const [activeTab, setActiveTab] = useState('logs');
@@ -1954,6 +2190,7 @@ function App() {
   const [actionsOpen, setActionsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const [theme, setTheme] = useState('light');
   const [collectionVersions, setCollectionVersions] = useState([]);
   const [uiVersion, setUiVersion] = useState(null);
@@ -1977,9 +2214,35 @@ function App() {
   const [showAapOauthToken, setShowAapOauthToken] = useState(false);
   const [showAapGalaxyHubToken, setShowAapGalaxyHubToken] = useState(false);
   const [showAapAdminPassword, setShowAapAdminPassword] = useState(false);
+  const [showVaultPassword, setShowVaultPassword] = useState(false);
   const [showHtpasswdPassword, setShowHtpasswdPassword] = useState(false);
+  const [showMinioRootPassword, setShowMinioRootPassword] = useState(false);
   const [showMachineCredentialSecrets, setShowMachineCredentialSecrets] = useState(false);
   const [showSatelliteSecrets, setShowSatelliteSecrets] = useState(false);
+  // Show/Hide secrets automatically re-mask after this many ms.
+  const SECRET_REVEAL_MS = 30000;
+  const secretRevealTimersRef = useRef({});
+  const setSecretRevealed = (key, setter, revealed) => {
+    setter(revealed);
+    const timers = secretRevealTimersRef.current;
+    if (timers[key]) {
+      clearTimeout(timers[key]);
+      delete timers[key];
+    }
+    if (revealed) {
+      timers[key] = setTimeout(() => {
+        setter(false);
+        delete timers[key];
+      }, SECRET_REVEAL_MS);
+    }
+  };
+  const toggleSecretRevealed = (key, setter, currentlyRevealed) => {
+    setSecretRevealed(key, setter, !currentlyRevealed);
+  };
+  useEffect(() => () => {
+    Object.values(secretRevealTimersRef.current).forEach(clearTimeout);
+    secretRevealTimersRef.current = {};
+  }, []);
   const [rhbkZipUploading, setRhbkZipUploading] = useState(false);
   const [rhbkZipError, setRhbkZipError] = useState('');
   const [aapPingBusy, setAapPingBusy] = useState(false);
@@ -1992,8 +2255,11 @@ function App() {
   const [showJiraToken, setShowJiraToken] = useState(false);
   const [showGitToken, setShowGitToken] = useState(false);
   const [ansibleExtraArgsOpen, setAnsibleExtraArgsOpen] = useState(false);
+  const [profileImportKey, setProfileImportKey] = useState(0);
+  const [additionalProfilesOpen, setAdditionalProfilesOpen] = useState(false);
   const [additionalEnvOtherEnabled, setAdditionalEnvOtherEnabled] = useState(false);
   const [additionalEnvOtherDraft, setAdditionalEnvOtherDraft] = useState('');
+  const [storageClassDriverTab, setStorageClassDriverTab] = useState('nfs');
   const [activeCredentialConfigTab, setActiveCredentialConfigTab] = useState('vault');
   const [activeAapConfigTab, setActiveAapConfigTab] = useState('general');
   const [activeHubSubTab, setActiveHubSubTab] = useState('collections');
@@ -2004,12 +2270,19 @@ function App() {
     error: '',
     classes: null
   });
+  const [catalogOperatorLookup, setCatalogOperatorLookup] = useState({
+    loading: false,
+    error: '',
+    operators: null,
+    filter: ''
+  });
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
   const [activeGrafanaDetailTab, setActiveGrafanaDetailTab] = useState('install');
-  const [activeCertManagerTab, setActiveCertManagerTab] = useState('idm_acme');
+  const [activeSatelliteDetailTab, setActiveSatelliteDetailTab] = useState('satellite_server_install');
   const [rhbkAddClientOpen, setRhbkAddClientOpen] = useState(false);
   const [activePreInstallTab, setActivePreInstallTab] = useState('aap_license');
+  const [activeOpenShiftToolsTab, setActiveOpenShiftToolsTab] = useState('agent');
   const [importStatus, setImportStatus] = useState('');
   const [focusSection, setFocusSection] = useState('');
   const [runFinished, setRunFinished] = useState(false);
@@ -2931,7 +3204,7 @@ function App() {
       if (expandableGroups.includes(component)) {
         const selected = source.component_apps?.[component] || [];
         out.push(...(selected.length > 0 ? selected : [component]));
-      } else {
+      } else if (!orphanOpenShiftPlaybookApps.includes(component)) {
         out.push(component);
       }
     });
@@ -2956,6 +3229,14 @@ function App() {
 
     if (!pruned.component_apps) pruned.component_apps = {};
 
+    const catalogs = {
+      openshift: openshiftApps,
+      rhel: rhelApps,
+      patching: patchingApps,
+      aws: awsApps,
+      provision: provisionApps
+    };
+
     groupComponents.forEach(group => {
       if (!Array.isArray(pruned.component_apps[group])) {
         pruned.component_apps[group] = [];
@@ -2963,8 +3244,72 @@ function App() {
 
       if (!allSelected && !components.includes(group)) {
         pruned.component_apps[group] = [];
+      } else {
+        // Drop orphan app ids that are no longer in the UI catalog (cannot be unchecked).
+        const catalog = new Set(catalogs[group] || []);
+        pruned.component_apps[group] = pruned.component_apps[group].filter(app => catalog.has(app));
       }
     });
+
+    if (!allSelected) {
+      // Drop stale top-level app entries that are not in any group selection.
+      const appsInGroups = new Set(
+        groupComponents.flatMap(group => (
+          Array.isArray(pruned.component_apps[group]) ? pruned.component_apps[group] : []
+        ))
+      );
+      const catalogApps = new Set([
+        ...openshiftApps,
+        ...rhelApps,
+        ...patchingApps,
+        ...awsApps,
+        ...provisionApps
+      ]);
+      const orphanApps = new Set(orphanOpenShiftPlaybookApps);
+      const nextComponents = [];
+      components.forEach(component => {
+        if (groupComponents.includes(component)) {
+          nextComponents.push(component);
+          return;
+        }
+        if (appsInGroups.has(component)) {
+          // Represented via component_apps.<group>; do not also keep as top-level.
+          return;
+        }
+        if (catalogApps.has(component)) {
+          // Stale catalog leftover after uncheck / import.
+          return;
+        }
+        if (orphanApps.has(component)) {
+          // Former / non-UI playbook app left in components[] by old imports.
+          return;
+        }
+        nextComponents.push(component);
+      });
+
+      // If a group has options or apps, ensure the group itself is listed.
+      groupComponents.forEach(group => {
+        const apps = pruned.component_apps[group] || [];
+        const opts = pruned.component_options?.[group] || [];
+        if ((apps.length > 0 || (Array.isArray(opts) && opts.length > 0)) && !nextComponents.includes(group)) {
+          nextComponents.push(group);
+        }
+      });
+
+      // Drop options for apps/groups that are no longer selected.
+      if (pruned.component_options && typeof pruned.component_options === 'object') {
+        const keep = new Set(nextComponents);
+        groupComponents.forEach(group => {
+          (pruned.component_apps[group] || []).forEach(app => keep.add(app));
+        });
+        Object.keys(pruned.component_options).forEach(key => {
+          if (!keep.has(key)) delete pruned.component_options[key];
+        });
+      }
+
+      pruned.components = nextComponents;
+      pruned.component = nextComponents[0] || '';
+    }
 
     return pruned;
   };
@@ -3118,6 +3463,8 @@ function App() {
       Object.entries(hydrated.component_config).filter(([component]) => allowedConfig.has(component))
     );
 
+    syncCertManagerIssuerState(hydrated);
+
     if (selectedApps.includes('grafana') && selectedApps.includes('rhbk')) {
       syncGrafanaOidcFromRhbk(hydrated, { force: false });
     }
@@ -3210,6 +3557,18 @@ function App() {
     merged = hydrateSelectedComponentConfigs(merged);
     if (!merged.component_options) merged.component_options = {};
     if (Array.isArray(merged.component_options.openshift)) {
+      // Legacy nfs_csi / iscsi_csi options → Storage class parent + driver toggles.
+      const hadNfs = merged.component_options.openshift.includes('nfs_csi');
+      const hadIscsi = merged.component_options.openshift.includes('iscsi_csi');
+      if (hadNfs || hadIscsi || merged.component_options.openshift.includes('storage_class')) {
+        if (!merged.openshift) merged.openshift = {};
+        if (hadNfs) merged.openshift.storage_class_nfs = true;
+        if (hadIscsi) merged.openshift.storage_class_iscsi = true;
+        merged.component_options.openshift = [
+          ...merged.component_options.openshift.filter(o => o !== 'nfs_csi' && o !== 'iscsi_csi'),
+          ...(merged.component_options.openshift.includes('storage_class') ? [] : ['storage_class'])
+        ];
+      }
       if (merged.component_options.openshift.includes('discover_routes_alt')) {
         merged.component_options.openshift = [
           ...merged.component_options.openshift.filter(option => option !== 'discover_routes_alt'),
@@ -3241,6 +3600,7 @@ function App() {
         merged.component_apps.openshift.push('cert_manager');
       }
     }
+    syncCertManagerIssuerState(merged);
     if (!merged.openshift) merged.openshift = {};
     if (!merged.openshift.discover_routes) {
       merged.openshift.discover_routes = { ...(defaults.openshift?.discover_routes || {}) };
@@ -3442,6 +3802,7 @@ function App() {
     merged.additional_environments = parseAdditionalEnvironmentsList(merged.additional_environments);
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
     if (merged.ansible.extra_args === undefined) merged.ansible.extra_args = '';
+    if (merged.ansible.state !== 'absent') merged.ansible.state = 'present';
     if (!merged.collections) merged.collections = { ...defaults.collections };
     if (!merged.tools) merged.tools = { ...defaults.tools };
     if (!merged.jira) merged.jira = { ...defaults.jira };
@@ -3458,6 +3819,7 @@ function App() {
   };
 
   const selectImportedConfigPanel = importedData => {
+    setProfileImportKey(value => value + 1);
     const selectedApps = selectedComponentAppsFrom(importedData);
     const nextPanel = selectedApps[0] || importedData.components?.[0] || 'all';
 
@@ -3517,6 +3879,10 @@ function App() {
     ) {
       allowedConfig.add('cert_manager');
     }
+
+    syncRhbkTlsDefaultFromCertManager(payload);
+    syncCertManagerIssuerState(payload);
+
     const selectedConfig = {};
     const selectedOptions = {};
 
@@ -3534,8 +3900,6 @@ function App() {
         selectedOptions[component] = options;
       }
     });
-
-    syncRhbkTlsDefaultFromCertManager(payload);
 
     // Keep Default Ingress Cert option ↔ cert_manager.update_default_ingress in sync.
     if (selectedOptions.openshift || selectedConfig.cert_manager) {
@@ -3557,7 +3921,9 @@ function App() {
       }
     }
 
-    payload.selected_component_apps = [...new Set([...selectedGroups, ...selectedApps])];
+    payload.selected_component_apps = selectedComponentAppsFrom(payload);
+    // Keep components[] as groups + true standalones only (prune already dropped stale apps).
+    payload.components = Array.isArray(payload.components) ? payload.components : [];
     payload.component_config = selectedConfig;
     payload.component_options = selectedOptions;
     if (payload.aap) {
@@ -3719,12 +4085,20 @@ function App() {
         delete payload.openshift.admin_role;
         delete payload.openshift.htpasswd_action;
         delete payload.openshift.htpasswd_users;
+        delete payload.openshift.htpasswd_idp_name;
+        delete payload.openshift.htpasswd_secret;
       } else {
         const users = Array.isArray(payload.openshift.htpasswd_users)
           ? payload.openshift.htpasswd_users
           : [];
         if (!payload.openshift.htpasswd_action) {
           payload.openshift.htpasswd_action = 'add';
+        }
+        const idpName = String(payload.openshift.htpasswd_idp_name || 'htpasswd-admin').trim()
+          || 'htpasswd-admin';
+        payload.openshift.htpasswd_idp_name = idpName;
+        if (!String(payload.openshift.htpasswd_secret || '').trim()) {
+          payload.openshift.htpasswd_secret = `${idpName}-secret`;
         }
         if (users.length > 0) {
           payload.openshift.admin_username = users[0].name || payload.openshift.admin_username || 'admin';
@@ -3755,6 +4129,137 @@ function App() {
         delete payload.openshift.banner_background_color;
         delete payload.openshift.banner_text_color;
         delete payload.openshift.banner_state;
+      }
+      if (!allowedConfig.has('openshift') || !openshiftOptions.includes('integrated_image_registry')) {
+        delete payload.openshift.integrated_registry_default_route;
+        delete payload.openshift.install_image_registry_during_bootstrap;
+        delete payload.openshift.openshift_integrated_registry_enabled;
+        delete payload.openshift.openshift_integrated_registry_default_route;
+      } else {
+        if (payload.openshift.integrated_registry_default_route === undefined) {
+          payload.openshift.integrated_registry_default_route = true;
+        }
+        if (payload.openshift.install_image_registry_during_bootstrap === undefined) {
+          payload.openshift.install_image_registry_during_bootstrap = true;
+        }
+      }
+      if (!allowedConfig.has('openshift') || !openshiftOptions.includes('storage_class')) {
+        delete payload.openshift.storage_class_nfs;
+        delete payload.openshift.storage_class_iscsi;
+        delete payload.openshift.install_nfs_during_bootstrap;
+        delete payload.openshift.nfs_server;
+        delete payload.openshift.nfs_share;
+        delete payload.openshift.nfs_storage_class_name;
+        delete payload.openshift.nfs_driver_version;
+        delete payload.openshift.nfs_version;
+        delete payload.openshift.nfs_create_test_namespace;
+        delete payload.openshift.nfs_create_test_pvc;
+        delete payload.openshift.ocp_nfs_storage_server;
+        delete payload.openshift.ocp_nfs_storage_share;
+        delete payload.openshift.ocp_nfs_storage_class_name;
+        delete payload.openshift.install_iscsi_during_bootstrap;
+        delete payload.openshift.iscsi_dsm_host;
+        delete payload.openshift.iscsi_dsm_port;
+        delete payload.openshift.iscsi_dsm_https;
+        delete payload.openshift.iscsi_dsm_username;
+        delete payload.openshift.iscsi_dsm_password;
+        delete payload.openshift.iscsi_storage_class_name;
+        delete payload.openshift.iscsi_location;
+        delete payload.openshift.iscsi_is_default;
+        delete payload.openshift.iscsi_install_snapshotter;
+        // Drop legacy driver tokens if Storage class option is off.
+        if (payload.component_options?.openshift) {
+          payload.component_options.openshift = payload.component_options.openshift.filter(
+            o => o !== 'nfs_csi' && o !== 'iscsi_csi'
+          );
+        }
+      } else {
+        // Expand Storage class → collection tokens nfs_csi / iscsi_csi.
+        const wantNfs = payload.openshift.storage_class_nfs !== false;
+        const wantIscsi = !!payload.openshift.storage_class_iscsi;
+        if (!payload.component_options) payload.component_options = {};
+        const ocpOpts = [...(payload.component_options.openshift || [])]
+          .filter(o => o !== 'nfs_csi' && o !== 'iscsi_csi');
+        if (!ocpOpts.includes('storage_class')) ocpOpts.push('storage_class');
+        if (wantNfs) ocpOpts.push('nfs_csi');
+        if (wantIscsi) ocpOpts.push('iscsi_csi');
+        payload.component_options.openshift = ocpOpts;
+
+        if (wantNfs) {
+          if (payload.openshift.install_nfs_during_bootstrap === undefined) {
+            payload.openshift.install_nfs_during_bootstrap = true;
+          }
+          const nfsServer = String(payload.openshift.nfs_server || '').trim();
+          const nfsShare = String(payload.openshift.nfs_share || '').trim();
+          if (!nfsServer || !nfsShare) {
+            throw new Error(
+              'Storage class → NFS CSI is enabled but NFS server and export path (share) are required.'
+            );
+          }
+          payload.openshift.nfs_server = nfsServer;
+          payload.openshift.nfs_share = nfsShare;
+          if (!String(payload.openshift.nfs_storage_class_name || '').trim()) {
+            payload.openshift.nfs_storage_class_name = 'synology-nfs-csi';
+          }
+        } else {
+          delete payload.openshift.install_nfs_during_bootstrap;
+          delete payload.openshift.nfs_server;
+          delete payload.openshift.nfs_share;
+          delete payload.openshift.nfs_storage_class_name;
+          delete payload.openshift.nfs_driver_version;
+          delete payload.openshift.nfs_version;
+          delete payload.openshift.nfs_create_test_namespace;
+          delete payload.openshift.nfs_create_test_pvc;
+        }
+
+        if (wantIscsi) {
+          if (payload.openshift.install_iscsi_during_bootstrap === undefined) {
+            payload.openshift.install_iscsi_during_bootstrap = true;
+          }
+          const dsmHost = String(payload.openshift.iscsi_dsm_host || '').trim();
+          const dsmUser = String(payload.openshift.iscsi_dsm_username || '').trim();
+          const dsmPass = String(payload.openshift.iscsi_dsm_password || '').trim();
+          if (!dsmHost || !dsmUser || !dsmPass) {
+            throw new Error(
+              'Storage class → Synology iSCSI CSI is enabled but DSM host, username, and password are required.'
+            );
+          }
+          payload.openshift.iscsi_dsm_host = dsmHost;
+          payload.openshift.iscsi_dsm_username = dsmUser;
+          payload.openshift.iscsi_dsm_password = dsmPass;
+        } else {
+          delete payload.openshift.install_iscsi_during_bootstrap;
+          delete payload.openshift.iscsi_dsm_host;
+          delete payload.openshift.iscsi_dsm_port;
+          delete payload.openshift.iscsi_dsm_https;
+          delete payload.openshift.iscsi_dsm_username;
+          delete payload.openshift.iscsi_dsm_password;
+          delete payload.openshift.iscsi_storage_class_name;
+          delete payload.openshift.iscsi_location;
+          delete payload.openshift.iscsi_is_default;
+          delete payload.openshift.iscsi_install_snapshotter;
+        }
+
+        if (!wantNfs && !wantIscsi) {
+          throw new Error(
+            'Storage class is selected but neither NFS CSI nor Synology iSCSI CSI is enabled. Open the Storage class tab and enable at least one driver.'
+          );
+        }
+      }
+      const acmCfg = payload.component_config?.acm || {};
+      if (
+        (payload.component_apps?.openshift || []).includes('acm')
+        && acmCfg.observability_enabled
+      ) {
+        const bucket = String(acmCfg.observability_s3_bucket || '').trim();
+        const endpoint = String(acmCfg.observability_s3_endpoint || '').trim();
+        const accessKey = String(acmCfg.observability_s3_access_key || '').trim();
+        const secretKey = String(acmCfg.observability_s3_secret_key || '').trim();
+        if (!bucket || !endpoint || !accessKey || !secretKey) {
+          throw new Error(
+            'ACM Multicluster Observability is enabled but S3 bucket, endpoint, access key, and secret key are required (MinIO works).'
+          );
+        }
       }
       if (!agentEnabled && !(payload.component_options?.openshift || []).includes('agent_installer')) {
         delete payload.openshift.agent_installer;
@@ -3909,6 +4414,23 @@ function App() {
     setAapOpen(value);
   };
 
+  /** Strip -e/--extra-vars state=… so Common extra vars owns state. */
+  const withoutStateExtraVar = (raw) => String(raw || '')
+    .replace(/(?:^|\s)(?:-e|--extra-vars)(?:=|\s+)state=\S+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  /** Not using AAP: freeform options + -e state=present|absent (common control wins). */
+  const effectiveAnsibleExtraArgs = (source = data) => {
+    const state = source?.ansible?.state === 'absent' ? 'absent' : 'present';
+    const base = withoutStateExtraVar(source?.ansible?.extra_args);
+    const stateFlag = `-e state=${state}`;
+    if (source?.aap?.enabled !== false) {
+      return String(source?.ansible?.extra_args || '').trim();
+    }
+    return base ? `${base} ${stateFlag}` : stateFlag;
+  };
+
   const buildLocalBootstrapAnsiblePreview = () => {
     const envName = data.environment || 'prod';
     const preflightFile = `ado-preflight-${envName}.json`;
@@ -3919,7 +4441,7 @@ function App() {
     const hubOnly = aapStandaloneRun(data);
     const generatePlaybooks = hubOnly ? 'false' : 'true';
     const gitSkipTls = data?.git?.skip_tls_verify !== false ? 'false' : 'true';
-    const extraArgs = String(data?.ansible?.extra_args || '').trim();
+    const extraArgs = effectiveAnsibleExtraArgs();
 
     const lines = [
       '# Pod runs this via Run Bootstrap — does not configure Ansible Automation Platform',
@@ -3950,10 +4472,62 @@ function App() {
     return lines.join('\n');
   };
 
+  const renderCommonAnsibleExtraVars = () => (
+    <div id="assistant-ansible-common-extra-vars" style={{ marginTop: '10px', marginBottom: '4px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' }}>
+        <span style={{ fontWeight: 600, fontSize: '14px', color: textColor }}>
+          Common extra vars
+        </span>
+        {labelWithHelp('', (
+          <>
+            <p>
+              Inserts <code>-e state=present</code> or <code>-e state=absent</code> into the
+              black-window command and into each <strong>Run selected playbooks</strong> step.
+              This is the <strong>default for every playbook</strong>; open a playbook&apos;s
+              <strong> Options</strong> to override state or add channel / freeform <code>-e</code>
+              for that step only.
+            </p>
+            <p>
+              <strong>Present</strong> (default) installs/configures. <strong>Absent</strong> uninstalls
+              for roles that honor <code>state</code> (cert-manager, HTPasswd IdP, operators, ACM, Virt, etc.).
+              If Install fails with empty CSVs / Terminating namespaces, confirm this control is still
+              <code>present</code> — an imported JSON can leave <code>ansible.state: absent</code> selected.
+            </p>
+            <p>Not using AAP only. Prefer this over typing <code>-e state=…</code> in Additional options.</p>
+          </>
+        ))}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'center' }}>
+        <Radio
+          id="ansible-state-present"
+          label="state=present"
+          name="ansible-state"
+          isChecked={data.ansible?.state !== 'absent'}
+          onChange={() => {
+            set('ansible.state', 'present');
+            setComponentCommandPreview('');
+            setComponentPreviewCommands([]);
+          }}
+        />
+        <Radio
+          id="ansible-state-absent"
+          label="state=absent"
+          name="ansible-state"
+          isChecked={data.ansible?.state === 'absent'}
+          onChange={() => {
+            set('ansible.state', 'absent');
+            setComponentCommandPreview('');
+            setComponentPreviewCommands([]);
+          }}
+        />
+      </div>
+    </div>
+  );
+
   const renderAnsibleExtraArgsCollapsible = () => {
     const summary = String(data?.ansible?.extra_args || '').trim();
     return (
-      <div style={{ marginTop: '4px' }}>
+      <div id="assistant-ansible-extra-args" style={{ marginTop: '4px' }}>
         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
           <button
             type="button"
@@ -3974,8 +4548,13 @@ function App() {
           </button>
           {labelWithHelp('', (
             <>
-              <p>Appended after the built-in <code>-e</code> flags when the pod runs bootstrap.</p>
+              <p>Appended after the built-in <code>-e</code> flags when the pod runs bootstrap scaffolding.</p>
+              <p>
+                For <strong>Run selected playbooks</strong>, the same string is appended to
+                <em>each</em> selected playbook (shell-split), not only once for the whole list.
+              </p>
               <p>Examples: <code>-e generate_playbooks=false</code>, <code>--tags bootstrap</code>, <code>-e some_custom_var=value</code></p>
+              <p>For install vs uninstall, use <strong>Common extra vars</strong> (<code>state</code>) below when Not using AAP.</p>
             </>
           ))}
           {!ansibleExtraArgsOpen && summary && (
@@ -3987,7 +4566,13 @@ function App() {
         {ansibleExtraArgsOpen && (
           <textarea
             value={data.ansible?.extra_args || ''}
-            onChange={e => set('ansible.extra_args', e.target.value)}
+            onChange={e => {
+              set('ansible.extra_args', e.target.value);
+              // Invalidate playbook preview text, but stay in playbooks mode so the
+              // black box does not jump back to the bootstrap scaffolding command.
+              setComponentCommandPreview('');
+              setComponentPreviewCommands([]);
+            }}
             placeholder="-e my_var=value --tags bootstrap"
             spellCheck="false"
             rows={2}
@@ -4022,11 +4607,13 @@ function App() {
       if (component === 'all') {
         next = wasSelected ? [] : ['all'];
       } else if (groupComponents.includes(component)) {
-        next = wasSelected ? [] : [component];
+        next = wasSelected
+          ? current.filter(value => value !== component && value !== 'all')
+          : [...current.filter(value => value !== 'all'), component];
       } else {
         next = wasSelected
           ? current.filter(c => c !== component)
-          : [...current.filter(c => c !== 'all' && !groupComponents.includes(c)), component];
+          : [...current.filter(c => c !== 'all'), component];
       }
 
       copy.components = next;
@@ -4194,6 +4781,34 @@ function App() {
 
       return copy;
     });
+  };
+
+  const toggleProfileTarget = group => {
+    const all = data.components.includes('all');
+    const active = all || data.components.includes(group);
+    const catalogs = Object.fromEntries(groupComponents.map(target => [target, getGroupApps(target)]));
+    const selected = data.component_apps?.[group] || [];
+    const initial = selected.length ? selected : group === 'aws' ? ['ec2_ami_copy'] : group === 'provision' ? ['openshift_virt'] : [];
+    const copy = selectProfileApps(data, group, all ? catalogs[group] : initial, groupComponents, catalogs, simpleComponents);
+    if (active) {
+      const removed = copy.component_apps[group] || [];
+      copy.component_apps[group] = [];
+      copy.components = copy.components.filter(value => value !== group && !(removed.includes(value) && !Object.values(copy.component_apps).some(apps => apps.includes(value))));
+      copy.component = copy.components[0] || '';
+    }
+    clearStandaloneWhenComponentsSelected(copy);
+    setData(copy);
+    if (!active) openConfigPanel(group);
+  };
+
+  const applyProfileApps = (group, apps, done) => {
+    const catalogs = Object.fromEntries(groupComponents.map(target => [target, getGroupApps(target)]));
+    const copy = selectProfileApps(data, group, apps, groupComponents, catalogs, simpleComponents);
+    clearStandaloneWhenComponentsSelected(copy);
+    syncDevHubGitlabTokenFromGit(copy);
+    applyRhbkTlsDefaultOnCertManagerToggle(copy);
+    setData(copy);
+    done(copy);
   };
 
   const toggleComponentAppAndOpen = (group, app) => {
@@ -4550,14 +5165,30 @@ function App() {
     }
   };
 
+  const syncFormSelectionFromPayload = (payload) => {
+    setData(prev => ({
+      ...prev,
+      components: Array.isArray(payload.components) ? payload.components : [],
+      component: payload.component || '',
+      component_apps: payload.component_apps || prev.component_apps,
+      component_options: payload.component_options || {},
+      selected_component_apps: Array.isArray(payload.selected_component_apps)
+        ? payload.selected_component_apps
+        : []
+    }));
+  };
+
   const downloadJson = () => {
     const payload = buildPreflightPayload();
+    syncFormSelectionFromPayload(payload);
     downloadFile(preflightDownloadBasename(payload), JSON.stringify(payload, null, 2));
     setActionsOpen(false);
   };
 
   const downloadScrubbedJson = () => {
-    const payload = scrubPreflightPayload(buildPreflightPayload());
+    const raw = buildPreflightPayload();
+    syncFormSelectionFromPayload(raw);
+    const payload = scrubPreflightPayload(raw);
     downloadFile(
       preflightDownloadBasename(payload, { scrubbed: true }),
       JSON.stringify(payload, null, 2)
@@ -4596,12 +5227,145 @@ function App() {
     setShowVaultYaml(false);
     setImportStatus('');
     setAgentInstallerResult(null);
+    setComponentPlan(null);
+    setComponentSteps([]);
+    setComponentCommandPreview('');
+    setComponentPreviewCommands([]);
+    setComponentRunnerOpen(false);
+    setLocalPreviewMode('bootstrap');
+    setActiveRunKind('bootstrap');
+    setBootstrapStatus('idle');
+    setBootstrapRuntime('');
+    setComponentRunError('');
   };
 
-  const previewJson = () => {
-    setPreview(JSON.stringify(buildPreflightPayload(), null, 2));
-    setActiveTab('logs');
+  const flushPodWorkspace = async ({ wipeCollections = false } = {}) => {
     setActionsOpen(false);
+    if (bootstrapStatus === 'running' || deployStatus === 'running') {
+      const ok = window.confirm(
+        wipeCollections
+          ? 'Stop the active run and flush the pod workspace including installed collections?'
+          : 'Stop the active run and flush the pod workspace (bootstrap clone / leftover plans)?'
+      );
+      if (!ok) return;
+    } else {
+      const ok = window.confirm(
+        wipeCollections
+          ? 'Flush pod workspace and wipe installed collections? Next bootstrap reinstalls collections.'
+          : 'Flush pod workspace? Clears /workspace/bootstrap-sample, local playbook plan, and leftover git/json on the pod. Form values stay. Collections are kept.'
+      );
+      if (!ok) return;
+    }
+    setActiveTab('logs');
+    setPreview('Flushing pod workspace...\n');
+    setEvents('Flush workspace requested...\n');
+    try {
+      const response = await fetch('/api/workspace/flush', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wipe_collections: wipeCollections })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || response.statusText);
+      setComponentPlan(null);
+      setComponentSteps([]);
+      setComponentCommandPreview('');
+      setComponentPreviewCommands([]);
+      setComponentRunnerOpen(false);
+      setLocalPreviewMode('bootstrap');
+      setActiveRunKind('bootstrap');
+      setBootstrapStatus('idle');
+      setBootstrapRuntime('');
+      setComponentRunError('');
+      setRunFinished(false);
+      const logs = await fetch('/api/logs').then(r => r.text()).catch(() => '');
+      const eventsText = await fetch('/api/events').then(r => r.text()).catch(() => '');
+      setPreview(logs || `${body.message || 'Workspace flushed.'}\n`);
+      setEvents(eventsText || 'Workspace flushed.\n');
+    } catch (err) {
+      setPreview(`Flush failed:\n${err.message}\n`);
+      setBootstrapStatus('failed');
+    }
+  };
+
+  const runEncryptAndPushJson = async () => {
+    const payload = buildPreflightPayload();
+    // Always encrypt for this Actions path — never push plaintext JSON.
+    if (!payload.vault) payload.vault = {};
+    payload.vault.encrypt = true;
+
+    if (!payload?.aap?.git_url) {
+      setImportStatus('Push needs Project Git Source URL');
+      setPreview('ERROR: Missing Project Git Source URL (Git Configuration).\n');
+      setActiveTab('logs');
+      setActionsOpen(false);
+      return;
+    }
+    if (!payload?.git?.token) {
+      setImportStatus('Push needs a Git token');
+      setPreview('ERROR: Missing Git token (Git Configuration).\n');
+      setActiveTab('logs');
+      setActionsOpen(false);
+      return;
+    }
+    if (!String(payload?.aap?.vault_password || '').trim()) {
+      setImportStatus('Push needs a Vault password');
+      setPreview('ERROR: Missing Vault password (Credentials → Vault). Required to encrypt preflight JSON.\n');
+      setActiveTab('logs');
+      setActionsOpen(false);
+      return;
+    }
+
+    setRunFinished(false);
+    setShowRawOutput(false);
+    setActiveTab('logs');
+    setPreview('Encrypting preflight JSON with ansible-vault and pushing to Git (no bootstrap)...\n');
+    setEvents('Starting encrypted publish request...\n');
+    setActionsOpen(false);
+    setBootstrapStatus('running');
+
+    let keepPolling = true;
+    const poller = setInterval(async () => {
+      if (!keepPolling) return;
+      try {
+        const logs = await fetch('/api/logs');
+        setPreview((await logs.text()) || 'Running...');
+        const eventsResp = await fetch('/api/events');
+        setEvents((await eventsResp.text()) || 'No events yet.');
+      } catch (err) {
+        setPreview(`ERROR reading logs:\n${err.message}`);
+      }
+    }, 1000);
+
+    try {
+      const response = await fetch('/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json().catch(() => ({}));
+      const text = await (await fetch('/api/logs')).text();
+      const eventsText = await (await fetch('/api/events')).text();
+      const recap = result.bootstrapRecap ? `\n${result.bootstrapRecap}` : '';
+      const errorLine = result.error ? `\nERROR: ${result.error}` : '';
+      setPreview(`${text}\n\nRESULT:\n${JSON.stringify(result, null, 2)}${errorLine}${recap}`);
+      setEvents(eventsText || 'No events were returned.');
+      const ok = response.ok && result.status === 'complete';
+      setBootstrapStatus(ok ? 'complete' : 'failed');
+      setImportStatus(
+        ok
+          ? `Pushed encrypted ${result.preflightFile || 'ado-preflight-*.json.vault.yml'} to Git`
+          : (result.error || 'Upload encrypted JSON to Git failed')
+      );
+    } catch (err) {
+      setPreview(`ERROR:\n${err.message}`);
+      setImportStatus(`Push encrypted JSON failed: ${err.message}`);
+      setBootstrapStatus('failed');
+    } finally {
+      keepPolling = false;
+      clearInterval(poller);
+      setRunFinished(true);
+    }
   };
 
   const openDebugTab = key => {
@@ -4664,14 +5428,277 @@ function App() {
     setYamlError('');
   };
 
-  const runBootstrapInsideContainer = async () => {
+  const loadComponentPlan = async () => {
+    const response = await fetch('/api/components/plan');
+    if (!response.ok) {
+      setComponentPlan(null);
+      setComponentSteps([]);
+      return null;
+    }
+    const plan = await response.json();
+    const recommended = plan.steps
+      .filter(step => step.recommended && step.available)
+      .filter(step => !String(step.id || step.playbook || '').includes('enable-realm'))
+      .map(step => step.id);
+    setComponentPlan(plan);
+    setComponentSteps(recommended);
+    setComponentValues({});
+    setComponentStepOptions({});
+    setComponentStepOptionsEditId(null);
+    setComponentCommandPreview('');
+    setComponentPreviewCommands([]);
+    return { plan, steps: recommended };
+  };
+
+  /** Component key for per-playbook option fields (from plan step or playbook path). */
+  const componentKeyFromPlanStep = step => {
+    if (step?.component) return String(step.component).trim();
+    const path = String(step?.playbook || step?.id || '');
+    const parts = path.split('/').filter(Boolean);
+    if (parts[0] === 'playbooks' && parts[1]) return parts[1].replace(/-/g, '_');
+    return parts[0] || '';
+  };
+
+  /** Typed fields shown in the per-playbook Options modal (plus state + freeform -e). */
+  const playbookStepOptionFields = componentKey => {
+    const key = String(componentKey || '').toLowerCase();
+    if (key === 'acm') {
+      return [
+        {
+          key: 'operator_channel',
+          label: 'Operator channel',
+          type: 'text',
+          placeholder: 'release-2.17',
+          help: 'OLM channel for advanced-cluster-management (e.g. release-2.17).'
+        }
+      ];
+    }
+    if (key === 'ocp_virtualization') {
+      return [
+        {
+          key: 'operator_channel',
+          label: 'Operator channel',
+          type: 'text',
+          placeholder: 'stable',
+          help: 'OLM channel for kubevirt-hyperconverged (usually stable).'
+        },
+        {
+          key: 'ocp_virtualization_install_enable_kube_secondary_dns',
+          label: 'Enable KubeSecondaryDNS',
+          type: 'checkbox',
+          help: 'Sets HyperConverged featureGates.deployKubeSecondaryDNS (fleet-friendly VM DNS).'
+        }
+      ];
+    }
+    if (key === 'mtv') {
+      return [
+        {
+          key: 'operator_channel',
+          label: 'Operator channel',
+          type: 'text',
+          placeholder: 'release-v2.12',
+          help: 'OLM channel for mtv-operator from Software Catalog (e.g. release-v2.12). Match OCP version compatibility.'
+        }
+      ];
+    }
+    if (key === 'cert_manager') {
+      return [
+        {
+          key: 'operator_channel',
+          label: 'Operator channel',
+          type: 'text',
+          placeholder: 'stable-v1',
+          help: 'OLM channel for openshift-cert-manager-operator.'
+        }
+      ];
+    }
+    return [];
+  };
+
+  const stepOptionsSummary = stepId => {
+    const opts = componentStepOptions[stepId] || {};
+    const bits = [];
+    if (opts.state === 'present' || opts.state === 'absent') bits.push(`state=${opts.state}`);
+    Object.entries(opts.vars || {}).forEach(([key, value]) => {
+      if (value === true) bits.push(key);
+      else if (value !== false && value !== '' && value != null) bits.push(`${key}=${value}`);
+    });
+    if (String(opts.extra_args || '').trim()) bits.push('custom -e');
+    return bits.length ? bits.join(', ') : '';
+  };
+
+  const componentRequest = (overrides = {}) => {
+    const steps = overrides.steps ?? componentSteps;
+    const openshiftOptions = data.component_options?.openshift || [];
+    const htpasswdSelected = openshiftOptions.includes('admin_htpasswd')
+      || (Array.isArray(steps) && steps.some((step) => {
+        const text = String(step || '').toLowerCase();
+        return text.includes('htpass') || text.includes('htpasswd');
+      }));
+    const formVars = {};
+    if (htpasswdSelected) {
+      const idpName = String(data.openshift?.htpasswd_idp_name || '').trim();
+      const secretName = String(data.openshift?.htpasswd_secret || '').trim()
+        || (idpName ? `${idpName}-secret` : '');
+      if (idpName) {
+        formVars.htpasswd_idp_name = idpName;
+        formVars.htpasswd_idp = idpName;
+      }
+      if (secretName) formVars.htpasswd_secret = secretName;
+      if (data.openshift?.htpasswd_action) {
+        formVars.htpasswd_action = data.openshift.htpasswd_action;
+      }
+    }
+    return {
+      planId: overrides.planId ?? componentPlan?.planId,
+      steps,
+      values: overrides.values ?? componentValues,
+      form_vars: overrides.form_vars ?? formVars,
+      extra_args: String(overrides.extra_args ?? effectiveAnsibleExtraArgs()),
+      step_options: overrides.step_options ?? componentStepOptions
+    };
+  };
+
+  const runSelectedPlaybooks = async () => {
+    setComponentRunError('');
+    setComponentRunnerOpen(true);
+
+    let plan = componentPlan;
+    let steps = componentSteps;
+    if (!plan?.planId) {
+      const loaded = await loadComponentPlan();
+      if (!loaded?.plan) {
+        setComponentRunError('Run Bootstrap successfully with Not using AAP before running playbooks.');
+        requestAnimationFrame(() => {
+          document.getElementById('aap-configuration')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          setTimeout(() => document.getElementById('playbook-runner')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 200);
+        });
+        return;
+      }
+      plan = loaded.plan;
+      steps = loaded.steps;
+    }
+
+    if (!steps.length) {
+      steps = plan.steps.filter(step => step.available).map(step => step.id);
+      setComponentSteps(steps);
+    }
+
+    if (!steps.length) {
+      setComponentRunError('No playbooks are available to run. Re-run Bootstrap after selecting components.');
+      requestAnimationFrame(() => {
+        document.getElementById('playbook-runner')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+      return;
+    }
+
+    await runBootstrapInsideContainer(componentRequest({ planId: plan.planId, steps }));
+  };
+
+  const previewComponentRun = async () => {
+    setComponentRunError('');
+    setLocalPreviewMode('playbooks');
+    try {
+      const response = await fetch('/api/components/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(componentRequest()) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Cannot preview selected components');
+      const quote = value => "'" + String(value).replace(/'/g, "'\\''") + "'";
+      const commands = (body.commands || []).map(command => ({
+        id: command.id || (command.argv || []).find(a => String(a).startsWith('playbooks/')) || Math.random().toString(36).slice(2),
+        argv: command.argv || [],
+        display: (command.argv || []).map(quote).join(' ')
+      }));
+      const text = [
+        '# Selected playbooks — pod runs these via Run selected playbooks (no AAP)',
+        '# Additional ansible-playbook options (if set) are appended to each command below.',
+        '# Use ? beside a command to explain vars and behavior in ADO Assistant.',
+        ...commands.map(command => command.display)
+      ].join('\n\n');
+      setComponentPreviewCommands(commands);
+      setComponentCommandPreview(text);
+    } catch (err) {
+      setComponentRunError(err.message);
+      setComponentPreviewCommands([]);
+      setComponentCommandPreview(
+        [
+          '# Preview failed — not the bootstrap scaffolding command.',
+          `# ${err.message}`,
+          '# Fix the selection/plan (or re-run Bootstrap), then Preview again.'
+        ].join('\n')
+      );
+    }
+  };
+
+  const explainPreviewCommand = async (command) => {
+    let documents = [];
+    try {
+      const knowledge = await fetch('/assistant-knowledge.json').then(r => (r.ok ? r.json() : null));
+      documents = knowledge?.documents || [];
+    } catch {
+      documents = [];
+    }
+    const explained = explainLocalPlaybookCommand(command.argv || [], documents, data);
+    const playbook = explained.playbook || '';
+    const env = explained.env || data.environment || 'dev';
+    if (playbook) {
+      try {
+        const qs = new URLSearchParams({ playbook, env });
+        const gv = await fetch(`/api/components/group-vars?${qs}`).then(r => (r.ok ? r.json() : null));
+        if (gv?.files?.length) {
+          explained.groupVars = gv;
+        } else if (gv?.error) {
+          explained.groupVars = { ...gv, files: [] };
+        }
+      } catch {
+        // Explain still works without on-disk group_vars.
+      }
+    }
+    setAssistantExplain(explained);
+    setAssistantOpen(true);
+  };
+
+  const runBootstrapInsideContainer = async (selectedRun = null) => {
+    // PatternFly passes a click event when used as an onClick handler.
+    const runComponents = Array.isArray(selectedRun?.steps);
+    if (!runComponents) {
+      const vaultPassword = String(data?.aap?.vault_password || '').trim();
+      if (!vaultPassword) {
+        setImportStatus('Bootstrap needs a Vault password');
+        setPreview(
+          'ERROR: Missing Vault password (Credentials → Vault).\n'
+          + 'This value is written to .vault_pass and stored as aap.vault_password in ado-preflight-<env>.json.\n'
+          + 'There is no silent redhat123 default.\n'
+        );
+        setActiveTab('logs');
+        setBootstrapStatus('failed');
+        return;
+      }
+      setComponentPlan(null);
+      setComponentCommandPreview('');
+      setComponentPreviewCommands([]);
+      setLocalPreviewMode('bootstrap');
+      setActiveRunKind('bootstrap');
+    } else {
+      setActiveRunKind('playbooks');
+      setLocalPreviewMode('playbooks');
+    }
+
     setRunFinished(false);
     setBootstrapStatus('running');
     setBootstrapRuntime('');
     setShowRawOutput(false);
     setActiveTab('logs');
-    setPreview('Starting bootstrap inside container...\n');
-    setEvents('Starting bootstrap request...\n');
+    setPreview(runComponents ? 'Starting selected playbooks inside container...\n' : 'Starting bootstrap inside container...\n');
+    setEvents(runComponents ? 'Starting playbook run request...\n' : 'Starting bootstrap request...\n');
+
+    if (runComponents) {
+      requestAnimationFrame(() => {
+        document.querySelector('.ado-console-toolbar')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } else {
+      // Bootstrap clears the prior component plan; keep runner closed until success reloads it.
+      setComponentRunnerOpen(false);
+    }
 
     let keepPolling = true;
     let poller = null;
@@ -4684,6 +5711,13 @@ function App() {
       setBootstrapStatus(status);
       setBootstrapRuntime(runtime || '');
       setRunFinished(true);
+      if (!runComponents && status === 'complete') {
+        loadComponentPlan()
+          .then(() => {
+            if (openPlaybookRunnerAfterBootstrap) setComponentRunnerOpen(true);
+          })
+          .catch(() => setComponentPlan(null));
+      }
     };
 
     const fetchBootstrapResult = async () => {
@@ -4744,10 +5778,10 @@ function App() {
     }, 1000);
 
     try {
-      const response = await fetch('/api/bootstrap', {
+      const response = await fetch(runComponents ? '/api/components/run' : '/api/bootstrap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPreflightPayload())
+        body: JSON.stringify(runComponents ? selectedRun : buildPreflightPayload())
       });
 
       if (response.status === 409) {
@@ -4766,7 +5800,9 @@ function App() {
       }
 
       if (response.status === 202) {
-        setPreview('Bootstrap started — streaming logs from server...\n');
+        setPreview(runComponents
+          ? 'Playbook run started — streaming logs from server...\n'
+          : 'Bootstrap started — streaming logs from server...\n');
         return;
       }
 
@@ -5109,6 +6145,7 @@ function App() {
     <GridItem span={6}>
       <FormGroup label={labelWithHelp(label, help)}>
         <TextInput
+          id={path}
           type={type}
           value={path.split('.').reduce((o, k) => (o || {})[k], data) || ''}
           onChange={(_, v) => set(path, v)}
@@ -5171,7 +6208,7 @@ function App() {
     const selectValue = classes.some(item => item.name === current) ? current : '';
     return (
       <GridItem span={6}>
-        <FormGroup label={labelWithHelp(label, help)}>
+        <FormGroup id={`${path}-field`} tabIndex={-1} label={labelWithHelp(label, help)}>
           <div style={{ display: 'flex', gap: '8px' }}>
             <TextInput
               value={current}
@@ -5274,7 +6311,9 @@ function App() {
 
   const grafanaHelp = {
     hostname: 'Grafana route or hostname. Example: https://grafana.apps.ocp.prod.rhlab.',
-    storage: 'OpenShift storage class used by Grafana. Use Look up when API host and token are set. Example: ocs-storagecluster-ceph-rbd.',
+    storage: 'OpenShift storage class used by Grafana PVC (SQLite data / plugins). Use Look up when API host and token are set.',
+    database: 'SQLite is the default embedded database. PostgreSQL is recommended for production; ADO can provision PostgreSQL 15 in-cluster or use an external host.',
+    postgresStorage: 'Storage class for the ADO-managed grafana-postgres PVC. Defaults to the Grafana storage class when empty.',
     folderName: 'Grafana folder to create. Example: OpenShift.',
     dashboardsSource: 'Folder path or Git repository containing dashboard JSON files.'
   };
@@ -5427,10 +6466,33 @@ echo $TOKEN
     adminUsername: 'OpenShift htpasswd admin username. Example: admin.',
     adminPassword: 'OpenShift htpasswd admin password. Stored in generated vault files.',
     adminRole: 'Cluster role to bind to the htpasswd user. Example: cluster-admin.',
+    htpasswdIdpName: 'Name shown as the OpenShift console login button (OAuth identity provider). Default: htpasswd-admin.',
     bannerLocation: 'OpenShift console banner location. Example: BannerTop or BannerBottom.',
     bannerText: 'Text shown in the console banner. Example: Production cluster - approved changes only.',
     bannerBackgroundColor: 'Console banner background color. Example: #1f7a1f.',
     bannerTextColor: 'Console banner text color. Example: #ffffff.',
+    nfsServer: 'NFS server hostname or IP for the CSI StorageClass. Example: 192.168.0.6.',
+    nfsShare: 'NFS export path. Example: /volume1/openshift.',
+    nfsStorageClass: 'StorageClass name to create. Default: synology-nfs-csi. App forms can Look up this name after install.',
+    nfsInstallDuringBootstrap: 'When checked, Run Bootstrap installs the NFS CSI driver and StorageClass on the cluster (requires API host + token).',
+    imageRegistryDefaultRoute: 'When checked, set spec.defaultRoute=true so the cluster exposes default-route on the apps domain.',
+    imageRegistryInstallDuringBootstrap: (
+      <div>
+        <p>
+          When checked, Run Bootstrap enables the integrated image registry before
+          NFS CSI (avoids circular dependency when CSI images must be mirrored
+          internally).
+        </p>
+        <p style={{ marginBottom: 0 }}>
+          Enabling the registry does not create backing storage. Do not point
+          registry storage at nfs-csi while recovering NFS CSI ImagePullBackOff.
+        </p>
+      </div>
+    ),
+    iscsiDsmHost: 'Synology DSM IP or hostname for iSCSI CSI. Example: 192.168.0.6.',
+    iscsiDsmUser: 'DSM username with storage admin rights. Stored in vault.',
+    iscsiDsmPassword: 'DSM password. Stored in vault.',
+    iscsiStorageClass: 'StorageClass name to create. Default: synology-iscsi-storage.',
     agentClusterName: 'OpenShift cluster name used in install-config metadata. Example: ocp-dev.',
     agentBaseDomain: 'Base DNS domain for the cluster. Example: dev.rhlab.',
     agentPullSecret: 'Red Hat pull secret JSON copied from cloud.redhat.com.',
@@ -5916,6 +6978,88 @@ echo $TOKEN
               {renderTextField('Hostname / URL', 'component_config.grafana.hostname', 'text', grafanaHelp.hostname)}
               {renderStorageClassField('Storage Class', 'component_config.grafana.storage', grafanaHelp.storage)}
               {renderTextField('Replicas', 'component_config.grafana.replicas', 'number')}
+              <GridItem span={12}>
+                <FormGroup label="Database" helperText={grafanaHelp.database}>
+                  <Checkbox
+                    id="grafana-db-sqlite"
+                    label="SQLite (default — embedded on Grafana PVC)"
+                    isChecked={(data.component_config?.grafana?.database_type || 'sqlite') === 'sqlite'}
+                    onChange={(_, checked) => {
+                      if (checked) set('component_config.grafana.database_type', 'sqlite');
+                    }}
+                  />
+                  <Checkbox
+                    id="grafana-db-postgres"
+                    label="PostgreSQL"
+                    isChecked={data.component_config?.grafana?.database_type === 'postgres'}
+                    onChange={(_, checked) => {
+                      if (checked) set('component_config.grafana.database_type', 'postgres');
+                    }}
+                  />
+                </FormGroup>
+              </GridItem>
+              {data.component_config?.grafana?.database_type === 'postgres' && (
+                <>
+                  <GridItem span={12}>
+                    <FormGroup label="PostgreSQL source">
+                      <Checkbox
+                        id="grafana-pg-provision"
+                        label="ADO-managed PostgreSQL in the Grafana namespace (default)"
+                        isChecked={data.component_config?.grafana?.database_provision !== false}
+                        onChange={(_, checked) => set('component_config.grafana.database_provision', checked)}
+                      />
+                      <Checkbox
+                        id="grafana-pg-external"
+                        label="External PostgreSQL (provide host and password)"
+                        isChecked={data.component_config?.grafana?.database_provision === false}
+                        onChange={(_, checked) => set('component_config.grafana.database_provision', !checked)}
+                      />
+                    </FormGroup>
+                  </GridItem>
+                  {data.component_config?.grafana?.database_provision !== false ? (
+                    <>
+                      {renderStorageClassField(
+                        'PostgreSQL storage class',
+                        'component_config.grafana.postgres_storage',
+                        grafanaHelp.postgresStorage
+                      )}
+                      {renderTextField(
+                        'PostgreSQL PVC size',
+                        'component_config.grafana.postgres_storage_size',
+                        'text'
+                      )}
+                      {renderTextField(
+                        'PostgreSQL image (optional)',
+                        'component_config.grafana.postgres_image',
+                        'text'
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {renderTextField(
+                        'PostgreSQL host:port',
+                        'component_config.grafana.postgres_host',
+                        'text'
+                      )}
+                      {renderTextField(
+                        'PostgreSQL database',
+                        'component_config.grafana.postgres_database',
+                        'text'
+                      )}
+                      {renderTextField(
+                        'PostgreSQL user',
+                        'component_config.grafana.postgres_user',
+                        'text'
+                      )}
+                      {renderTextField(
+                        'PostgreSQL password',
+                        'component_config.grafana.postgres_password',
+                        'password'
+                      )}
+                    </>
+                  )}
+                </>
+              )}
               {renderAuthFields()}
             </Grid>
           );
@@ -6507,7 +7651,7 @@ echo $TOKEN
 
           <Button
             variant="secondary"
-            onClick={() => setShowMachineCredentialSecrets(!showMachineCredentialSecrets)}
+            onClick={() => toggleSecretRevealed('machine', setShowMachineCredentialSecrets, showMachineCredentialSecrets)}
           >
             {showMachineCredentialSecrets ? 'Hide Passphrase' : 'Show Passphrase'}
           </Button>
@@ -6604,12 +7748,30 @@ echo $TOKEN
         </FormGroup>
       </GridItem>
       <GridItem span={6}>
-        <FormGroup label="Vault Password" isRequired>
-          <TextInput
-            type="password"
-            value={data.aap.vault_password}
-            onChange={(_, v) => set('aap.vault_password', v)}
-          />
+        <FormGroup
+          label="Vault Password"
+          isRequired
+          helperText="Used for Ansible Vault encrypt and written to .vault_pass in the bootstrap repo (same value as aap.vault_password in preflight JSON)."
+        >
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <TextInput
+              type={showVaultPassword ? 'text' : 'password'}
+              value={data.aap.vault_password}
+              onChange={(_, v) => set('aap.vault_password', v)}
+              placeholder="Required — no silent redhat123 default"
+            />
+            <Button
+              variant="secondary"
+              onClick={() => setShowVaultPassword(v => !v)}
+            >
+              {showVaultPassword ? 'Hide' : 'Show'}
+            </Button>
+          </div>
+          {!String(data.aap.vault_password || '').trim() && (
+            <div style={{ color: '#c9190b', fontSize: '12px', marginTop: '4px' }}>
+              {'Required — written to .vault_pass and aap.vault_password in ado-preflight-<env>.json (no silent redhat123 default).'}
+            </div>
+          )}
         </FormGroup>
       </GridItem>
     </Grid>
@@ -6823,7 +7985,7 @@ echo $TOKEN
                           });
                         }}
                       />
-                      <Button variant="secondary" onClick={() => setShowGitToken(!showGitToken)}>
+                      <Button variant="secondary" onClick={() => toggleSecretRevealed('git', setShowGitToken, showGitToken)}>
                         {showGitToken ? 'Hide' : 'Show'}
                       </Button>
                     </div>
@@ -7180,260 +8342,271 @@ echo $TOKEN
   const renderSatelliteConfig = () => {
     const sat = data.component_config?.satellite || defaultComponentConfig('satellite');
     const selected = data.component_options?.satellite || [];
-    const showClient = selected.includes('satellite_client_tools');
-    const showServer = selected.includes('satellite_server_install')
-      || selected.includes('satellite_capsule_install')
-      || selected.includes('satellite_content_view');
-    const showDynamicInventory = showClient || selected.includes('satellite_dynamic_inventory');
-    const showOidc = selected.includes('satellite_oidc');
-    const showAny = showClient || showServer || showDynamicInventory || showOidc;
-    const sectionTitle = label => (
-      <GridItem span={12}>
-        <div style={{ fontWeight: 700, marginTop: '8px', marginBottom: '4px' }}>{label}</div>
-      </GridItem>
-    );
-    return (
-    <>
-      {renderComponentOptions('satellite', 'Satellite Options', 'Select which Satellite resources to configure.')}
-      {!showAny && <p style={{ color: mutedTextColor }}>Select Satellite client and/or server options to show the matching fields.</p>}
-      {(showClient || showServer || showDynamicInventory || showOidc) && (
-        <Button variant="link" onClick={() => setShowSatelliteSecrets(!showSatelliteSecrets)}>
-          {showSatelliteSecrets ? 'Hide Service Account' : 'Show Service Account'}
-        </Button>
-      )}
-      <br /><br />
+    const satelliteTabs = (componentOptionDefaults.satellite || []).filter(option => selected.includes(option));
+    const activeSatelliteTab = satelliteTabs.includes(activeSatelliteDetailTab)
+      ? activeSatelliteDetailTab
+      : (satelliteTabs[0] || 'satellite_server_install');
+
+    const renderClientFields = () => (
       <Grid hasGutter>
-        {showClient && showServer && sectionTitle('Client configuration')}
-        {showClient && (
-          <>
-            {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
-            {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
-            {renderTextField('Activation Key', 'component_config.satellite.activation_key', 'text', satelliteHelp.activationKey)}
-            <GridItem span={6}>
-              <FormGroup label={labelWithHelp('TLS Certificate Verification', satelliteHelp.skipTls)}>
-                <Checkbox
-                  id="satellite-skip-tls-verify-client"
-                  label="Skip TLS certificate verification for self-signed certificates"
-                  isChecked={!sat.validate_certs}
-                  onChange={(_, v) => set('component_config.satellite.validate_certs', !v)}
-                />
-              </FormGroup>
-            </GridItem>
-          </>
-        )}
+        {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
+        {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
+        {renderTextField('Activation Key', 'component_config.satellite.activation_key', 'text', satelliteHelp.activationKey)}
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('TLS Certificate Verification', satelliteHelp.skipTls)}>
+            <Checkbox
+              id="satellite-skip-tls-verify-client"
+              label="Skip TLS certificate verification for self-signed certificates"
+              isChecked={!sat.validate_certs}
+              onChange={(_, v) => set('component_config.satellite.validate_certs', !v)}
+            />
+          </FormGroup>
+        </GridItem>
+      </Grid>
+    );
 
-        {showServer && showClient && sectionTitle('Server configuration')}
-        {showServer && !showClient && (
-          <>
-            {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
-            {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
-          </>
-        )}
-        {showOidc && !showClient && !showServer && (
-          <>
-            {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
-            {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
-          </>
-        )}
-        {showServer && (
-          <>
-            <GridItem span={6}>
-              <FormGroup label={labelWithHelp('Satellite Deployment Version', satelliteHelp.deploymentVersion)}>
-                <select
-                  value={sat.deployment_version || '6.19'}
-                  onChange={e => set('component_config.satellite.deployment_version', e.target.value)}
-                  style={{ width: '100%', height: '36px' }}
-                >
-                  <option value="6.17">6.17</option>
-                  <option value="6.18">6.18</option>
-                  <option value="6.19">6.19</option>
-                </select>
-              </FormGroup>
-            </GridItem>
-            {renderTextField('Satellite Install Location', 'component_config.satellite.location', 'text', satelliteHelp.location)}
-            {renderTextField('RHN Organization ID', 'component_config.satellite.rhn_org_id', 'text', satelliteHelp.rhnOrgId)}
-            {renderTextField('RHN Activation Key', 'component_config.satellite.admin_rhn_activation_key', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.rhnActivationKey)}
-            <GridItem span={12}>
-              <FormGroup label={labelWithHelp('Satellite Manifest File', satelliteHelp.manifestFile)}>
-                <input
-                  id="satellite-manifest-file"
-                  type="file"
-                  accept=".zip,application/zip"
-                  onChange={event => {
-                    setSatelliteManifest(event.target.files?.[0]);
-                    event.target.value = '';
-                  }}
-                  style={{ display: 'block', marginBottom: '8px' }}
-                />
-                <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
-                  {sat.manifest_file
-                    ? `Selected: ${sat.manifest_file}. Generated repo path: files/${sat.manifest_file}.`
-                    : 'Upload a Red Hat Satellite manifest ZIP. It will be written to the generated repo files/ directory.'}
-                </div>
-                {sat.manifest_file && (
-                  <Button variant="link" onClick={clearSatelliteManifest}>Clear Manifest</Button>
-                )}
-              </FormGroup>
-            </GridItem>
-            <GridItem span={6}>
-              <FormGroup label={labelWithHelp('Satellite Size Profile', satelliteHelp.sizeProfile)}>
-                <select
-                  value={sat.size_profile || 'default'}
-                  onChange={e => set('component_config.satellite.size_profile', e.target.value)}
-                  style={{ width: '100%', height: '36px' }}
-                >
-                  {(sat.size || []).map(profile => (
-                    <option key={profile.name} value={profile.name}>
-                      {profile.name} ({profile.min_hosts}-{profile.max_hosts} hosts, {profile.min_ram}GB RAM, {profile.min_cpu} CPU)
-                    </option>
-                  ))}
-                </select>
-              </FormGroup>
-            </GridItem>
-            {renderTextField('Admin Password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.adminPassword)}
-            <GridItem span={12}>
-              <FormGroup label={labelWithHelp('Satellite Storage Mounts', satelliteHelp.reqDirs)}>
-                {(sat.req_dirs || []).map((row, index) => (
-                  <Grid hasGutter key={`satellite-req-dir-${index}`} style={{ marginBottom: '8px' }}>
-                    <GridItem span={4}>
-                      <TextInput
-                        value={row.mount_point || ''}
-                        onChange={(_, v) => setSatelliteReqDir(index, 'mount_point', v)}
-                        aria-label={`Satellite mount point ${index + 1}`}
-                        placeholder="/var/lib/pulp"
-                      />
-                    </GridItem>
-                    <GridItem span={3}>
-                      <TextInput
-                        value={row.lv_name || ''}
-                        onChange={(_, v) => setSatelliteReqDir(index, 'lv_name', v)}
-                        aria-label={`Satellite logical volume ${index + 1}`}
-                        placeholder="lv_rhspulp"
-                      />
-                    </GridItem>
-                    <GridItem span={3}>
-                      <TextInput
-                        value={row.lv_size || ''}
-                        onChange={(_, v) => setSatelliteReqDir(index, 'lv_size', v)}
-                        aria-label={`Satellite logical volume size ${index + 1}`}
-                        placeholder="300g"
-                      />
-                    </GridItem>
-                    <GridItem span={2}>
-                      <Button variant="link" onClick={() => removeSatelliteReqDir(index)}>Remove</Button>
-                    </GridItem>
-                  </Grid>
-                ))}
-                <Button variant="secondary" onClick={addSatelliteReqDir}>Add Mount</Button>
-              </FormGroup>
-            </GridItem>
-            {!showClient && (
-              <GridItem span={6}>
-                <FormGroup label={labelWithHelp('TLS Certificate Verification', satelliteHelp.skipTls)}>
-                  <Checkbox
-                    id="satellite-skip-tls-verify-server"
-                    label="Skip TLS certificate verification for self-signed certificates"
-                    isChecked={!sat.validate_certs}
-                    onChange={(_, v) => set('component_config.satellite.validate_certs', !v)}
+    const renderServerFields = ({ includeTls = true } = {}) => (
+      <Grid hasGutter>
+        {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
+        {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('Satellite Deployment Version', satelliteHelp.deploymentVersion)}>
+            <select
+              value={sat.deployment_version || '6.19'}
+              onChange={e => set('component_config.satellite.deployment_version', e.target.value)}
+              style={{ width: '100%', height: '36px' }}
+            >
+              <option value="6.17">6.17</option>
+              <option value="6.18">6.18</option>
+              <option value="6.19">6.19</option>
+            </select>
+          </FormGroup>
+        </GridItem>
+        {renderTextField('Satellite Install Location', 'component_config.satellite.location', 'text', satelliteHelp.location)}
+        {renderTextField('RHN Organization ID', 'component_config.satellite.rhn_org_id', 'text', satelliteHelp.rhnOrgId)}
+        {renderTextField('RHN Activation Key', 'component_config.satellite.admin_rhn_activation_key', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.rhnActivationKey)}
+        <GridItem span={12}>
+          <FormGroup label={labelWithHelp('Satellite Manifest File', satelliteHelp.manifestFile)}>
+            <input
+              id="satellite-manifest-file"
+              type="file"
+              accept=".zip,application/zip"
+              onChange={event => {
+                setSatelliteManifest(event.target.files?.[0]);
+                event.target.value = '';
+              }}
+              style={{ display: 'block', marginBottom: '8px' }}
+            />
+            <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
+              {sat.manifest_file
+                ? `Selected: ${sat.manifest_file}. Generated repo path: files/${sat.manifest_file}.`
+                : 'Upload a Red Hat Satellite manifest ZIP. It will be written to the generated repo files/ directory.'}
+            </div>
+            {sat.manifest_file && (
+              <Button variant="link" onClick={clearSatelliteManifest}>Clear Manifest</Button>
+            )}
+          </FormGroup>
+        </GridItem>
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('Satellite Size Profile', satelliteHelp.sizeProfile)}>
+            <select
+              value={sat.size_profile || 'default'}
+              onChange={e => set('component_config.satellite.size_profile', e.target.value)}
+              style={{ width: '100%', height: '36px' }}
+            >
+              {(sat.size || []).map(profile => (
+                <option key={profile.name} value={profile.name}>
+                  {profile.name} ({profile.min_hosts}-{profile.max_hosts} hosts, {profile.min_ram}GB RAM, {profile.min_cpu} CPU)
+                </option>
+              ))}
+            </select>
+          </FormGroup>
+        </GridItem>
+        {renderTextField('Admin Password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.adminPassword)}
+        <GridItem span={12}>
+          <FormGroup label={labelWithHelp('Satellite Storage Mounts', satelliteHelp.reqDirs)}>
+            {(sat.req_dirs || []).map((row, index) => (
+              <Grid hasGutter key={`satellite-req-dir-${index}`} style={{ marginBottom: '8px' }}>
+                <GridItem span={4}>
+                  <TextInput
+                    value={row.mount_point || ''}
+                    onChange={(_, v) => setSatelliteReqDir(index, 'mount_point', v)}
+                    aria-label={`Satellite mount point ${index + 1}`}
+                    placeholder="/var/lib/pulp"
                   />
-                </FormGroup>
-              </GridItem>
-            )}
-          </>
+                </GridItem>
+                <GridItem span={3}>
+                  <TextInput
+                    value={row.lv_name || ''}
+                    onChange={(_, v) => setSatelliteReqDir(index, 'lv_name', v)}
+                    aria-label={`Satellite logical volume ${index + 1}`}
+                    placeholder="lv_rhspulp"
+                  />
+                </GridItem>
+                <GridItem span={3}>
+                  <TextInput
+                    value={row.lv_size || ''}
+                    onChange={(_, v) => setSatelliteReqDir(index, 'lv_size', v)}
+                    aria-label={`Satellite logical volume size ${index + 1}`}
+                    placeholder="300g"
+                  />
+                </GridItem>
+                <GridItem span={2}>
+                  <Button variant="link" onClick={() => removeSatelliteReqDir(index)}>Remove</Button>
+                </GridItem>
+              </Grid>
+            ))}
+            <Button variant="secondary" onClick={addSatelliteReqDir}>Add Mount</Button>
+          </FormGroup>
+        </GridItem>
+        {includeTls && (
+          <GridItem span={6}>
+            <FormGroup label={labelWithHelp('TLS Certificate Verification', satelliteHelp.skipTls)}>
+              <Checkbox
+                id="satellite-skip-tls-verify-server"
+                label="Skip TLS certificate verification for self-signed certificates"
+                isChecked={!sat.validate_certs}
+                onChange={(_, v) => set('component_config.satellite.validate_certs', !v)}
+              />
+            </FormGroup>
+          </GridItem>
         )}
+      </Grid>
+    );
 
-        {showDynamicInventory && (
+    const renderDynamicInventoryFields = () => (
+      <Grid hasGutter>
+        {renderTextField('Service Account Username', 'component_config.satellite.service_account_username', 'text', satelliteHelp.serviceAccountUsername)}
+        {renderTextField('Service Account Password', 'component_config.satellite.service_account_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.serviceAccountPassword)}
+        <GridItem span={12}>
+          <FormGroup label={labelWithHelp('Satellite Dynamic Inventory', satelliteHelp.dynamicInventory)}>
+            <Checkbox
+              id="satellite-dynamic-inventory"
+              label="Create AAP Satellite inventory source"
+              isChecked={!!sat.dynamic_inventory_enabled}
+              onChange={(_, v) => set('component_config.satellite.dynamic_inventory_enabled', v)}
+            />
+            <div style={{ color: '#6a6e73', fontSize: '13px', marginTop: '6px' }}>
+              Created as an inventory source under {data.aap.organization || 'ADO'}-RHEL-Inventory, not as a separate top-level inventory.
+            </div>
+          </FormGroup>
+        </GridItem>
+        {!!sat.dynamic_inventory_enabled && (
           <>
-            {(showClient || showServer) && sectionTitle('Dynamic inventory')}
-            {renderTextField('Service Account Username', 'component_config.satellite.service_account_username', 'text', satelliteHelp.serviceAccountUsername)}
-            {renderTextField('Service Account Password', 'component_config.satellite.service_account_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.serviceAccountPassword)}
-            <GridItem span={12}>
-              <FormGroup label={labelWithHelp('Satellite Dynamic Inventory', satelliteHelp.dynamicInventory)}>
+            {renderTextField('Satellite Credential Name', 'component_config.satellite.credential_name', 'text', satelliteHelp.credentialName)}
+            {renderTextField('Inventory Source Name', 'component_config.satellite.inventory_source_name', 'text', satelliteHelp.inventorySourceName)}
+            {renderTextField('Inventory Host Filter', 'component_config.satellite.inventory_host_filter', 'text', satelliteHelp.inventoryHostFilter)}
+            {renderTextField('Update Cache Timeout', 'component_config.satellite.inventory_update_cache_timeout', 'number', satelliteHelp.updateCacheTimeout)}
+            {renderTextField('Inventory Verbosity', 'component_config.satellite.inventory_verbosity', 'number', satelliteHelp.inventoryVerbosity)}
+            <GridItem span={4}>
+              <FormGroup label={labelWithHelp('Overwrite Hosts', satelliteHelp.overwriteHosts)}>
                 <Checkbox
-                  id="satellite-dynamic-inventory"
-                  label="Create AAP Satellite inventory source"
-                  isChecked={!!sat.dynamic_inventory_enabled}
-                  onChange={(_, v) => set('component_config.satellite.dynamic_inventory_enabled', v)}
+                  id="satellite-inventory-overwrite"
+                  label="Overwrite"
+                  isChecked={sat.inventory_overwrite}
+                  onChange={(_, v) => set('component_config.satellite.inventory_overwrite', v)}
                 />
-                <div style={{ color: '#6a6e73', fontSize: '13px', marginTop: '6px' }}>
-                  Created as an inventory source under {data.aap.organization || 'ADO'}-RHEL-Inventory, not as a separate top-level inventory.
-                </div>
               </FormGroup>
             </GridItem>
-            {!!sat.dynamic_inventory_enabled && (
-              <>
-                {renderTextField('Satellite Credential Name', 'component_config.satellite.credential_name', 'text', satelliteHelp.credentialName)}
-                {renderTextField('Inventory Source Name', 'component_config.satellite.inventory_source_name', 'text', satelliteHelp.inventorySourceName)}
-                {renderTextField('Inventory Host Filter', 'component_config.satellite.inventory_host_filter', 'text', satelliteHelp.inventoryHostFilter)}
-                {renderTextField('Update Cache Timeout', 'component_config.satellite.inventory_update_cache_timeout', 'number', satelliteHelp.updateCacheTimeout)}
-                {renderTextField('Inventory Verbosity', 'component_config.satellite.inventory_verbosity', 'number', satelliteHelp.inventoryVerbosity)}
-                <GridItem span={4}>
-                  <FormGroup label={labelWithHelp('Overwrite Hosts', satelliteHelp.overwriteHosts)}>
-                    <Checkbox
-                      id="satellite-inventory-overwrite"
-                      label="Overwrite"
-                      isChecked={sat.inventory_overwrite}
-                      onChange={(_, v) => set('component_config.satellite.inventory_overwrite', v)}
-                    />
-                  </FormGroup>
-                </GridItem>
-                <GridItem span={4}>
-                  <FormGroup label={labelWithHelp('Overwrite Vars', satelliteHelp.overwriteVars)}>
-                    <Checkbox
-                      id="satellite-inventory-overwrite-vars"
-                      label="Overwrite variables"
-                      isChecked={sat.inventory_overwrite_vars}
-                      onChange={(_, v) => set('component_config.satellite.inventory_overwrite_vars', v)}
-                    />
-                  </FormGroup>
-                </GridItem>
-                <GridItem span={4}>
-                  <FormGroup label={labelWithHelp('Update On Launch', satelliteHelp.updateOnLaunch)}>
-                    <Checkbox
-                      id="satellite-inventory-update-on-launch"
-                      label="Update on launch"
-                      isChecked={sat.inventory_update_on_launch}
-                      onChange={(_, v) => set('component_config.satellite.inventory_update_on_launch', v)}
-                    />
-                  </FormGroup>
-                </GridItem>
-              </>
-            )}
-          </>
-        )}
-
-        {showOidc && (
-          <>
-            {sectionTitle('Keycloak / OIDC')}
-            <GridItem span={12}>
-              <p style={{ color: mutedTextColor, marginTop: 0 }}>
-                Creates confidential client <code>ado-satellite</code> in existing realm <code>rhlab</code>
-                using <code>infra.ado.rhbk_client</code>, then enables Satellite external login.
-              </p>
-            </GridItem>
-            {renderTextField('Keycloak URL', 'component_config.satellite.oidc.keycloak_url', 'text', satelliteHelp.oidcKeycloakUrl)}
-            {renderTextField('Realm', 'component_config.satellite.oidc.realm', 'text', satelliteHelp.oidcRealm)}
-            {renderTextField('Client ID', 'component_config.satellite.oidc.client_id', 'text', satelliteHelp.oidcClientId)}
-            {renderTextField('Issuer URL', 'component_config.satellite.oidc.issuer', 'text', satelliteHelp.oidcIssuer)}
-            {renderTextField('Client secret (optional)', 'component_config.satellite.oidc.client_secret', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.oidcClientSecret)}
-            {renderTextField('Keycloak admin user', 'component_config.satellite.oidc.admin_user', 'text', satelliteHelp.oidcAdminUser)}
-            {renderTextField('Keycloak admin password', 'component_config.satellite.oidc.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.oidcAdminPassword)}
-            {!showServer && renderTextField('Satellite admin password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.adminPassword)}
-            <GridItem span={6}>
-              <FormGroup label={labelWithHelp('Create Keycloak client', satelliteHelp.oidcCreateClient)}>
+            <GridItem span={4}>
+              <FormGroup label={labelWithHelp('Overwrite Vars', satelliteHelp.overwriteVars)}>
                 <Checkbox
-                  id="satellite-oidc-create-client"
-                  label="Create or update Keycloak client ado-satellite"
-                  isChecked={sat.oidc?.create_client !== false}
-                  onChange={(_, v) => set('component_config.satellite.oidc.create_client', v)}
+                  id="satellite-inventory-overwrite-vars"
+                  label="Overwrite variables"
+                  isChecked={sat.inventory_overwrite_vars}
+                  onChange={(_, v) => set('component_config.satellite.inventory_overwrite_vars', v)}
+                />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={4}>
+              <FormGroup label={labelWithHelp('Update On Launch', satelliteHelp.updateOnLaunch)}>
+                <Checkbox
+                  id="satellite-inventory-update-on-launch"
+                  label="Update on launch"
+                  isChecked={sat.inventory_update_on_launch}
+                  onChange={(_, v) => set('component_config.satellite.inventory_update_on_launch', v)}
                 />
               </FormGroup>
             </GridItem>
           </>
         )}
       </Grid>
-    </>
-  );
+    );
+
+    const renderOidcFields = () => (
+      <Grid hasGutter>
+        <GridItem span={12}>
+          <p style={{ color: mutedTextColor, marginTop: 0 }}>
+            Creates confidential client <code>ado-satellite</code> in existing realm <code>rhlab</code>
+            using <code>infra.ado.rhbk_client</code>, then enables Satellite external login.
+          </p>
+        </GridItem>
+        {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
+        {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
+        {renderTextField('Keycloak URL', 'component_config.satellite.oidc.keycloak_url', 'text', satelliteHelp.oidcKeycloakUrl)}
+        {renderTextField('Realm', 'component_config.satellite.oidc.realm', 'text', satelliteHelp.oidcRealm)}
+        {renderTextField('Client ID', 'component_config.satellite.oidc.client_id', 'text', satelliteHelp.oidcClientId)}
+        {renderTextField('Issuer URL', 'component_config.satellite.oidc.issuer', 'text', satelliteHelp.oidcIssuer)}
+        {renderTextField('Client secret (optional)', 'component_config.satellite.oidc.client_secret', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.oidcClientSecret)}
+        {renderTextField('Keycloak admin user', 'component_config.satellite.oidc.admin_user', 'text', satelliteHelp.oidcAdminUser)}
+        {renderTextField('Keycloak admin password', 'component_config.satellite.oidc.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.oidcAdminPassword)}
+        {renderTextField('Satellite admin password', 'component_config.satellite.admin_password', showSatelliteSecrets ? 'text' : 'password', satelliteHelp.adminPassword)}
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('Create Keycloak client', satelliteHelp.oidcCreateClient)}>
+            <Checkbox
+              id="satellite-oidc-create-client"
+              label="Create or update Keycloak client ado-satellite"
+              isChecked={sat.oidc?.create_client !== false}
+              onChange={(_, v) => set('component_config.satellite.oidc.create_client', v)}
+            />
+          </FormGroup>
+        </GridItem>
+      </Grid>
+    );
+
+    const renderSatelliteTabBody = tab => {
+      switch (tab) {
+        case 'satellite_client_tools':
+          return renderClientFields();
+        case 'satellite_server_install':
+        case 'satellite_content_view':
+        case 'satellite_capsule_install':
+          return renderServerFields({ includeTls: !selected.includes('satellite_client_tools') });
+        case 'satellite_dynamic_inventory':
+          return renderDynamicInventoryFields();
+        case 'satellite_oidc':
+          return renderOidcFields();
+        default:
+          return null;
+      }
+    };
+
+    return (
+      <>
+        {renderComponentOptions('satellite', 'Satellite Options', 'Select which Satellite resources to configure. Each selected option appears as a tab below (same pattern as Grafana / RHBK).')}
+        {satelliteTabs.length > 0 && (
+          <Button variant="link" onClick={() => toggleSecretRevealed('satellite', setShowSatelliteSecrets, showSatelliteSecrets)}>
+            {showSatelliteSecrets ? 'Hide Service Account' : 'Show Service Account'}
+          </Button>
+        )}
+        <Tabs
+          activeKey={activeSatelliteTab}
+          onSelect={(_, key) => setActiveSatelliteDetailTab(String(key))}
+          style={{ marginTop: '12px', marginBottom: '12px' }}
+        >
+          {satelliteTabs.map(tab => (
+            <Tab key={tab} eventKey={tab} title={componentOptionLabels[tab] || tab}>
+              <div style={{ paddingTop: '12px' }}>
+                {tab === activeSatelliteTab ? renderSatelliteTabBody(tab) : null}
+              </div>
+            </Tab>
+          ))}
+        </Tabs>
+        {satelliteTabs.length === 0 && (
+          <p style={{ color: mutedTextColor }}>Select Satellite client and/or server options to show the matching tabs.</p>
+        )}
+      </>
+    );
   };
 
   const renderIdmConfig = () => {
@@ -7452,7 +8625,7 @@ echo $TOKEN
       <>
         {renderComponentOptions('idm', 'IDM Options', 'Select which IDM resources to configure.')}
 
-        <Button variant="link" onClick={() => setShowIdmSecrets(!showIdmSecrets)}>
+        <Button variant="link" onClick={() => toggleSecretRevealed('idm', setShowIdmSecrets, showIdmSecrets)}>
           {showIdmSecrets ? 'Hide Secrets' : 'Show Secrets'}
         </Button>
         <br /><br />
@@ -7575,16 +8748,23 @@ echo $TOKEN
           copy.component_config.grafana.alerts_enabled = true;
         }
       }
+      // Cert-manager issuers are mutually exclusive; unchecking all → operator-only (mode cert).
+      if (component === 'cert_manager' && CERT_MANAGER_ISSUER_OPTIONS.includes(option)) {
+        next = current.includes(option) ? [] : [option];
+      }
       copy.component_options = {
         ...(copy.component_options || {}),
         [component]: next
       };
       if (!copy.component_config) copy.component_config = {};
-      if (['satellite', 'idm', 'grafana', 'gitlab', 'rhbk'].includes(component)) {
+      if (['satellite', 'idm', 'grafana', 'gitlab', 'rhbk', 'cert_manager'].includes(component)) {
         copy.component_config[component] = deepMerge(
           defaultComponentConfig(component),
           copy.component_config[component] || {}
         );
+      }
+      if (component === 'cert_manager' && CERT_MANAGER_ISSUER_OPTIONS.includes(option)) {
+        copy.component_config.cert_manager.mode = certManagerModeFromOptions(next);
       }
       if (component === 'satellite' && option === 'satellite_dynamic_inventory') {
         copy.component_config.satellite.dynamic_inventory_enabled = next.includes('satellite_dynamic_inventory');
@@ -7619,6 +8799,9 @@ echo $TOKEN
         if (!copy.component_config) copy.component_config = {};
         if (!copy.component_config.grafana) copy.component_config.grafana = {};
         copy.component_config.grafana.alerts_enabled = true;
+      } else if (component === 'cert_manager') {
+        // Issuers are mutually exclusive — "all" clears to operator-only.
+        copy.component_options[component] = [];
       } else {
         copy.component_options[component] = enabled ? [...(componentOptionDefaults[component] || [])] : [];
       }
@@ -7627,6 +8810,16 @@ echo $TOKEN
         copy.component_config[component] = deepMerge(
           defaultComponentConfig(component),
           copy.component_config[component] || {}
+        );
+      }
+      if (component === 'cert_manager') {
+        if (!copy.component_config) copy.component_config = {};
+        copy.component_config.cert_manager = deepMerge(
+          defaultComponentConfig('cert_manager'),
+          copy.component_config.cert_manager || {}
+        );
+        copy.component_config.cert_manager.mode = certManagerModeFromOptions(
+          copy.component_options.cert_manager
         );
       }
       if (component === 'satellite') {
@@ -8008,7 +9201,7 @@ echo $TOKEN
                 id="show-aws-secrets"
                 label="Show AWS credential fields"
                 isChecked={showAwsSecrets}
-                onChange={(_, v) => setShowAwsSecrets(v)}
+                onChange={(_, v) => setSecretRevealed('aws', setShowAwsSecrets, v)}
               />
             </GridItem>
             {renderTextField(
@@ -8258,7 +9451,7 @@ echo $TOKEN
                 value={data.openshift.token}
                 onChange={(_, v) => set('openshift.token', v)}
               />
-              <Button variant="secondary" onClick={() => setShowOpenShiftToken(!showOpenShiftToken)}>
+              <Button variant="secondary" onClick={() => toggleSecretRevealed('openshift', setShowOpenShiftToken, showOpenShiftToken)}>
                 {showOpenShiftToken ? 'Hide' : 'Show'}
               </Button>
             </div>
@@ -8347,6 +9540,8 @@ echo $TOKEN
                     idm_ca_bundle_content_base64: base64,
                     idm_ca_bundle_file: `files/certs/${(file.name || 'idm-root-ca.crt').replace(/[^A-Za-z0-9._-]+/g, '-')}`
                   };
+                  copy.component_options = copy.component_options || {};
+                  copy.component_options.cert_manager = ['idm_acme'];
                   return copy;
                 });
               };
@@ -8408,39 +9603,54 @@ echo $TOKEN
   );
 
   const renderCertManagerConfig = () => {
-    const mode = data.component_config?.cert_manager?.mode || 'cert';
-    const certTab =
-      activeCertManagerTab === 'aws_pca' || activeCertManagerTab === 'custom'
-        ? activeCertManagerTab
-        : mode === 'aws_pca'
-          ? 'aws_pca'
-          : mode === 'cert'
-            ? 'custom'
-            : 'idm_acme';
+    const selected = data.component_options?.cert_manager || [];
+    const issuer = CERT_MANAGER_ISSUER_OPTIONS.find(item => selected.includes(item)) || null;
 
     return (
       <>
         <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '12px' }}>
-          How cert-manager issues or supplies <em>per-app</em> certificates (IdM ACME, AWS PCA, or custom PEMs).
+          Deploy cert-manager when this app is selected. Optionally pick one issuer below
+          (IdM ACME, AWS PCA, or custom PEMs), or leave all unchecked for operator-only.
           The OpenShift router wildcard is configured separately under <strong>Default Ingress Cert</strong>.
         </div>
-        <Tabs
-          activeKey={certTab}
-          onSelect={(_, key) => {
-            setActiveCertManagerTab(key);
-            if (key === 'idm_acme') set('component_config.cert_manager.mode', 'idm_acme');
-            else if (key === 'aws_pca') set('component_config.cert_manager.mode', 'aws_pca');
-            else if (key === 'custom') set('component_config.cert_manager.mode', 'cert');
+        <div
+          style={{
+            marginBottom: '18px',
+            padding: '12px',
+            border: `1px solid ${borderColor}`,
+            borderRadius: '6px',
+            background: isDark ? '#1f1f1f' : '#fafafa'
           }}
         >
-          <Tab eventKey="idm_acme" title="IdM ACME" />
-          <Tab eventKey="aws_pca" title="AWS PCA" />
-          <Tab eventKey="custom" title="Custom cert" />
-        </Tabs>
-        <br />
-        {certTab === 'idm_acme' && renderOpenShiftCertIdmConfig()}
-        {certTab === 'aws_pca' && renderOpenShiftCertAwsConfig()}
-        {certTab === 'custom' && renderOpenShiftCertCustomConfig()}
+          <div style={{ fontWeight: 700, marginBottom: '4px' }}>Cert Manager Issuer Options</div>
+          <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '10px' }}>
+            Select one issuer, or uncheck to clear (cert-manager operator only — no ACME/PCA/custom JT).
+            Contoller workflow nodes follow this choice plus Default Ingress Cert.
+          </div>
+          <Grid hasGutter>
+            {CERT_MANAGER_ISSUER_OPTIONS.map(option => (
+              <GridItem key={option} span={4}>
+                <Checkbox
+                  id={`cert-manager-issuer-${option}`}
+                  label={componentOptionLabels[option] || option}
+                  isChecked={selected.includes(option)}
+                  onChange={() => toggleComponentOption('cert_manager', option)}
+                />
+              </GridItem>
+            ))}
+          </Grid>
+        </div>
+        {issuer === 'idm_acme' && renderOpenShiftCertIdmConfig()}
+        {issuer === 'aws_pca' && renderOpenShiftCertAwsConfig()}
+        {issuer === 'custom' && renderOpenShiftCertCustomConfig()}
+        {!issuer && (
+          <div style={{ color: mutedTextColor, fontSize: '13px' }}>
+            No issuer selected — bootstrap deploys cert-manager only
+            {data.component_options?.openshift?.includes('update_default_ingress')
+              ? ' (plus Update Default Ingress when that OpenShift option is on).'
+              : '.'}
+          </div>
+        )}
       </>
     );
   };
@@ -8545,16 +9755,34 @@ echo $TOKEN
     return (
       <Grid hasGutter>
         <GridItem span={6}>
-          <FormGroup label="HTPasswd action">
+          <FormGroup label="User change (IdP stays)">
             <select
               value={data.openshift.htpasswd_action || 'add'}
               onChange={e => set('openshift.htpasswd_action', e.target.value)}
               style={{ width: '100%', height: '36px' }}
+              title="add merges users, replace rewrites secret, remove drops named users. Use -e state=absent to delete the Login button."
             >
-              <option value="add">add</option>
-              <option value="replace">replace</option>
-              <option value="remove">remove</option>
+              <option value="add">add (merge users)</option>
+              <option value="replace">replace (rewrite secret)</option>
+              <option value="remove">remove (drop named users)</option>
             </select>
+          </FormGroup>
+        </GridItem>
+        <GridItem span={6}>
+          <FormGroup label={labelWithHelp('Login button name (IdP)', openshiftHelp.htpasswdIdpName)}>
+            <TextInput
+              value={data.openshift.htpasswd_idp_name || 'htpasswd-admin'}
+              onChange={(_, v) => {
+                const name = String(v || '').trim() || 'htpasswd-admin';
+                setData(prev => {
+                  const copy = JSON.parse(JSON.stringify(prev));
+                  if (!copy.openshift) copy.openshift = {};
+                  copy.openshift.htpasswd_idp_name = name;
+                  copy.openshift.htpasswd_secret = `${name}-secret`;
+                  return copy;
+                });
+              }}
+            />
           </FormGroup>
         </GridItem>
         {users.map((user, index) => (
@@ -8573,7 +9801,7 @@ echo $TOKEN
                       value={user.password || ''}
                       onChange={(_, v) => updateUser(index, 'password', v)}
                     />
-                    <Button variant="secondary" onClick={() => setShowHtpasswdPassword(!showHtpasswdPassword)}>
+                    <Button variant="secondary" onClick={() => toggleSecretRevealed('htpasswd', setShowHtpasswdPassword, showHtpasswdPassword)}>
                       {showHtpasswdPassword ? 'Hide' : 'Show'}
                     </Button>
                   </div>
@@ -8704,6 +9932,265 @@ echo $TOKEN
       )}
     </Grid>
   );
+
+  const renderOpenShiftIntegratedImageRegistryConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={12}>
+        <div style={{ color: mutedTextColor, marginBottom: '8px' }}>
+          Enables the OpenShift integrated image registry
+          (<code>configs.imageregistry.operator.openshift.io/cluster</code>)
+          for restricted or proxy environments. Success requires the registry to
+          become operational — not only a Config patch. Image mirroring is a
+          separate future feature.
+        </div>
+      </GridItem>
+      <GridItem span={12}>
+        <FormGroup>
+          <Checkbox
+            id="openshift-install-image-registry-during-bootstrap"
+            label={labelWithHelp(
+              'Install during Bootstrap',
+              openshiftHelp.imageRegistryInstallDuringBootstrap
+            )}
+            isChecked={data.openshift.install_image_registry_during_bootstrap !== false}
+            onChange={(_, checked) => set('openshift.install_image_registry_during_bootstrap', checked)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={12}>
+        <FormGroup>
+          <Checkbox
+            id="openshift-integrated-registry-default-route"
+            label={labelWithHelp(
+              'Enable default registry route',
+              openshiftHelp.imageRegistryDefaultRoute
+            )}
+            isChecked={data.openshift.integrated_registry_default_route !== false}
+            onChange={(_, checked) => set('openshift.integrated_registry_default_route', checked)}
+          />
+        </FormGroup>
+      </GridItem>
+    </Grid>
+  );
+
+  const renderOpenShiftNfsCsiConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={12}>
+        <FormGroup>
+          <Checkbox
+            id="openshift-install-nfs-during-bootstrap"
+            label={labelWithHelp('Install during Bootstrap', openshiftHelp.nfsInstallDuringBootstrap)}
+            isChecked={data.openshift.install_nfs_during_bootstrap !== false}
+            onChange={(_, checked) => set('openshift.install_nfs_during_bootstrap', checked)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('NFS server', openshiftHelp.nfsServer)} isRequired>
+          <TextInput
+            value={data.openshift.nfs_server || ''}
+            onChange={(_, v) => set('openshift.nfs_server', v)}
+            placeholder="192.168.0.6"
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('NFS share (export path)', openshiftHelp.nfsShare)} isRequired>
+          <TextInput
+            value={data.openshift.nfs_share || ''}
+            onChange={(_, v) => set('openshift.nfs_share', v)}
+            placeholder="/volume1/openshift"
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('StorageClass name', openshiftHelp.nfsStorageClass)}>
+          <TextInput
+            value={data.openshift.nfs_storage_class_name || 'synology-nfs-csi'}
+            onChange={(_, v) => set('openshift.nfs_storage_class_name', v)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={3}>
+        <FormGroup label={labelWithHelp('NFS version', 'Protocol version passed to the StorageClass. Default 4.1.')}>
+          <TextInput
+            value={data.openshift.nfs_version || '4.1'}
+            onChange={(_, v) => set('openshift.nfs_version', v)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={3}>
+        <FormGroup label={labelWithHelp('CSI chart version', 'csi-driver-nfs Helm chart version (no leading v).')}>
+          <TextInput
+            value={data.openshift.nfs_driver_version || '4.11.0'}
+            onChange={(_, v) => set('openshift.nfs_driver_version', v)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup>
+          <Checkbox
+            id="openshift-nfs-create-test-ns"
+            label="Create sample test namespace"
+            isChecked={data.openshift.nfs_create_test_namespace !== false}
+            onChange={(_, checked) => set('openshift.nfs_create_test_namespace', checked)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup>
+          <Checkbox
+            id="openshift-nfs-create-test-pvc"
+            label="Create sample test PVC"
+            isChecked={!!data.openshift.nfs_create_test_pvc}
+            onChange={(_, checked) => set('openshift.nfs_create_test_pvc', checked)}
+          />
+        </FormGroup>
+      </GridItem>
+    </Grid>
+  );
+
+  const renderOpenShiftIscsiCsiConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={12}>
+        <FormGroup>
+          <Checkbox
+            id="openshift-install-iscsi-during-bootstrap"
+            label={labelWithHelp('Install during Bootstrap', 'When checked, Run Bootstrap installs Synology iSCSI CSI on the cluster.')}
+            isChecked={data.openshift.install_iscsi_during_bootstrap !== false}
+            onChange={(_, checked) => set('openshift.install_iscsi_during_bootstrap', checked)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('DSM host', openshiftHelp.iscsiDsmHost)} isRequired>
+          <TextInput
+            value={data.openshift.iscsi_dsm_host || ''}
+            onChange={(_, v) => set('openshift.iscsi_dsm_host', v)}
+            placeholder="192.168.0.6"
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={3}>
+        <FormGroup label="DSM port">
+          <TextInput
+            type="number"
+            value={String(data.openshift.iscsi_dsm_port ?? 5000)}
+            onChange={(_, v) => set('openshift.iscsi_dsm_port', Number(v) || 5000)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={3}>
+        <FormGroup>
+          <Checkbox
+            id="openshift-iscsi-dsm-https"
+            label="DSM HTTPS"
+            isChecked={!!data.openshift.iscsi_dsm_https}
+            onChange={(_, checked) => set('openshift.iscsi_dsm_https', checked)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('DSM username', openshiftHelp.iscsiDsmUser)} isRequired>
+          <TextInput
+            value={data.openshift.iscsi_dsm_username || ''}
+            onChange={(_, v) => set('openshift.iscsi_dsm_username', v)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('DSM password', openshiftHelp.iscsiDsmPassword)} isRequired>
+          <TextInput
+            type="password"
+            value={data.openshift.iscsi_dsm_password || ''}
+            onChange={(_, v) => set('openshift.iscsi_dsm_password', v)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup label={labelWithHelp('StorageClass name', openshiftHelp.iscsiStorageClass)}>
+          <TextInput
+            value={data.openshift.iscsi_storage_class_name || 'synology-iscsi-storage'}
+            onChange={(_, v) => set('openshift.iscsi_storage_class_name', v)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup label="DSM volume location">
+          <TextInput
+            value={data.openshift.iscsi_location || '/volume1'}
+            onChange={(_, v) => set('openshift.iscsi_location', v)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup>
+          <Checkbox
+            id="openshift-iscsi-is-default"
+            label="Mark StorageClass as default"
+            isChecked={data.openshift.iscsi_is_default !== false}
+            onChange={(_, checked) => set('openshift.iscsi_is_default', checked)}
+          />
+        </FormGroup>
+      </GridItem>
+      <GridItem span={6}>
+        <FormGroup>
+          <Checkbox
+            id="openshift-iscsi-snapshotter"
+            label="Install volume snapshotter"
+            isChecked={data.openshift.iscsi_install_snapshotter !== false}
+            onChange={(_, checked) => set('openshift.iscsi_install_snapshotter', checked)}
+          />
+        </FormGroup>
+      </GridItem>
+    </Grid>
+  );
+
+  const renderOpenShiftStorageClassConfig = () => {
+    const nfsOn = data.openshift.storage_class_nfs !== false;
+    const iscsiOn = !!data.openshift.storage_class_iscsi;
+    const active = storageClassDriverTab === 'iscsi' ? 'iscsi' : 'nfs';
+    return (
+      <Grid hasGutter>
+        <GridItem span={12}>
+          <p style={{ color: mutedTextColor, marginTop: 0 }}>
+            Install OpenShift StorageClass drivers. Enable NFS CSI and/or Synology iSCSI below,
+            fill fields, then Run Bootstrap.
+          </p>
+        </GridItem>
+        <GridItem span={12}>
+          <Tabs
+            activeKey={active}
+            onSelect={(_, key) => setStorageClassDriverTab(String(key))}
+            aria-label="Storage class drivers"
+          >
+            <Tab eventKey="nfs" title={`NFS CSI${nfsOn ? '' : ' (off)'}`}>
+              <div style={{ paddingTop: '12px' }}>
+                <Checkbox
+                  id="storage-class-enable-nfs"
+                  label="Enable NFS CSI"
+                  isChecked={nfsOn}
+                  onChange={(_, checked) => set('openshift.storage_class_nfs', checked)}
+                />
+                {nfsOn && <div style={{ marginTop: '12px' }}>{renderOpenShiftNfsCsiConfig()}</div>}
+              </div>
+            </Tab>
+            <Tab eventKey="iscsi" title={`Synology iSCSI${iscsiOn ? '' : ' (off)'}`}>
+              <div style={{ paddingTop: '12px' }}>
+                <Checkbox
+                  id="storage-class-enable-iscsi"
+                  label="Enable Synology iSCSI CSI"
+                  isChecked={iscsiOn}
+                  onChange={(_, checked) => set('openshift.storage_class_iscsi', checked)}
+                />
+                {iscsiOn && <div style={{ marginTop: '12px' }}>{renderOpenShiftIscsiCsiConfig()}</div>}
+              </div>
+            </Tab>
+          </Tabs>
+        </GridItem>
+      </Grid>
+    );
+  };
 
   const renderAgentInstallerConfig = () => {
     const config = agentInstallerConfig();
@@ -9014,15 +10501,14 @@ echo $TOKEN
         {editingNode && (
           <Modal
             variant={ModalVariant.medium}
-            title={`Edit Node ${editingNodeIndex + 1}${editingNode.hostname ? `: ${editingNode.hostname}` : ''}`}
             isOpen
             onClose={() => setAgentNodeEditorIndex(null)}
-            actions={[
-              <Button key="done" variant="primary" onClick={() => setAgentNodeEditorIndex(null)}>
-                Done
-              </Button>
-            ]}
+            aria-label={`Edit Node ${editingNodeIndex + 1}`}
           >
+            <ModalHeader
+              title={`Edit Node ${editingNodeIndex + 1}${editingNode.hostname ? `: ${editingNode.hostname}` : ''}`}
+            />
+            <ModalBody>
             <Form>
               {renderAgentNodeField(editingNodeIndex, 'Hostname', 'hostname')}
               <FormGroup label={labelWithHelp('Role', 'Control plane (master) or worker node role in the cluster.')}>
@@ -9064,6 +10550,12 @@ echo $TOKEN
               {renderAgentNodeField(editingNodeIndex, 'Labels', 'labels')}
               {renderAgentNodeField(editingNodeIndex, 'Taints', 'taints')}
             </Form>
+            </ModalBody>
+            <ModalFooter>
+              <Button key="done" variant="primary" onClick={() => setAgentNodeEditorIndex(null)}>
+                Done
+              </Button>
+            </ModalFooter>
           </Modal>
         )}
 
@@ -9251,7 +10743,7 @@ echo $TOKEN
                     value={data.jira.token}
                     onChange={(_, v) => set('jira.token', v)}
                   />
-                  <Button variant="secondary" onClick={() => setShowJiraToken(!showJiraToken)}>
+                  <Button variant="secondary" onClick={() => toggleSecretRevealed('jira', setShowJiraToken, showJiraToken)}>
                     {showJiraToken ? 'Hide' : 'Show'}
                   </Button>
                 </div>
@@ -9268,12 +10760,130 @@ echo $TOKEN
     return appsDomain ? `central.${appsDomain}` : '';
   };
 
+  const renderOcpVirtualizationConfig = () => {
+    const ocpApps = data.component_apps?.openshift || [];
+    const mtvOn = ocpApps.includes('mtv');
+    const acmOn = ocpApps.includes('acm');
+    const obsOn = !!data.component_config?.acm?.observability_enabled;
+    const setOpenShiftApp = (app, enabled) => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_apps) copy.component_apps = {};
+        let apps = [...(copy.component_apps.openshift || [])];
+        const has = apps.includes(app);
+        if (enabled && !has) apps.push(app);
+        if (!enabled && has) apps = apps.filter(a => a !== app);
+        copy.component_apps.openshift = apps;
+        if (!copy.components) copy.components = [];
+        if (enabled && !copy.components.includes('openshift') && !copy.components.includes('all')) {
+          copy.components = [...copy.components.filter(c => c !== 'all'), 'openshift'];
+        }
+        return copy;
+      });
+    };
+    return (
+      <>
+        <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+          Installs the OpenShift Virtualization operator and HyperConverged CR
+          (namespace <code>openshift-cnv</code>). Hostname / Storage / Replicas
+          do not apply here — those were placeholders.
+        </p>
+        <Grid hasGutter>
+          {renderTextField(
+            'Operator channel',
+            'component_config.ocp_virtualization.channel',
+            'text',
+            'OLM channel for kubevirt-hyperconverged. Default: stable.'
+          )}
+          <GridItem span={12}>
+            <Checkbox
+              id="ocp-virt-kube-secondary-dns"
+              label="Enable KubeSecondaryDNS"
+              description="HyperConverged featureGates.deployKubeSecondaryDNS (fleet-friendly VM DNS)."
+              isChecked={!!data.component_config?.ocp_virtualization?.enable_kube_secondary_dns}
+              onChange={(_, v) => set('component_config.ocp_virtualization.enable_kube_secondary_dns', v)}
+            />
+          </GridItem>
+          <GridItem span={12}>
+            <Checkbox
+              id="ocp-virt-install-mtv"
+              label="Also install Migration Toolkit for Virtualization (MTV)"
+              description="Adds the MTV OpenShift app (mtv-operator + ForkliftController). Open the MTV tab for channel/namespace."
+              isChecked={mtvOn}
+              onChange={(_, checked) => setOpenShiftApp('mtv', checked)}
+            />
+          </GridItem>
+          <GridItem span={12}>
+            <Checkbox
+              id="ocp-virt-acm-observability"
+              label="Enable Multicluster Observability (Fleet Virt metrics)"
+              description="This is an ACM hub feature — not part of the Virt operator. Selects ACM and turns on Observability; fill S3 (MinIO) below or on the ACM tab."
+              isChecked={obsOn}
+              onChange={(_, checked) => {
+                if (checked) setOpenShiftApp('acm', true);
+                set('component_config.acm.observability_enabled', checked);
+              }}
+            />
+          </GridItem>
+          {obsOn && (
+            <>
+              <GridItem span={12}>
+                <p style={{ color: mutedTextColor, margin: 0 }}>
+                  Observability needs S3-compatible object storage for Thanos
+                  (lab MinIO works). Same fields as the ACM tab.
+                </p>
+              </GridItem>
+              {renderStorageClassField(
+                'Observability PVC storage class (optional)',
+                'component_config.acm.observability_storage_class',
+                'StorageClass for MCO PVCs. Empty uses the cluster default.'
+              )}
+              {renderTextField(
+                'S3 bucket',
+                'component_config.acm.observability_s3_bucket',
+                'text',
+                'Thanos metrics bucket. Example: acm-observability'
+              )}
+              {renderTextField(
+                'S3 endpoint',
+                'component_config.acm.observability_s3_endpoint',
+                'text',
+                'Host:port without scheme. Example: minio.minio.svc:9000'
+              )}
+              <GridItem span={12}>
+                <Checkbox
+                  id="ocp-virt-obs-s3-insecure"
+                  label="S3 insecure (HTTP / skip TLS verify)"
+                  isChecked={data.component_config?.acm?.observability_s3_insecure !== false}
+                  onChange={(_, v) => set('component_config.acm.observability_s3_insecure', v)}
+                />
+              </GridItem>
+              {renderTextField(
+                'S3 access key',
+                'component_config.acm.observability_s3_access_key',
+                'password',
+                'Stored in vault_acm.yml'
+              )}
+              {renderTextField(
+                'S3 secret key',
+                'component_config.acm.observability_s3_secret_key',
+                'password',
+                'Stored in vault_acm.yml'
+              )}
+            </>
+          )}
+        </Grid>
+      </>
+    );
+  };
+
   const renderAcmConfig = () => (
     <>
       <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
         Installs the ACM operator and MultiClusterHub into namespace{' '}
-        <code>open-cluster-management</code>. Operator channel is the only
-        preflight setting; other values use collection defaults.
+        <code>open-cluster-management</code>. Optional Multicluster Observability
+        needs S3-compatible object storage (lab MinIO works). Fleet Virtualization
+        Overview stays empty until Observability is enabled.
       </p>
       <Grid hasGutter>
         {renderTextField(
@@ -9282,14 +10892,122 @@ echo $TOKEN
           'text',
           'Catalog channel for advanced-cluster-management. Lab default: release-2.17.'
         )}
+        <GridItem span={12}>
+          <Checkbox
+            id="acm-observability-enabled"
+            label="Enable Multicluster Observability"
+            description="Deploys MultiClusterObservability + thanos-object-storage secret. Required for Fleet Virtualization metrics."
+            isChecked={!!data.component_config?.acm?.observability_enabled}
+            onChange={(_, v) => set('component_config.acm.observability_enabled', v)}
+          />
+        </GridItem>
+        {data.component_config?.acm?.observability_enabled && (
+          <>
+            {renderStorageClassField(
+              'Observability PVC storage class (optional)',
+              'component_config.acm.observability_storage_class',
+              'StorageClass for MCO PVCs. Empty uses the cluster default.'
+            )}
+            {renderTextField(
+              'S3 bucket',
+              'component_config.acm.observability_s3_bucket',
+              'text',
+              'Thanos metrics bucket. Example: acm-observability'
+            )}
+            {renderTextField(
+              'S3 endpoint',
+              'component_config.acm.observability_s3_endpoint',
+              'text',
+              'Host:port without scheme. Example: minio.minio.svc:9000'
+            )}
+            <GridItem span={12}>
+              <Checkbox
+                id="acm-observability-s3-insecure"
+                label="S3 insecure (HTTP / skip TLS verify)"
+                isChecked={data.component_config?.acm?.observability_s3_insecure !== false}
+                onChange={(_, v) => set('component_config.acm.observability_s3_insecure', v)}
+              />
+            </GridItem>
+            {renderTextField(
+              'S3 access key',
+              'component_config.acm.observability_s3_access_key',
+              'password',
+              'Stored in vault_acm.yml'
+            )}
+            {renderTextField(
+              'S3 secret key',
+              'component_config.acm.observability_s3_secret_key',
+              'password',
+              'Stored in vault_acm.yml'
+            )}
+          </>
+        )}
+        <GridItem span={12}><Checkbox id="acm-policy-enabled" label="Generate namespace-label policy" isChecked={!!data.component_config?.acm?.policy_enabled} onChange={(_, v) => set('component_config.acm.policy_enabled', v)} /></GridItem>
+        {data.component_config?.acm?.policy_enabled && <>
+          <GridItem span={12}><p>Produces policy and placement YAML. Inform reports missing namespaces/labels; enforce creates or updates them after you apply the policy. Existing labels are preserved. Select an explicit cluster set and cluster label.</p></GridItem>
+          {renderTextField('Policy name', 'component_config.acm.policy_name')}
+          {renderTextField('Policy namespace on ACM hub', 'component_config.acm.policy_namespace')}
+          {renderTextField('Target namespace on managed clusters', 'component_config.acm.policy_target_namespace')}
+          {renderTextField('Required label key', 'component_config.acm.policy_label_key')}
+          {renderTextField('Required label value', 'component_config.acm.policy_label_value')}
+          {renderTextField('Managed cluster set', 'component_config.acm.policy_cluster_set')}
+          {renderTextField('Cluster selection label key', 'component_config.acm.policy_selector_key')}
+          {renderTextField('Cluster selection label value', 'component_config.acm.policy_selector_value')}
+          <GridItem span={6}><FormGroup label="Policy remediation"><select aria-label="Policy remediation" value={data.component_config.acm.policy_remediation || 'inform'} onChange={e => set('component_config.acm.policy_remediation', e.target.value)} style={{ width: '100%', padding: '8px' }}><option value="inform">Inform only</option><option value="enforce">Enforce after applying policy</option></select></FormGroup></GridItem>
+        </>}
+      </Grid>
+    </>
+  );
+
+  const renderMtvConfig = () => (
+    <>
+      <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+        Installs <code>mtv-operator</code> and a <code>ForkliftController</code> in{' '}
+        <code>openshift-mtv</code>. Also select <strong>OpenShift Virtualization</strong>{' '}
+        when this cluster is a migration target.
+      </p>
+      <Grid hasGutter>
+        {renderTextField(
+          'Operator Channel',
+          'component_config.mtv.channel',
+          'text',
+          'Catalog channel for mtv-operator. Default: release-v2.12 (must exist in Software Catalog).'
+        )}
+        {renderTextField(
+          'Namespace',
+          'component_config.mtv.namespace',
+          'text',
+          'Operator namespace. Default: openshift-mtv.'
+        )}
+      </Grid>
+    </>
+  );
+
+  const renderOcpComplianceConfig = () => (
+    <>
+      <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
+        Installs the OpenShift Compliance Operator into <code>openshift-compliance</code>
+        (playbook <code>playbooks/ocp_compliance/ado-deploy-bootstrap.yml</code>).
+      </p>
+      <Grid hasGutter>
+        {renderTextField(
+          'Operator namespace',
+          'component_config.ocp_compliance.operator_namespace',
+          'text',
+          'Namespace for the Compliance Operator. Default: openshift-compliance.'
+        )}
+        {renderTextField(
+          'Operator channel',
+          'component_config.ocp_compliance.operator_channel',
+          'text',
+          'OLM channel. Default: stable.'
+        )}
       </Grid>
     </>
   );
 
   const renderAcsConfig = () => {
-    const acsHostnameHelp = defaultAcsCentralHostname()
-      ? `Central route hostname. Default when empty: ${defaultAcsCentralHostname()}`
-      : 'Central route hostname (set OpenShift apps domain for a default).';
+    const derivedCentralHost = defaultAcsCentralHostname();
 
     return (
       <>
@@ -9299,12 +11017,19 @@ echo $TOKEN
           'Optional RHACS vulnerability report job templates and workflow (Red Hat source, raw, age, CVE enriched).'
         )}
         <Grid hasGutter>
-          {renderTextField(
-            'Central Route Hostname',
-            'component_config.acs.hostname',
-            'text',
-            acsHostnameHelp
-          )}
+          <GridItem span={6}>
+            <FormGroup
+              label={labelWithHelp(
+                'Central Route Hostname',
+                'Set automatically from OpenShift apps domain as central.<apps_domain>. Not editable here — ACS install owns the route host.'
+              )}
+            >
+              <TextInput
+                value={derivedCentralHost || '(set OpenShift apps domain)'}
+                isReadOnly
+              />
+            </FormGroup>
+          </GridItem>
           {renderStorageClassField(
             'Storage Class',
             'component_config.acs.storage',
@@ -9599,7 +11324,24 @@ echo $TOKEN
           {renderTextField('Hostname (legacy)', 'component_config.minio.hostname', 'text', 'Optional alias used when console hostname is empty.')}
           {renderStorageClassField('Storage Class', 'component_config.minio.storage', defaultComponentHelp.storage)}
           {renderTextField('Root user', 'component_config.minio.root_user', 'text')}
-          {renderTextField('Root password', 'component_config.minio.root_password', 'password')}
+          <GridItem span={6}>
+            <FormGroup label="Root password">
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <TextInput
+                  id="component_config.minio.root_password"
+                  type={showMinioRootPassword ? 'text' : 'password'}
+                  value={minio.root_password || ''}
+                  onChange={(_, v) => set('component_config.minio.root_password', v)}
+                />
+                <Button
+                  variant="secondary"
+                  onClick={() => toggleSecretRevealed('minioRoot', setShowMinioRootPassword, showMinioRootPassword)}
+                >
+                  {showMinioRootPassword ? 'Hide' : 'Show'}
+                </Button>
+              </div>
+            </FormGroup>
+          </GridItem>
         </Grid>
         {showOidc && (
           <Grid hasGutter style={{ marginTop: '12px' }}>
@@ -10118,6 +11860,54 @@ echo $TOKEN
     );
   };
 
+  const showAssistantStep = (step) => {
+    const highlight = (idOrEl) => {
+      const target = typeof idOrEl === 'string' ? document.getElementById(idOrEl) : idOrEl;
+      if (!target) return;
+      document.querySelectorAll('.ado-assistant-highlight').forEach(el => el.classList.remove('ado-assistant-highlight'));
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      target.classList.add('ado-assistant-highlight');
+      target.focus?.({ preventScroll: true });
+      if (window.innerWidth < 1000) setAssistantOpen(false);
+      window.setTimeout(() => target.classList.remove('ado-assistant-highlight'), 6000);
+    };
+
+    if (String(step).startsWith('local-')) {
+      setActiveMainTab('core');
+      setAapOpen(true);
+      if (step === 'local-playbooks') setComponentRunnerOpen(true);
+      window.setTimeout(() => {
+        const map = {
+          'local-mode': 'assistant-not-using-aap',
+          'local-env': 'assistant-core-environment',
+          'local-components': 'assistant-component-config',
+          'local-options': 'assistant-ansible-extra-args',
+          'local-bootstrap': 'assistant-run-bootstrap',
+          'local-playbooks': 'playbook-runner'
+        };
+        const id = map[step] || 'aap-configuration';
+        if (step === 'local-bootstrap') {
+          highlight(document.getElementById(id) || document.querySelector('.ado-console-toolbar'));
+          return;
+        }
+        if (step === 'local-playbooks') {
+          highlight(document.getElementById('playbook-runner') || document.getElementById('aap-configuration'));
+          return;
+        }
+        highlight(id);
+      }, 120);
+      return;
+    }
+
+    setActiveMainTab('core');
+    setAapOpen(true);
+    setActiveAapConfigTab('install');
+    window.setTimeout(() => {
+      const keys = { connection: 'assistant-aap-connection', namespace: 'component_config.aap.namespace', version: 'assistant-aap-version', storage: 'component_config.aap.storage-field' };
+      highlight(keys[step] || 'install-aap-toggle');
+    }, 120);
+  };
+
   const renderAapInstallCard = () => {
     const aapCfg = data.component_config?.aap || {};
     return (
@@ -10139,6 +11929,7 @@ echo $TOKEN
         <GridItem span={6}>
           <FormGroup label={labelWithHelp('OpenShift API Host', openshiftHelp.apiHost)}>
             <TextInput
+              id="assistant-aap-connection"
               value={data.openshift?.api_host || ''}
               onChange={(_, v) => set('openshift.api_host', v)}
             />
@@ -10162,7 +11953,7 @@ echo $TOKEN
                 value={data.openshift?.token || ''}
                 onChange={(_, v) => set('openshift.token', v)}
               />
-              <Button variant="secondary" onClick={() => setShowOpenShiftToken(!showOpenShiftToken)}>
+              <Button variant="secondary" onClick={() => toggleSecretRevealed('openshift', setShowOpenShiftToken, showOpenShiftToken)}>
                 {showOpenShiftToken ? 'Hide' : 'Show'}
               </Button>
             </div>
@@ -10173,7 +11964,7 @@ echo $TOKEN
         {renderTextField('Replicas', 'component_config.aap.replicas', 'number', 'Controller replicas (default 1).')}
         {renderTextField('Namespace', 'component_config.aap.namespace')}
         <GridItem span={6}>
-          <FormGroup label="AAP Version">
+          <FormGroup label="AAP Version" id="assistant-aap-version" tabIndex={-1}>
             <select
               value={aapCompactVersion(aapCfg.deployment_version || data.aap?.version)}
               onChange={e => set('component_config.aap.deployment_version', aapDottedVersion(e.target.value))}
@@ -10225,20 +12016,105 @@ echo $TOKEN
       data.pre_installs?.openshift_agent_enabled
       || data.pre_installs?.openshift_agent === true
     );
+    const selectedCatalog = Array.isArray(data.component_config?.catalog_operators?.operators)
+      ? data.component_config.catalog_operators.operators
+      : [];
+    const selectedNames = new Set(selectedCatalog.map(item => item.name).filter(Boolean));
+    const availableOperators = Array.isArray(catalogOperatorLookup.operators)
+      ? catalogOperatorLookup.operators
+      : [];
+    const filterText = String(catalogOperatorLookup.filter || '').trim().toLowerCase();
+    const filteredOperators = filterText
+      ? availableOperators.filter(op => {
+        const hay = `${op.name} ${op.displayName || ''} ${op.source || ''}`.toLowerCase();
+        return hay.includes(filterText);
+      })
+      : availableOperators;
+
+    const lookupCatalogOperators = async () => {
+      const apiHost = String(data.openshift?.api_host || '').trim();
+      const token = String(data.openshift?.token || '').trim();
+      if (!apiHost || !token) {
+        setCatalogOperatorLookup(prev => ({
+          ...prev,
+          error: 'Enter OpenShift API host and token first (Core Environment → OpenShift).'
+        }));
+        return;
+      }
+      setCatalogOperatorLookup(prev => ({ ...prev, loading: true, error: '' }));
+      try {
+        const response = await fetch('/api/openshift/packagemanifests', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            api_host: apiHost,
+            token,
+            skip_tls_verify: data.openshift?.skip_tls_verify !== false
+          })
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(body.error || `HTTP ${response.status}`);
+        }
+        const operators = Array.isArray(body.operators) ? body.operators : [];
+        setCatalogOperatorLookup(prev => ({
+          ...prev,
+          loading: false,
+          error: '',
+          operators
+        }));
+      } catch (err) {
+        setCatalogOperatorLookup(prev => ({
+          ...prev,
+          loading: false,
+          error: err.message || 'Failed to list PackageManifests',
+          operators: null
+        }));
+      }
+    };
+
+    const toggleCatalogOperator = (operator) => {
+      const name = String(operator?.name || '').trim();
+      if (!name) return;
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config) copy.component_config = {};
+        if (!copy.component_config.catalog_operators) {
+          copy.component_config.catalog_operators = { operators: [] };
+        }
+        const list = Array.isArray(copy.component_config.catalog_operators.operators)
+          ? copy.component_config.catalog_operators.operators
+          : [];
+        const idx = list.findIndex(item => item?.name === name);
+        if (idx >= 0) {
+          list.splice(idx, 1);
+        } else {
+          list.push({
+            name,
+            displayName: operator.displayName || name,
+            channel: operator.channel || '',
+            source: operator.source || '',
+            sourceNamespace: operator.sourceNamespace || ''
+          });
+        }
+        copy.component_config.catalog_operators.operators = list;
+        return copy;
+      });
+    };
 
     return (
       <>
-        <Title headingLevel="h2">OpenShift Install</Title>
+        <Title headingLevel="h2">OpenShift Tools</Title>
         <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
-          OpenShift agent / install-config options. AAP operator install lives under
-          Core Environment → Ansible Automation Platform → Install AAP.
-          Component configuration stays on Core Environment.
+          OpenShift agent / install-config options and catalog-only operator subscriptions.
+          Full ADO application configure stays on Core Environment.
+          AAP operator install lives under Core Environment → Ansible Automation Platform → Install AAP.
         </p>
         <Card style={{ ...cardStyle, marginBottom: '16px' }}>
           <CardBody>
             <div style={{ fontWeight: 600, marginBottom: '6px' }}>Git repository</div>
             <div style={{ color: mutedTextColor, fontSize: '13px' }}>
-              OpenShift Install still generates and can push a playbook repo.
+              OpenShift Tools still generates and can push a playbook repo.
               Set SCM tool, repo URL, branch, and token on
               {' '}
               <button
@@ -10257,6 +12133,7 @@ echo $TOKEN
               </button>
               {' '}
               (Core Environment → Git Configuration).
+              Plaintext <code>ado-preflight-*.json</code> is never committed — use Actions → Upload encrypted JSON to Git.
             </div>
             {!standaloneRun
               && !String(data.git?.token || '').trim()
@@ -10275,63 +12152,212 @@ echo $TOKEN
             )}
           </CardBody>
         </Card>
-        <Grid hasGutter>
-          <GridItem span={6}>
-            <Card style={cardStyle}>
-              <CardBody>
-                <Checkbox
-                  id="openshift-agent-toggle"
-                  label="OpenShift agent / install configure"
-                  isChecked={openshiftAgent}
-                  onChange={(_, v) => setOpenshiftAgent(v)}
+
+        <Card style={{ ...cardStyle, marginBottom: '16px' }}>
+          <CardBody>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+              <div style={{ fontWeight: 600 }}>Deploy to OpenShift</div>
+              <Popover
+                headerContent="Deploy to OpenShift"
+                bodyContent={<div style={{ maxWidth: '320px' }}>{aapHelp.deployToOpenShift}</div>}
+                triggerAction="click"
+                appendTo={() => document.body}
+              >
+                <button
+                  type="button"
+                  aria-label="Deploy to OpenShift help"
+                  style={{
+                    border: 'none',
+                    background: 'transparent',
+                    color: isDark ? '#73bcf7' : '#0066cc',
+                    cursor: 'pointer',
+                    fontWeight: 700,
+                    padding: '0 2px',
+                    lineHeight: 1
+                  }}
+                >
+                  ?
+                </button>
+              </Popover>
+            </div>
+            <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '10px' }}>
+              Build/push the preflight UI image and apply <code>deploy/preflight.yaml</code> using
+              OpenShift API host and token from Core Environment.
+            </div>
+            <Button
+              variant="secondary"
+              onClick={runDeployToOpenShift}
+              isDisabled={deployStatus === 'running' || bootstrapStatus === 'running'}
+            >
+              {deployStatus === 'running' ? 'Deploying…' : 'Deploy to OpenShift'}
+            </Button>
+          </CardBody>
+        </Card>
+
+        <Tabs
+          activeKey={activeOpenShiftToolsTab}
+          onSelect={(_, key) => setActiveOpenShiftToolsTab(key)}
+          style={{ marginBottom: '12px' }}
+        >
+          <Tab eventKey="agent" title="Agent / install-config" />
+          <Tab
+            eventKey="catalog"
+            title={selectedCatalog.length > 0
+              ? `Catalog operators (${selectedCatalog.length})`
+              : 'Catalog operators'}
+          />
+        </Tabs>
+
+        {activeOpenShiftToolsTab === 'agent' && (
+          <>
+            <Checkbox
+              id="openshift-agent-toggle"
+              label="OpenShift agent / install configure"
+              isChecked={openshiftAgent}
+              onChange={(_, v) => setOpenshiftAgent(v)}
+            />
+            <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '8px', marginBottom: '12px' }}>
+              When checked, show agent-based install-config builder options.
+            </div>
+            {openshiftAgent && renderAgentInstallerConfig()}
+          </>
+        )}
+
+        {activeOpenShiftToolsTab === 'catalog' && (
+          <>
+            <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '12px' }}>
+              Pull PackageManifests from the cluster and select operators for subscription-only
+              install. Packages already covered by full OpenShift Applications are excluded.
+              Install wiring lands in a later collection change — selections are stored in
+              preflight JSON now.
+            </div>
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '12px', alignItems: 'center' }}>
+              <Button
+                variant="secondary"
+                isDisabled={catalogOperatorLookup.loading}
+                onClick={lookupCatalogOperators}
+              >
+                {catalogOperatorLookup.loading ? 'Pulling…' : 'Pull available operators'}
+              </Button>
+              {availableOperators.length > 0 && (
+                <TextInput
+                  value={catalogOperatorLookup.filter || ''}
+                  onChange={(_, v) => setCatalogOperatorLookup(prev => ({ ...prev, filter: v }))}
+                  placeholder="Filter by name or catalog…"
+                  style={{ maxWidth: '320px' }}
                 />
-                <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '8px' }}>
-                  When checked, show agent-based install-config builder options.
+              )}
+              <span
+                style={{
+                  fontSize: '12px',
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  border: `1px solid ${borderColor}`,
+                  color: isDark ? '#73bcf7' : '#0066cc',
+                  background: isDark ? '#262626' : '#eef5ff',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                {selectedCatalog.length} selected
+              </span>
+            </div>
+
+            {!openshiftLookupReady && (
+              <div style={{ color: mutedTextColor, fontSize: '12px', marginBottom: '8px' }}>
+                Enter OpenShift API host and token on Core Environment → OpenShift first.
+              </div>
+            )}
+            {catalogOperatorLookup.error && (
+              <div style={{ color: '#c9190b', fontSize: '12px', marginBottom: '8px' }}>
+                {catalogOperatorLookup.error}
+              </div>
+            )}
+
+            {availableOperators.length > 0 && (
+              <>
+                <div style={{ color: mutedTextColor, fontSize: '12px', marginBottom: '8px' }}>
+                  Showing {filteredOperators.length} of {availableOperators.length} operators
+                  (ADO-owned packages hidden).
                 </div>
-              </CardBody>
-            </Card>
-          </GridItem>
-          <GridItem span={6}>
-            <Card style={cardStyle}>
-              <CardBody>
-                <div style={{ fontWeight: 600, marginBottom: '6px' }}>Install AAP</div>
-                <div style={{ color: mutedTextColor, fontSize: '13px' }}>
-                  Greenfield AAP operator install moved to{' '}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      goToAapConfiguration();
-                      setActiveAapConfigTab('install');
-                      setAapOpen(true);
-                    }}
-                    style={{
-                      border: 'none',
-                      background: 'transparent',
-                      padding: 0,
-                      color: '#0066cc',
-                      cursor: 'pointer',
-                      textDecoration: 'underline'
-                    }}
-                  >
-                    Ansible Automation Platform → Install AAP
-                  </button>
-                  .
-                </div>
-              </CardBody>
-            </Card>
-          </GridItem>
-        </Grid>
-        {openshiftAgent && (
-          <Card style={{ ...cardStyle, marginTop: '16px' }}>
-            <CardBody>
-              <Title headingLevel="h2">OpenShift Agent / install-config</Title>
-              {renderAgentInstallerConfig()}
-            </CardBody>
-          </Card>
+                <Grid hasGutter>
+                  {filteredOperators.map(op => (
+                    <GridItem key={`${op.source || 'src'}-${op.name}`} span={4}>
+                      <Checkbox
+                        id={`catalog-op-${op.source || 'src'}-${op.name}`}
+                        label={op.displayName && op.displayName !== op.name
+                          ? `${op.name} (${op.displayName})`
+                          : op.name}
+                        description={
+                          [op.channel && `channel: ${op.channel}`, op.source]
+                            .filter(Boolean)
+                            .join(' · ')
+                        }
+                        isChecked={selectedNames.has(op.name)}
+                        onChange={() => toggleCatalogOperator(op)}
+                      />
+                    </GridItem>
+                  ))}
+                </Grid>
+              </>
+            )}
+
+            {availableOperators.length === 0 && selectedCatalog.length > 0 && (
+              <div style={{ color: mutedTextColor, fontSize: '13px' }}>
+                {selectedCatalog.length} operator(s) already selected in preflight JSON.
+                Pull again to adjust the checkbox list.
+                <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
+                  {selectedCatalog.map(item => (
+                    <li key={item.name}>{item.name}{item.channel ? ` (${item.channel})` : ''}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </>
         )}
       </>
     );
   };
+
+  const renderPegaConfig = () => (
+    <Grid hasGutter>
+      <GridItem span={12}>
+        <div style={{ color: mutedTextColor, marginBottom: '12px' }}>
+          Install Pega from local Helm charts and mirrored images. Stage charts, their dependencies,
+          and values files inside the Controller execution environment. No chart or tool downloads
+          are performed. New databases are provisioned from a local database chart and Pega
+          initialization runs on the first installation only. Existing mode requires an initialized database. Configure database, Kafka, routes, storage, image pull secrets,
+          and all image overrides in your chart values files.
+        </div>
+      </GridItem>
+      <GridItem span={12}>
+        <FormGroup label="Database">
+          <Checkbox id="pega-new-database" label="Create a new database and initialize Pega (default)"
+            isChecked={(data.component_config?.pega?.database_mode || 'new') === 'new'}
+            onChange={(_, checked) => set('component_config.pega.database_mode', checked ? 'new' : 'existing')} />
+          <Checkbox id="pega-existing-database" label="Use an existing initialized Pega database"
+            isChecked={data.component_config?.pega?.database_mode === 'existing'}
+            onChange={(_, checked) => set('component_config.pega.database_mode', checked ? 'existing' : 'new')} />
+        </FormGroup>
+      </GridItem>
+      {(data.component_config?.pega?.database_mode || 'new') === 'new' && <>
+        {renderTextField('Local database chart path', 'component_config.pega.database_chart_path')}
+        {renderTextField('Local database values file', 'component_config.pega.database_values_file')}
+      </>}
+      {renderTextField('Namespace', 'component_config.pega.namespace')}
+      {renderTextField('Release name', 'component_config.pega.release_name')}
+      {renderTextField('Local Pega chart path', 'component_config.pega.chart_path')}
+      {renderTextField('Local Pega values file', 'component_config.pega.values_file')}
+      {renderTextField('Disconnected registry hosts (comma-separated)', 'component_config.pega.allowed_registries')}
+      {renderTextField('Preinstalled Helm binary', 'component_config.pega.helm_binary')}
+      {renderTextField('Helm wait timeout', 'component_config.pega.timeout')}
+      <GridItem span={12}><div style={{ fontWeight: 700 }}>Optional backing services</div></GridItem>
+      {renderTextField('Local OpenSearch chart path', 'component_config.pega.opensearch_chart_path')}
+      {renderTextField('Local OpenSearch values file', 'component_config.pega.opensearch_values_file')}
+      {renderTextField('Local Pega Backing Services chart path', 'component_config.pega.backingservices_chart_path')}
+      {renderTextField('Local Pega Backing Services values file', 'component_config.pega.backingservices_values_file')}
+    </Grid>
+  );
 
   const renderDevspacesConfig = () => {
     const ds = data.component_config?.devspaces || {};
@@ -10339,10 +12365,29 @@ echo $TOKEN
     const iconSource = ds.custom_sample_icon_source || 'bundled';
     return (
     <Grid hasGutter>
+      <GridItem span={12}>
+        <FormGroup label="Deployment delivery">
+          <select aria-label="Dev Spaces deployment delivery" value={ds.delivery_mode || 'direct'} onChange={e => set('component_config.devspaces.delivery_mode', e.target.value)} style={{ width: '100%', padding: '8px' }}>
+            <option value="direct">Direct Ansible installation</option>
+            <option value="generate">Generate GitOps files for review</option>
+          </select>
+        </FormGroup>
+      </GridItem>
+      {ds.delivery_mode === 'generate' && <>
+        <GridItem span={12}><p>Generates Namespace, CheCluster and a manual-sync Argo CD Application during bootstrap. No Dev Spaces installation is run in this mode. Install its operator separately before syncing. This first export does not include dashboard sample cards or the metrics exporter.</p></GridItem>
+        {renderTextField('GitOps repository URL', 'component_config.devspaces.gitops_repo_url')}
+        {renderTextField('GitOps revision', 'component_config.devspaces.gitops_revision')}
+        {renderTextField('Resource path (blank = gitops/environment/devspaces/resources)', 'component_config.devspaces.gitops_path')}
+        {renderTextField('Argo CD namespace', 'component_config.devspaces.gitops_namespace')}
+        {renderTextField('Argo CD project', 'component_config.devspaces.gitops_project')}
+        {renderTextField('Destination cluster API', 'component_config.devspaces.gitops_destination')}
+      </>}
+
       {renderTextField('Hostname / Route host', 'component_config.devspaces.hostname')}
-      {renderStorageClassField('Storage class', 'component_config.devspaces.storage')}
-      {renderTextField('Replicas', 'component_config.devspaces.replicas', 'number')}
+      {ds.delivery_mode !== 'generate' && renderStorageClassField('Storage class', 'component_config.devspaces.storage')}
+      {ds.delivery_mode !== 'generate' && renderTextField('Replicas', 'component_config.devspaces.replicas', 'number')}
       {renderTextField('Namespace', 'component_config.devspaces.namespace')}
+      {ds.delivery_mode !== 'generate' && <>
       <GridItem span={12}>
         <FormGroup label="Dashboard samples">
           <Checkbox
@@ -10470,6 +12515,7 @@ echo $TOKEN
           )}
         </>
       )}
+      </>}
       <GridItem span={12}>
         <FormGroup label="Customize default workspace">
           <Checkbox
@@ -10482,11 +12528,11 @@ echo $TOKEN
       </GridItem>
       {ds.customize_workspace && (
         <>
-          {renderTextField('Default devfile URL (optional)', 'component_config.devspaces.default_devfile_url')}
+          {ds.delivery_mode !== 'generate' && renderTextField('Default devfile URL (optional)', 'component_config.devspaces.default_devfile_url')}
           {renderTextField('Default workspace container image', 'component_config.devspaces.default_workspace_image')}
         </>
       )}
-      <GridItem span={12}>
+      {ds.delivery_mode !== 'generate' && <GridItem span={12}>
         <FormGroup label="Observability">
           <Checkbox
             id="devspaces-status-exporter"
@@ -10497,7 +12543,8 @@ echo $TOKEN
           />
         </FormGroup>
       </GridItem>
-      {renderTextField('Che / Dev Spaces image tag (optional)', 'component_config.devspaces.che_image_tag')}
+      }
+      {ds.delivery_mode !== 'generate' && renderTextField('Che / Dev Spaces image tag (optional)', 'component_config.devspaces.che_image_tag')}
       {renderTextField('Dashboard image (optional)', 'component_config.devspaces.dashboard_image')}
     </Grid>
     );
@@ -10668,6 +12715,10 @@ echo $TOKEN
         return renderOpenShiftAdminHtpasswdConfig();
       case 'console_banner':
         return renderOpenShiftConsoleBannerConfig();
+      case 'integrated_image_registry':
+        return renderOpenShiftIntegratedImageRegistryConfig();
+      case 'storage_class':
+        return renderOpenShiftStorageClassConfig();
       case 'oauth_rhbk':
         return renderOpenShiftOAuthRhbkConfig();
       case 'ldap_auth':
@@ -10684,14 +12735,22 @@ echo $TOKEN
         return renderQuayConfig();
       case 'minio':
         return renderMinioConfig();
+      case 'pega':
+        return renderPegaConfig();
       case 'devspaces':
         return renderDevspacesConfig();
       case 'dev_hub':
         return renderDevHubConfig();
+      case 'ocp_virtualization':
+        return renderOcpVirtualizationConfig();
       case 'acm':
         return renderAcmConfig();
+      case 'mtv':
+        return renderMtvConfig();
       case 'acs':
         return renderAcsConfig();
+      case 'ocp_compliance':
+        return renderOcpComplianceConfig();
       case 'rhel':
         return renderRhelConfig();
       case 'patching':
@@ -10828,7 +12887,7 @@ ${vaultYaml}
         </div>
 
         <div style={{ display: 'flex', gap: '8px' }}>
-          <Button variant="secondary" onClick={() => setShowVaultYaml(!showVaultYaml)}>
+          <Button variant="secondary" onClick={() => toggleSecretRevealed('vaultYaml', setShowVaultYaml, showVaultYaml)}>
             {showVaultYaml ? 'Hide vault values' : 'Show vault values'}
           </Button>
         </div>
@@ -10926,6 +12985,8 @@ ${vaultYaml}
           'console_banner',
           'oauth_rhbk',
           'ldap_auth',
+          'storage_class',
+          'integrated_image_registry',
           'discover_routes_print',
           'alternate_routes',
           'update_default_ingress'
@@ -10938,7 +12999,7 @@ ${vaultYaml}
         }
       });
       (data.component_apps?.openshift || []).forEach(app => {
-        if (['acm', 'acs', 'devspaces', 'dev_hub', 'cert_manager', 'quay', 'minio'].includes(app) && !tabs.includes(app)) {
+        if (['acm', 'acs', 'devspaces', 'dev_hub', 'cert_manager', 'quay', 'minio', 'mtv', 'ocp_virtualization'].includes(app) && !tabs.includes(app)) {
           tabs.push(app);
         }
         if (simpleComponents.includes(app) && !tabs.includes(app)) {
@@ -10988,10 +13049,13 @@ ${vaultYaml}
     if (tab === 'discover_routes_print') return 'Discover Routes';
     if (tab === 'alternate_routes') return 'Alternate Routes';
     if (tab === 'acm') return 'ACM';
+    if (tab === 'mtv') return 'MTV';
     if (tab === 'acs') return 'ACS';
     if (tab === 'devspaces') return 'Dev Spaces';
     if (tab === 'dev_hub') return 'Dev Hub';
     if (tab === 'console_banner') return 'Console Banner';
+    if (tab === 'integrated_image_registry') return 'Integrated Image Registry';
+    if (tab === 'storage_class') return 'Storage class';
     if (tab === 'cert_manager') return 'Cert Manager';
     if (tab === 'update_default_ingress') return 'Default Ingress Cert';
     if (tab === 'quay') return 'Quay';
@@ -11013,7 +13077,7 @@ ${vaultYaml}
 
     return (
       <>
-        <Card style={cardStyle}>
+        <Card style={cardStyle} id="assistant-component-config">
           <CardBody>
             <Title headingLevel="h2">Component Configuration</Title>
             <p style={{ color: mutedTextColor, marginTop: '8px' }}>
@@ -11527,9 +13591,25 @@ ${vaultYaml}
   );
 
   return (
-    <Page
+    <>
+    <AdoAssistant
+      open={assistantOpen}
+      onClose={() => { setAssistantOpen(false); document.getElementById("ado-assistant-toggle")?.focus(); }}
+      onShow={showAssistantStep}
+      seedMessage={assistantExplain}
+      onSeedConsumed={() => setAssistantExplain(null)}
+      installed={!!data.pre_installs?.install_aap}
+      connectionReady={!!(data.openshift?.api_host && data.openshift?.token)}
+      namespaceReady={!!data.component_config?.aap?.namespace}
+      notUsingAap={data.aap?.enabled === false}
+      envReady={!!(String(data.environment || '').trim() && String(data.domain || '').trim())}
+      componentsReady={Array.isArray(data.components) && data.components.length > 0}
+      localPlanReady={!!componentPlan}
+      dark={isDark}
+    />
+    <Page className={assistantOpen ? "ado-assistant-open" : ""}
       masthead={
-        <Masthead
+        <Masthead id="ado-masthead"
           style={{
             background: '#151515',
             borderBottom: '3px solid #ee0000',
@@ -11557,6 +13637,7 @@ ${vaultYaml}
           </MastheadMain>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', paddingRight: '28px', position: 'relative', zIndex: 6000 }}>
+            <Button id="ado-assistant-toggle" variant="secondary" onClick={() => setAssistantOpen(v => !v)} aria-expanded={assistantOpen} style={{ color: "white" }}>ADO Assistant</Button>
             <Tooltip content={isDark ? 'Switch to light theme' : 'Switch to dark theme'}>
               <Button
                 variant="plain"
@@ -11735,7 +13816,7 @@ ${vaultYaml}
         </div>
       </PageSection>
 
-      <PageSection isWidthLimited style={{ ...sectionStyle, minHeight: 'calc(100vh - 110px)', paddingTop: isDark ? '0' : undefined }}>
+      <PageSection style={{ ...sectionStyle, minHeight: 'calc(100vh - 110px)', paddingTop: isDark ? '0' : undefined }}>
         <div style={contentShellStyle}>
         <Form>
           <Card style={cardStyle}>
@@ -11746,13 +13827,13 @@ ${vaultYaml}
                 style={{ marginBottom: '16px' }}
               >
                 <Tab eventKey="core" title="Core Environment" />
-                <Tab eventKey="install" title="OpenShift Install" />
+                <Tab eventKey="install" title="OpenShift Tools" />
               </Tabs>
 
               {activeMainTab === 'core' && (
                 <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
-                <div>
+                <div id="assistant-core-environment">
                   <Title headingLevel="h2">Core Environment Information</Title>
                   {importStatus && (
                     <div style={{ color: importStatus.startsWith('Import failed') ? '#c9190b' : mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
@@ -11886,45 +13967,33 @@ ${vaultYaml}
                 </GridItem>
 
                 <GridItem span={12}>
-                  <FormGroup label="Bootstrap Components" isRequired>
-                    <div style={{ marginBottom: '10px', color: mutedTextColor, fontSize: '13px' }}>
-                      Click component text to populate vars/vault files.
-                    </div>
-                    
-                    <Grid hasGutter>
-                      <GridItem span={6}>
-                        <Checkbox
-                          label="all"
-                          isChecked={data.components.includes('all')}
-                          onChange={() => toggleComponentAndOpen('all')}
-                        />
-
-                        {renderExpandableComponent('openshift', openshiftOpen, setOpenshiftOpen, openshiftApps)}
-                        {renderExpandableComponent('rhel', rhelOpen, setRhelOpen, rhelApps)}
-                        {renderExpandableComponent('patching', patchingOpen, setPatchingOpen, patchingApps)}
-                        {renderExpandableComponent('aws', awsOpen, setAwsOpen, awsApps)}
-                        {renderExpandableComponent('provision', provisionOpen, setProvisionOpen, provisionApps)}
-                      </GridItem>
-
-                      <GridItem span={6}>
-                        <Grid hasGutter>
-                          {simpleComponents.map(component => (
-                            <GridItem key={component} span={6}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <Checkbox
-                                  label=""
-                                  isChecked={data.components.includes(component)}
-                                  isDisabled={isStandaloneDisabled()}
-                                  onChange={() => toggleComponentAndOpen(component)}
-                                />
-                                {renderComponentLabel(component)}
-                              </div>
-                            </GridItem>
-                          ))}
-                        </Grid>
-                      </GridItem>
-                    </Grid>
+                  <FormGroup label="Profiles" isRequired>
+                    <BootstrapProfiles
+                      key={profileImportKey}
+                      data={data}
+                      isDark={isDark}
+                      borderColor={borderColor}
+                      mutedTextColor={mutedTextColor}
+                      fieldBg={fieldBg}
+                      fieldColor={fieldColor}
+                      getApps={getGroupApps}
+                      onTarget={toggleProfileTarget}
+                      onApps={applyProfileApps}
+                    />
                   </FormGroup>
+                </GridItem>
+                <GridItem span={12}>
+                    <div style={{ marginTop: '16px' }}>
+                    <ExpandableSection toggleText="Additional components" isExpanded={additionalProfilesOpen} onToggle={(_, value) => setAdditionalProfilesOpen(value)}>
+                      <Checkbox label="All components (legacy)" isChecked={data.components.includes('all')} onChange={() => toggleComponentAndOpen('all')} />
+                      {simpleComponents.map(component => (
+                        <div key={component} style={{ display: 'flex', gap: 8 }}>
+                          <Checkbox label={componentOptionLabels[component] || component} isChecked={data.components.includes(component)} onChange={() => toggleComponentAndOpen(component)} />
+                          {renderComponentLabel(component)}
+                        </div>
+                      ))}
+                    </ExpandableSection>
+                    </div>
                 </GridItem>
               </Grid>
                 </>
@@ -11939,6 +14008,8 @@ ${vaultYaml}
           <br />
 
           {renderActiveConfigPanel()}
+
+
 
           <br />
 
@@ -11960,36 +14031,611 @@ ${vaultYaml}
 
               <br /><br />
 
-              <Radio label="Using AAP" name="aap" isChecked={data.aap.enabled} onChange={() => setAapEnabled(true)} />
-              <Radio label="Not using AAP" name="aap" isChecked={!data.aap.enabled} onChange={() => setAapEnabled(false)} />
+              <Radio id="assistant-using-aap" label="Using AAP" name="aap" isChecked={data.aap.enabled} onChange={() => setAapEnabled(true)} />
+              <Radio id="assistant-not-using-aap" label="Not using AAP" name="aap" isChecked={!data.aap.enabled} onChange={() => setAapEnabled(false)} />
 
-              {!data.aap.enabled && !data.pre_installs?.install_aap && (
+              {!data.aap.enabled && (
                 <>
                   <br />
                   <div style={{ color: mutedTextColor, marginBottom: '8px' }}>
-                    Click <strong>Run Bootstrap</strong> below — the pod runs this ansible-playbook locally
-                    (no AAP API calls). Expand additional options on the General tab or below.
-                    For a greenfield operator install, open the <strong>Install AAP</strong> tab (expand this card).
+                    <strong>Run Bootstrap</strong> only generates the playbook repo from this form
+                    (no Contoller). After it succeeds, expand <strong>Run generated playbooks</strong>
+                    {' '}below to execute steps in this pod — same form selections,
+                    no second survey. Preview commands appear in the black
+                    window; live output uses the ADO Bootstrap Console ticker.
                   </div>
-                  {renderAnsibleExtraArgsCollapsible()}
-                  <br />
-                  <textarea
-                    readOnly
-                    spellCheck="false"
-                    value={buildLocalBootstrapAnsiblePreview()}
-                    style={{
-                      width: '100%',
-                      minHeight: '220px',
-                      background: '#151515',
-                      color: '#f0f0f0',
-                      fontFamily: 'monospace',
-                      fontSize: `${consoleFontSize}px`,
-                      lineHeight: '1.45',
-                      border: '1px solid #3c3c3c',
-                      borderRadius: '4px',
-                      padding: '14px'
-                    }}
+                  <Checkbox
+                    id="open-playbook-runner-after-bootstrap"
+                    label="After bootstrap succeeds, open the playbook runner automatically"
+                    isChecked={openPlaybookRunnerAfterBootstrap}
+                    onChange={(_, checked) => setOpenPlaybookRunnerAfterBootstrap(checked)}
                   />
+                  <br />
+                  <div style={{ marginTop: '4px' }}>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const next = !componentRunnerOpen;
+                        setComponentRunnerOpen(next);
+                        if (next && !componentPlan) {
+                          try { await loadComponentPlan(); } catch { /* bootstrap may not have run yet */ }
+                        }
+                      }}
+                      aria-expanded={componentRunnerOpen}
+                      style={{
+                        border: 'none',
+                        background: 'transparent',
+                        padding: 0,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        fontSize: '14px',
+                        color: textColor,
+                        textAlign: 'left'
+                      }}
+                    >
+                      {componentRunnerOpen ? '−' : '+'} Run generated playbooks (no AAP)
+                    </button>
+                    {componentRunnerOpen && (
+                      <div
+                        id="playbook-runner"
+                        style={{
+                          marginTop: '10px',
+                          border: `1px solid ${borderColor}`,
+                          borderRadius: '6px',
+                          padding: '12px',
+                          background: isDark ? '#1b1b1b' : '#fafafa'
+                        }}
+                      >
+                        <p style={{ color: mutedTextColor, margin: '0 0 10px' }}>
+                          Steps come from components already selected on the form.
+                          Bootstrap wrote <code>group_vars</code> — you do not re-enter that config here.
+                          Uncheck anything you do not want to run now.
+                          Use each step&apos;s <strong>Options</strong> for per-playbook
+                          <code>state</code>, channel, and freeform <code>-e</code>.
+                          Common extra vars (<code>state</code>) below is the default for every step.
+                        </p>
+                        {!componentPlan ? (
+                          <p style={{ margin: 0 }}>
+                            Complete <strong>Run Bootstrap</strong> first, then open this runner.
+                          </p>
+                        ) : (
+                          <>
+                            <p style={{ color: mutedTextColor, marginTop: 0 }}>
+                              Environment: <strong>{componentPlan.environment}</strong>.
+                              Listed in Contoller workflow order (Keycloak before
+                              OAuth). Check steps to run, use ↑↓ to tweak
+                              independent ones. Stops on first failure.
+                            </p>
+                            <div style={{
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '0',
+                              marginBottom: '12px',
+                              border: `1px solid ${borderColor}`,
+                              borderRadius: '6px',
+                              overflow: 'hidden'
+                            }}
+                            >
+                              {(() => {
+                                const planOrder = componentPlan.steps.map(s => s.id);
+                                const selectedIndex = Object.fromEntries(
+                                  componentSteps.map((id, i) => [id, i + 1])
+                                );
+                                const moveSelected = (stepId, dir) => {
+                                  setComponentSteps(previous => {
+                                    const idx = previous.indexOf(stepId);
+                                    if (idx < 0) return previous;
+                                    const swap = idx + dir;
+                                    if (swap < 0 || swap >= previous.length) return previous;
+                                    const next = [...previous];
+                                    [next[idx], next[swap]] = [next[swap], next[idx]];
+                                    return next;
+                                  });
+                                  setComponentCommandPreview('');
+                                  setComponentPreviewCommands([]);
+                                };
+                                const toggleStep = (stepId, checked) => {
+                                  setComponentSteps(previous => {
+                                    if (!checked) {
+                                      return previous.filter(id => id !== stepId);
+                                    }
+                                    if (previous.includes(stepId)) return previous;
+                                    const next = [...previous, stepId];
+                                    next.sort(
+                                      (a, b) => planOrder.indexOf(a) - planOrder.indexOf(b)
+                                    );
+                                    return next;
+                                  });
+                                  setComponentCommandPreview('');
+                                  setComponentPreviewCommands([]);
+                                  setLocalPreviewMode('bootstrap');
+                                };
+                                let lastGroup = null;
+                                return componentPlan.steps.map(step => {
+                                  const playbook = step.playbook || step.id || '';
+                                  let group = 'Other';
+                                  if (playbook.includes('/rhbk/')) group = 'Keycloak / RHBK';
+                                  else if (playbook.includes('/openshift/')) group = 'OpenShift auth';
+                                  else if (playbook.includes('/cert-manager/')) group = 'Certificates';
+                                  else if (playbook.includes('/grafana/')) group = 'Grafana';
+                                  const showGroup = group !== lastGroup;
+                                  lastGroup = group;
+                                  const checked = componentSteps.includes(step.id);
+                                  const runNum = selectedIndex[step.id];
+                                  const selPos = componentSteps.indexOf(step.id);
+                                  return (
+                                    <div key={step.id}>
+                                      {showGroup && (
+                                        <div style={{
+                                          padding: '8px 12px',
+                                          fontSize: '12px',
+                                          fontWeight: 700,
+                                          letterSpacing: '0.02em',
+                                          textTransform: 'uppercase',
+                                          color: mutedTextColor,
+                                          background: isDark ? '#212427' : '#f0f0f0',
+                                          borderTop: `1px solid ${borderColor}`
+                                        }}
+                                        >
+                                          {group}
+                                        </div>
+                                      )}
+                                      <div style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: '28px 36px minmax(0, 1fr) auto auto',
+                                        gap: '8px',
+                                        alignItems: 'center',
+                                        padding: '8px 12px',
+                                        borderTop: `1px solid ${borderColor}`,
+                                        opacity: step.available ? 1 : 0.5,
+                                        background: checked
+                                          ? (isDark ? '#151515' : '#fff')
+                                          : 'transparent'
+                                      }}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          disabled={!step.available || bootstrapStatus === 'running'}
+                                          onChange={event => toggleStep(step.id, event.target.checked)}
+                                          aria-label={`Select ${step.title}`}
+                                        />
+                                        <span style={{
+                                          fontFamily: 'var(--pf-v5-global--FontFamily--monaco, monospace)',
+                                          fontSize: '12px',
+                                          color: checked ? textColor : mutedTextColor,
+                                          textAlign: 'center'
+                                        }}
+                                        >
+                                          {checked ? runNum : '—'}
+                                        </span>
+                                        <div style={{ minWidth: 0 }}>
+                                          <strong style={{ display: 'block', wordBreak: 'break-word' }}>
+                                            {step.title}
+                                          </strong>
+                                          {step.reason ? (
+                                            <small style={{
+                                              display: 'block',
+                                              color: '#f0ab00',
+                                              wordBreak: 'break-word'
+                                            }}
+                                            >
+                                              {step.reason}
+                                            </small>
+                                          ) : null}
+                                          {stepOptionsSummary(step.id) && (
+                                            <small style={{
+                                              display: 'block',
+                                              color: '#73bcf7',
+                                              wordBreak: 'break-word'
+                                            }}
+                                            >
+                                              Options: {stepOptionsSummary(step.id)}
+                                            </small>
+                                          )}
+                                        </div>
+                                        <span style={{ display: 'flex', gap: '2px' }}>
+                                          <Button
+                                            variant="plain"
+                                            isDisabled={
+                                              !checked
+                                              || selPos <= 0
+                                              || bootstrapStatus === 'running'
+                                            }
+                                            onClick={() => moveSelected(step.id, -1)}
+                                            aria-label="Move earlier"
+                                          >
+                                            ↑
+                                          </Button>
+                                          <Button
+                                            variant="plain"
+                                            isDisabled={
+                                              !checked
+                                              || selPos < 0
+                                              || selPos >= componentSteps.length - 1
+                                              || bootstrapStatus === 'running'
+                                            }
+                                            onClick={() => moveSelected(step.id, 1)}
+                                            aria-label="Move later"
+                                          >
+                                            ↓
+                                          </Button>
+                                        </span>
+                                        <Button
+                                          variant="link"
+                                          isDisabled={!step.available || bootstrapStatus === 'running'}
+                                          onClick={() => setComponentStepOptionsEditId(step.id)}
+                                          style={{ padding: 0, whiteSpace: 'nowrap' }}
+                                        >
+                                          Options
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  );
+                                });
+                              })()}
+                            </div>
+                            {componentRunError && <p role="alert">{componentRunError}</p>}
+                            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                              <Button
+                                variant="secondary"
+                                onClick={previewComponentRun}
+                                isDisabled={!componentSteps.length || bootstrapStatus === 'running'}
+                              >
+                                Preview commands
+                              </Button>
+                              <Button
+                                variant="primary"
+                                style={{ borderRadius: '18px' }}
+                                isDisabled={!componentSteps.length || bootstrapStatus === 'running'}
+                                onClick={runSelectedPlaybooks}
+                              >
+                                Run selected playbooks
+                              </Button>
+                            </div>
+                            {(() => {
+                              const editStep = componentPlan?.steps?.find(
+                                s => s.id === componentStepOptionsEditId
+                              );
+                              if (!editStep) return null;
+                              const opts = componentStepOptions[editStep.id] || {};
+                              const fields = playbookStepOptionFields(
+                                componentKeyFromPlanStep(editStep)
+                              );
+                              const globalState = data.ansible?.state === 'absent' ? 'absent' : 'present';
+                              const effectiveState = opts.state || globalState;
+                              const updateOpts = next => {
+                                setComponentStepOptions(previous => ({
+                                  ...previous,
+                                  [editStep.id]: next
+                                }));
+                                setComponentCommandPreview('');
+                                setComponentPreviewCommands([]);
+                              };
+                              return (
+                                <Modal
+                                  variant={ModalVariant.medium}
+                                  isOpen
+                                  onClose={() => setComponentStepOptionsEditId(null)}
+                                  aria-label={`Options for ${editStep.title}`}
+                                >
+                                  <ModalHeader title={`Options — ${editStep.title}`} />
+                                  <ModalBody>
+                                  <div
+                                    style={{
+                                      display: 'flex',
+                                      flexDirection: 'column',
+                                      gap: '20px',
+                                      padding: '4px 0 12px',
+                                      maxWidth: '100%'
+                                    }}
+                                  >
+                                    <p style={{
+                                      margin: 0,
+                                      color: mutedTextColor,
+                                      fontSize: '13px',
+                                      lineHeight: 1.5
+                                    }}
+                                    >
+                                      Overrides apply only to this playbook.
+                                      Leave state on <strong>Use common default</strong> to
+                                      inherit Common extra vars
+                                      (<code>state={globalState}</code>).
+                                    </p>
+
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                      <div style={{ fontWeight: 600, fontSize: '14px', color: textColor }}>
+                                        State for this playbook
+                                      </div>
+                                      <div
+                                        style={{
+                                          display: 'flex',
+                                          flexDirection: 'column',
+                                          gap: '10px',
+                                          padding: '12px 14px',
+                                          borderRadius: '6px',
+                                          border: `1px solid ${borderColor}`,
+                                          background: isDark ? '#1b1b1b' : '#fafafa'
+                                        }}
+                                      >
+                                        <Radio
+                                          id={`step-state-inherit-${editStep.id}`}
+                                          label={`Use common default (${globalState})`}
+                                          name={`step-state-${editStep.id}`}
+                                          isChecked={!opts.state}
+                                          onChange={() => {
+                                            const next = { ...opts };
+                                            delete next.state;
+                                            updateOpts(next);
+                                          }}
+                                        />
+                                        <Radio
+                                          id={`step-state-present-${editStep.id}`}
+                                          label="state=present"
+                                          name={`step-state-${editStep.id}`}
+                                          isChecked={opts.state === 'present'}
+                                          onChange={() => updateOpts({ ...opts, state: 'present' })}
+                                        />
+                                        <Radio
+                                          id={`step-state-absent-${editStep.id}`}
+                                          label="state=absent"
+                                          name={`step-state-${editStep.id}`}
+                                          isChecked={opts.state === 'absent'}
+                                          onChange={() => updateOpts({ ...opts, state: 'absent' })}
+                                        />
+                                      </div>
+                                      <div style={{ fontSize: '12px', color: mutedTextColor }}>
+                                        Effective for this step:{' '}
+                                        <code style={{ fontSize: '12px' }}>state={effectiveState}</code>
+                                      </div>
+                                    </div>
+
+                                    {fields.map(field => (
+                                      <div
+                                        key={field.key}
+                                        style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}
+                                      >
+                                        <div style={{ fontWeight: 600, fontSize: '14px', color: textColor }}>
+                                          {labelWithHelp(field.label, field.help || '')}
+                                        </div>
+                                        {field.type === 'checkbox' ? (
+                                          <div
+                                            style={{
+                                              padding: '12px 14px',
+                                              borderRadius: '6px',
+                                              border: `1px solid ${borderColor}`,
+                                              background: isDark ? '#1b1b1b' : '#fafafa'
+                                            }}
+                                          >
+                                            <Checkbox
+                                              id={`step-var-${editStep.id}-${field.key}`}
+                                              label={field.label}
+                                              isChecked={Boolean(opts.vars?.[field.key])}
+                                              onChange={(_, checked) => {
+                                                const vars = { ...(opts.vars || {}) };
+                                                if (checked) vars[field.key] = true;
+                                                else delete vars[field.key];
+                                                updateOpts({ ...opts, vars });
+                                              }}
+                                            />
+                                          </div>
+                                        ) : (
+                                          <input
+                                            id={`step-var-${editStep.id}-${field.key}`}
+                                            type="text"
+                                            value={String(opts.vars?.[field.key] || '')}
+                                            placeholder={field.placeholder || ''}
+                                            onChange={e => {
+                                              const value = e.target.value;
+                                              const vars = { ...(opts.vars || {}) };
+                                              if (String(value).trim()) vars[field.key] = value;
+                                              else delete vars[field.key];
+                                              updateOpts({ ...opts, vars });
+                                            }}
+                                            style={{
+                                              width: '100%',
+                                              boxSizing: 'border-box',
+                                              minHeight: '40px',
+                                              padding: '10px 12px',
+                                              lineHeight: '1.3',
+                                              background: isDark ? '#212427' : '#fff',
+                                              color: textColor,
+                                              border: `1px solid ${isDark ? '#6a6e73' : '#8a8d90'}`,
+                                              borderRadius: '4px',
+                                              fontSize: '14px'
+                                            }}
+                                          />
+                                        )}
+                                      </div>
+                                    ))}
+
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                      <div style={{ fontWeight: 600, fontSize: '14px', color: textColor }}>
+                                        {labelWithHelp(
+                                          'Additional -e for this playbook',
+                                          'Shell-split and appended after Common extra vars for this step only. Example: -e operator_channel=stable -e foo=bar'
+                                        )}
+                                      </div>
+                                      <input
+                                        id={`step-extra-${editStep.id}`}
+                                        type="text"
+                                        value={String(opts.extra_args || '')}
+                                        placeholder="-e some_var=value"
+                                        onChange={e => {
+                                          updateOpts({ ...opts, extra_args: e.target.value });
+                                        }}
+                                        style={{
+                                          width: '100%',
+                                          boxSizing: 'border-box',
+                                          minHeight: '40px',
+                                          padding: '10px 12px',
+                                          lineHeight: '1.3',
+                                          background: isDark ? '#212427' : '#fff',
+                                          color: textColor,
+                                          border: `1px solid ${isDark ? '#6a6e73' : '#8a8d90'}`,
+                                          borderRadius: '4px',
+                                          fontSize: '14px',
+                                          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+                                        }}
+                                      />
+                                    </div>
+                                  </div>
+                                  </ModalBody>
+                                  <ModalFooter>
+                                    <Button
+                                      key="clear"
+                                      variant="link"
+                                      onClick={() => {
+                                        setComponentStepOptions(previous => {
+                                          const copy = { ...previous };
+                                          delete copy[editStep.id];
+                                          return copy;
+                                        });
+                                        setComponentCommandPreview('');
+                                        setComponentPreviewCommands([]);
+                                      }}
+                                    >
+                                      Clear overrides
+                                    </Button>
+                                    <Button
+                                      key="done"
+                                      variant="primary"
+                                      onClick={() => setComponentStepOptionsEditId(null)}
+                                    >
+                                      Done
+                                    </Button>
+                                  </ModalFooter>
+                                </Modal>
+                              );
+                            })()}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <br />
+                  {renderAnsibleExtraArgsCollapsible()}
+                  {renderCommonAnsibleExtraVars()}
+                  <br />
+                  {localPreviewMode === 'playbooks' ? (
+                    componentPreviewCommands.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      <div style={{ color: mutedTextColor, fontSize: '13px' }}>
+                        Previewed commands — click <strong>?</strong> to explain vars and behavior in ADO Assistant.
+                      </div>
+                      {componentPreviewCommands.map((command, index) => {
+                        const stepMeta = componentPlan?.steps?.find(s => s.id === command.id);
+                        return (
+                        <div
+                          key={command.id}
+                          style={{
+                            display: 'flex',
+                            gap: '8px',
+                            alignItems: 'flex-start',
+                            background: '#151515',
+                            border: '1px solid #3c3c3c',
+                            borderRadius: '4px',
+                            padding: '10px 12px'
+                          }}
+                        >
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              color: '#b8bbbe',
+                              fontSize: '12px',
+                              marginBottom: '6px',
+                              fontWeight: 600
+                            }}
+                            >
+                              Step {index + 1}
+                              {stepMeta?.title ? ` — ${stepMeta.title}` : ''}
+                            </div>
+                            <pre
+                              style={{
+                                margin: 0,
+                                color: '#f0f0f0',
+                                fontFamily: 'monospace',
+                                fontSize: `${consoleFontSize}px`,
+                                lineHeight: '1.45',
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word'
+                              }}
+                            >
+                              {command.display}
+                            </pre>
+                          </div>
+                          <button
+                            type="button"
+                            aria-label={`Explain ${command.id}`}
+                            title="Explain in ADO Assistant"
+                            onClick={() => explainPreviewCommand(command)}
+                            style={{
+                              flexShrink: 0,
+                              width: '28px',
+                              height: '28px',
+                              borderRadius: '50%',
+                              border: `1px solid ${isDark ? '#73bcf7' : '#0066cc'}`,
+                              background: 'transparent',
+                              color: isDark ? '#73bcf7' : '#0066cc',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                              lineHeight: '26px',
+                              padding: 0
+                            }}
+                          >
+                            ?
+                          </button>
+                        </div>
+                        );
+                      })}
+                    </div>
+                    ) : (
+                    <textarea
+                      readOnly
+                      spellCheck="false"
+                      value={
+                        '# Extra options changed or preview cleared.\n'
+                        + '# Click “Preview commands” to refresh selected playbook commands.\n'
+                        + (effectiveAnsibleExtraArgs()
+                          ? `# Current extra options (incl. state): ${effectiveAnsibleExtraArgs()}\n`
+                          : '')
+                      }
+                      style={{
+                        width: '100%',
+                        minHeight: '220px',
+                        background: '#151515',
+                        color: '#f0f0f0',
+                        fontFamily: 'monospace',
+                        fontSize: `${consoleFontSize}px`,
+                        lineHeight: '1.45',
+                        border: '1px solid #3c3c3c',
+                        borderRadius: '4px',
+                        padding: '14px'
+                      }}
+                    />
+                    )
+                  ) : (
+                    <textarea
+                      readOnly
+                      spellCheck="false"
+                      value={
+                        componentCommandPreview
+                          ? componentCommandPreview
+                          : buildLocalBootstrapAnsiblePreview()
+                      }
+                      style={{
+                        width: '100%',
+                        minHeight: '220px',
+                        background: '#151515',
+                        color: '#f0f0f0',
+                        fontFamily: 'monospace',
+                        fontSize: `${consoleFontSize}px`,
+                        lineHeight: '1.45',
+                        border: '1px solid #3c3c3c',
+                        borderRadius: '4px',
+                        padding: '14px'
+                      }}
+                    />
+                  )}
                 </>
               )}
 
@@ -12122,7 +14768,7 @@ ${vaultYaml}
                         <FormGroup label="OAuth Token">
                           <div style={{ display: 'flex', gap: '8px' }}>
                             <TextInput type={showAapOauthToken ? 'text' : 'password'} value={data.aap.oauth_token} onChange={(_, v) => set('aap.oauth_token', v)} />
-                            <Button variant="secondary" onClick={() => setShowAapOauthToken(!showAapOauthToken)}>{showAapOauthToken ? 'Hide' : 'Show'}</Button>
+                            <Button variant="secondary" onClick={() => toggleSecretRevealed('aapOauth', setShowAapOauthToken, showAapOauthToken)}>{showAapOauthToken ? 'Hide' : 'Show'}</Button>
                           </div>
                         </FormGroup>
                       </GridItem>
@@ -12138,7 +14784,7 @@ ${vaultYaml}
                               onChange={(_, v) => set('aap.galaxy_hub_token', v)}
                               placeholder="Hub API token (separate from Controller OAuth)"
                             />
-                            <Button variant="secondary" onClick={() => setShowAapGalaxyHubToken(!showAapGalaxyHubToken)}>
+                            <Button variant="secondary" onClick={() => toggleSecretRevealed('aapGalaxy', setShowAapGalaxyHubToken, showAapGalaxyHubToken)}>
                               {showAapGalaxyHubToken ? 'Hide' : 'Show'}
                             </Button>
                           </div>
@@ -12154,7 +14800,7 @@ ${vaultYaml}
                               value={data.aap.admin_password}
                               onChange={(_, v) => set('aap.admin_password', v)}
                             />
-                            <Button variant="secondary" onClick={() => setShowAapAdminPassword(!showAapAdminPassword)}>
+                            <Button variant="secondary" onClick={() => toggleSecretRevealed('aapAdmin', setShowAapAdminPassword, showAapAdminPassword)}>
                               {showAapAdminPassword ? 'Hide' : 'Show'}
                             </Button>
                           </div>
@@ -13708,50 +16354,19 @@ ${vaultYaml}
           <br />
           <Card style={cardStyle}>
             <CardBody>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+              <div className="ado-console-toolbar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
                 <Title headingLevel="h2">ADO Bootstrap Console</Title>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div className="ado-console-actions" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <Button
+                    id="assistant-run-bootstrap"
                     variant="primary"
                     onClick={runBootstrapInsideContainer}
+                    isDisabled={bootstrapStatus === 'running' || deployStatus === 'running'}
                     style={{ borderRadius: '18px', fontWeight: 600 }}
                   >
                     ⊕ Run Bootstrap
                   </Button>
-
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                    <Button
-                      variant="secondary"
-                      onClick={runDeployToOpenShift}
-                      isDisabled={deployStatus === 'running' || bootstrapStatus === 'running'}
-                      style={{ borderRadius: '18px', fontWeight: 600 }}
-                    >
-                      Deploy to OpenShift
-                    </Button>
-                    <Popover
-                      headerContent="Deploy to OpenShift"
-                      bodyContent={<div style={{ maxWidth: '320px' }}>{aapHelp.deployToOpenShift}</div>}
-                      triggerAction="click"
-                      appendTo={() => document.body}
-                    >
-                      <button
-                        type="button"
-                        aria-label="Deploy to OpenShift help"
-                        style={{
-                          border: 'none',
-                          background: 'transparent',
-                          color: isDark ? '#73bcf7' : '#0066cc',
-                          cursor: 'pointer',
-                          fontWeight: 700,
-                          padding: '0 2px',
-                          lineHeight: 1
-                        }}
-                      >
-                        ?
-                      </button>
-                    </Popover>
-                  </span>
 
                   <select
                     value={data.ansible.verbosity}
@@ -13778,7 +16393,12 @@ ${vaultYaml}
                     )}
                   >
                     <DropdownList>
-                      <DropdownItem onClick={previewJson}>Preview JSON</DropdownItem>
+                      <DropdownItem
+                        onClick={runEncryptAndPushJson}
+                        description="Encrypt with ansible-vault (Vault password) as ado-preflight-<env>.json.vault.yml and push to Project Git. Never commits plaintext JSON."
+                      >
+                        Upload encrypted JSON to Git
+                      </DropdownItem>
                       <DropdownItem onClick={downloadJson}>Download JSON</DropdownItem>
                       <DropdownItem
                         onClick={downloadScrubbedJson}
@@ -13786,12 +16406,18 @@ ${vaultYaml}
                       >
                         Download scrubbed JSON
                       </DropdownItem>
-                      <DropdownItem onClick={resetOutput}>Reset</DropdownItem>
+                      <DropdownItem onClick={resetOutput}>Reset form</DropdownItem>
                       <DropdownItem
-                        onClick={runDeployToOpenShift}
-                        description="Build/push image and apply deploy/preflight.yaml using OpenShift creds from the form"
+                        onClick={() => flushPodWorkspace({ wipeCollections: false })}
+                        description="Stop ansible if running; clear /workspace/bootstrap-sample and local playbook plan. Form stays. No image rebuild."
                       >
-                        Deploy to OpenShift
+                        Flush pod workspace
+                      </DropdownItem>
+                      <DropdownItem
+                        onClick={() => flushPodWorkspace({ wipeCollections: true })}
+                        description="Same as flush, and also wipe /workspace/collections (slower next bootstrap)."
+                      >
+                        Flush workspace + collections
                       </DropdownItem>
                     </DropdownList>
                   </Dropdown>
@@ -13838,7 +16464,9 @@ ${vaultYaml}
                     color: '#73bcf7',
                     border: '1px solid #2b9af3'
                   }}>
-                    Bootstrap running — logs update automatically until recap appears.
+                    {activeRunKind === 'playbooks'
+                      ? 'Playbooks running — logs update automatically until recap appears.'
+                      : 'Bootstrap running — logs update automatically until recap appears.'}
                   </div>
                 )}
                 {bootstrapStatus === 'complete' && (
@@ -13850,7 +16478,11 @@ ${vaultYaml}
                     color: '#8bc34a',
                     border: '1px solid #8bc34a'
                   }}>
-                    <div>Bootstrap complete — see PLAY RECAP and recap below.</div>
+                    <div>
+                      {activeRunKind === 'playbooks'
+                        ? 'Playbooks complete — see PLAY RECAP and output below.'
+                        : 'Bootstrap complete — see PLAY RECAP and recap below.'}
+                    </div>
                     {bootstrapRuntime && (
                       <div style={{ marginTop: '6px', fontWeight: 600 }}>
                         Runtime: {bootstrapRuntime}
@@ -13867,7 +16499,11 @@ ${vaultYaml}
                     color: '#ff6b6b',
                     border: '1px solid #ff6b6b'
                   }}>
-                    <div>Bootstrap failed — check logs for fatal errors and PLAY RECAP.</div>
+                    <div>
+                      {activeRunKind === 'playbooks'
+                        ? 'Playbooks failed — check logs for fatal errors and PLAY RECAP.'
+                        : 'Bootstrap failed — check logs for fatal errors and PLAY RECAP.'}
+                    </div>
                     {bootstrapRuntime && (
                       <div style={{ marginTop: '6px', fontWeight: 600 }}>
                         Runtime: {bootstrapRuntime}
@@ -14009,6 +16645,7 @@ ${vaultYaml}
         </div>
       </PageSection>
     </Page>
+    </>
   );
 }
 

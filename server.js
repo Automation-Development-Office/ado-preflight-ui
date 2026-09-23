@@ -208,8 +208,14 @@ const packageJson = require('./package.json');
 
 const openshiftApps = [
   'aap', 'acs', 'acm', 'bookstack', 'cert_manager', 'console', 'devspaces', 'dev_hub',
-  'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio', 'netbox',
+  'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio', 'mtv', 'netbox',
   'oadp', 'ocp_virtualization', 'openshift', 'pega', 'quay', 'rhbk', 'zabbix'
+];
+const orphanOpenShiftPlaybookApps = [
+  'gitlab_runner',
+  'web_terminal',
+  'ocp_descheduler',
+  'ocp_compliance'
 ];
 const rhelApps = ['rhel', 'satellite', 'idm', 'aap', 'dirsrv', 'eck', 'gitlab', 'grafana', 'kafka', 'rhbk', 'compliance', 'stig'];
 const patchingApps = ['patching', 'satellite', 'idm'];
@@ -323,11 +329,71 @@ function parseOpenShiftStorageClasses(body) {
     });
 }
 
-function openshiftApiGetJson(apiHost, token, apiPath, skipTls) {
+/** Package names already covered by full ADO OpenShift Applications components. */
+const ADO_OWNED_OPERATOR_PACKAGES = new Set([
+  'ansible-automation-platform-operator',
+  'rhacs-operator',
+  'advanced-cluster-management',
+  'openshift-cert-manager-operator',
+  'devspaces',
+  'gitlab-operator-kubernetes',
+  'openshift-gitops-operator',
+  'grafana-operator',
+  'confluent-for-kubernetes',
+  'elasticsearch-eck-operator-certified',
+  'redhat-oadp-operator',
+  'quay-operator',
+  'rhdh',
+  'rhbk-operator',
+  'compliance-operator',
+  'web-terminal',
+  'kubevirt-hyperconverged',
+  'cluster-kube-descheduler-operator'
+]);
+
+function parseOpenShiftPackageManifests(body) {
+  const items = Array.isArray(body?.items) ? body.items : [];
+  const byName = new Map();
+  for (const item of items) {
+    const name = String(item?.metadata?.name || item?.status?.packageName || '').trim();
+    if (!name) continue;
+    if (ADO_OWNED_OPERATOR_PACKAGES.has(name)) continue;
+    const status = item?.status || {};
+    const channel = String(status.defaultChannel || '').trim();
+    const source = String(status.catalogSource || '').trim();
+    const sourceNamespace = String(status.catalogSourceNamespace || '').trim();
+    const displayName = String(
+      status.channels?.find?.(ch => ch?.name === channel)?.currentCSVDesc?.displayName
+      || status.provider?.name
+      || name
+    ).trim();
+    const existing = byName.get(name);
+    // Prefer redhat-operators / certified-operators when duplicates exist across catalogs.
+    const preferSource = /^(redhat-operators|certified-operators|community-operators|redhat-marketplace)$/i;
+    if (
+      !existing
+      || (preferSource.test(source) && !preferSource.test(existing.source))
+    ) {
+      byName.set(name, {
+        name,
+        displayName: displayName || name,
+        channel,
+        source,
+        sourceNamespace,
+        adoOwned: false
+      });
+    }
+  }
+  return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function openshiftApiGetJson(apiHost, token, apiPath, skipTls, options = {}) {
   const base = normalizeOpenShiftApiHost(apiHost);
   if (!base) {
     return Promise.reject(new Error('OpenShift API host is required'));
   }
+  const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 2000000;
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 15000;
   const url = new URL(apiPath, `${base}/`);
   return new Promise((resolve, reject) => {
     const req = https.request(
@@ -342,13 +408,13 @@ function openshiftApiGetJson(apiHost, token, apiPath, skipTls) {
           Accept: 'application/json'
         },
         rejectUnauthorized: !skipTls,
-        timeout: 15000
+        timeout: timeoutMs
       },
       res => {
         let payload = '';
         res.on('data', chunk => {
           payload += chunk;
-          if (payload.length > 2000000) {
+          if (payload.length > maxBytes) {
             req.destroy();
             reject(new Error('OpenShift response too large'));
           }
@@ -386,7 +452,8 @@ const openshiftOptionApps = {
   ldap_auth: 'openshift_ldap_auth',
   oauth_rhbk: 'openshift_oauth_rhbk',
   discover_routes_print: 'openshift_discover_routes_print',
-  update_pull_secret: 'openshift_update_pull_secret'
+  update_pull_secret: 'openshift_update_pull_secret',
+  integrated_image_registry: 'integrated_image_registry'
 };
 
 function pushAlternateRouteApps(data, out) {
@@ -457,11 +524,13 @@ app.get('/ado-sample-icon.png', (req, res) => {
 let latestLog = '';
 let latestEvents = '';
 let bootstrapRunning = false;
+let localComponentContext = null;
 let bootstrapStartedAt = null;
 let deployOpenshiftRunning = false;
 let latestDeployLog = '';
 let latestDeployEvents = '';
 let latestDeployResult = null;
+let activeRunChild = null;
 let latestDebug = {
   repoDir: '',
   preflightPath: '',
@@ -908,6 +977,27 @@ function formatAnsibleExtraArgsForShell(input) {
   return tokenizeAnsibleExtraArgs(input).map(shellSingleQuote).join(' ');
 }
 
+/** Strip -e/--extra-vars state=… tokens from freeform extra args. */
+function withoutStateExtraVar(raw) {
+  return String(raw || '')
+    .replace(/(?:^|\s)(?:-e|--extra-vars)(?:=|\s+)state=\S+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Not using AAP: merge ansible.state (present|absent) into extra args.
+ * Common control wins over a freeform -e state= in ansible.extra_args.
+ */
+function resolveAnsibleExtraArgs(data) {
+  const raw = String(data?.ansible?.extra_args || '').trim();
+  if (data?.aap?.enabled !== false) return raw;
+  const state = data?.ansible?.state === 'absent' ? 'absent' : 'present';
+  const base = withoutStateExtraVar(raw);
+  const stateFlag = `-e state=${state}`;
+  return base ? `${base} ${stateFlag}` : stateFlag;
+}
+
 function buildAnsibleEnv(skipTlsVerify = false, gitSkipTlsVerify = true) {
   const ansibleEnv = {
     ...process.env,
@@ -945,8 +1035,249 @@ function usesBearerGitAuth(scmTool) {
   return String(scmTool || '').trim().toLowerCase() === 'bitbucket';
 }
 
+function defaultGitUsername(scmTool) {
+  return usesBearerGitAuth(scmTool) ? 'x-token-auth' : 'oauth2';
+}
+
+function authenticatedGitUrl(repoUrl, token, username) {
+  if (!token || !repoUrl) return String(repoUrl || '');
+  try {
+    const u = new URL(repoUrl);
+    u.username = username || defaultGitUsername('gitlab');
+    u.password = String(token);
+    return u.toString();
+  } catch {
+    return String(repoUrl);
+  }
+}
+
 function gitBearerExtraHeader(token) {
   return `Authorization: Bearer ${String(token || '').trim()}`;
+}
+
+/** Ensure plaintext preflight JSON / vault pass never enter git commits. */
+function ensurePreflightSecretsGitignore(repoDir) {
+  const gitignorePath = path.join(repoDir, '.gitignore');
+  const block = [
+    '# ADO preflight secrets — never commit plaintext JSON or vault pass',
+    'ado-preflight-*.json',
+    '!ado-preflight-*.json.vault.yml',
+    'ado-extra-vars.json',
+    '.vault_pass',
+    '.vault_pass.*',
+    ''
+  ].join('\n');
+  let existing = '';
+  try {
+    existing = fs.readFileSync(gitignorePath, 'utf8');
+  } catch {
+    existing = '';
+  }
+  if (existing.includes('ado-preflight-*.json')) {
+    if (!existing.includes('!ado-preflight-*.json.vault.yml')) {
+      fs.writeFileSync(
+        gitignorePath,
+        `${existing.trimEnd()}\n!ado-preflight-*.json.vault.yml\n`
+      );
+    }
+    return;
+  }
+  fs.writeFileSync(
+    gitignorePath,
+    existing ? `${existing.trimEnd()}\n\n${block}` : block
+  );
+}
+
+async function prepareGitAuthAndClone({
+  repoUrl,
+  branch,
+  repoDir,
+  token,
+  scmTool,
+  gitSkipTlsVerify = true,
+  gitName = 'ADO Preflight UI',
+  gitEmail = 'ado-preflight@localhost',
+  cleanRepoDir = true
+}) {
+  const tool = String(scmTool || 'gitlab').trim().toLowerCase();
+  const gitUsesBearerAuth = usesBearerGitAuth(tool);
+  const gitUsername = defaultGitUsername(tool);
+  const gitEnv = buildAnsibleEnv(false, gitSkipTlsVerify);
+
+  configureGitCredentials(repoUrl, token, tool);
+
+  if (cleanRepoDir) {
+    event(`Cleaning repo directory ${repoDir}`);
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(path.dirname(repoDir), { recursive: true });
+  fs.mkdirSync(workRoot, { recursive: true });
+
+  await runStream(
+    'git',
+    ['config', '--global', 'user.email', gitEmail],
+    workRoot,
+    'Configuring Git user email'
+  );
+  await runStream(
+    'git',
+    ['config', '--global', 'user.name', gitName],
+    workRoot,
+    'Configuring Git user name'
+  );
+
+  if (!gitUsesBearerAuth) {
+    await runStream(
+      'git',
+      ['config', '--global', 'credential.helper', 'store'],
+      workRoot,
+      'Configuring Git credential helper'
+    );
+    await runStream(
+      'git',
+      ['config', '--global', 'credential.useHttpPath', 'false'],
+      workRoot,
+      'Configuring Git credential scope'
+    );
+  }
+
+  const cloneUrl = (!gitUsesBearerAuth && token)
+    ? authenticatedGitUrl(repoUrl, token, gitUsername)
+    : repoUrl;
+
+  const cloneArgs = buildGitCloneArgs({
+    repoUrl: cloneUrl,
+    branch,
+    repoDir,
+    token,
+    scmTool: tool,
+    gitSkipTlsVerify
+  });
+
+  const cloneCode = await runStream(
+    'git',
+    cloneArgs,
+    workRoot,
+    gitUsesBearerAuth
+      ? 'Cloning Git repository with Authorization Bearer header'
+      : 'Cloning Git repository',
+    gitEnv
+  );
+
+  if (cloneCode !== 0 || !fs.existsSync(repoDir)) {
+    return {
+      ok: false,
+      code: cloneCode || 128,
+      error: 'Git clone failed. Check logs.'
+    };
+  }
+
+  event('Git repository cloned');
+
+  if (gitSkipTlsVerify) {
+    await runStream(
+      'git',
+      ['config', '--local', 'http.sslVerify', 'false'],
+      repoDir,
+      'Disabling git SSL verify'
+    );
+  }
+
+  if (gitUsesBearerAuth && token) {
+    await runStream(
+      'git',
+      ['config', '--local', '--unset-all', 'http.extraHeader'],
+      repoDir,
+      'Clearing previous Bitbucket Bearer headers'
+    );
+    await runStream(
+      'git',
+      ['config', '--local', 'http.extraHeader', gitBearerExtraHeader(token)],
+      repoDir,
+      'Configuring local Bitbucket Bearer auth for push'
+    );
+    await runStream(
+      'git',
+      ['remote', 'set-url', 'origin', repoUrl],
+      repoDir,
+      'Setting origin remote URL'
+    );
+  } else if (token) {
+    await runStream(
+      'git',
+      ['remote', 'set-url', 'origin', authenticatedGitUrl(repoUrl, token, gitUsername)],
+      repoDir,
+      'Setting authenticated origin remote URL'
+    );
+    await runStream(
+      'git',
+      ['config', '--local', 'credential.helper', 'store'],
+      repoDir,
+      'Configuring local Git credential helper'
+    );
+  }
+
+  return { ok: true, code: 0, error: null };
+}
+
+async function gitCommitAndPush({
+  repoDir,
+  repoUrl,
+  branch,
+  pathsToAdd,
+  commitMessage,
+  token,
+  scmTool,
+  gitSkipTlsVerify = true
+}) {
+  const tool = String(scmTool || 'gitlab').trim().toLowerCase();
+  const gitUsesBearerAuth = usesBearerGitAuth(tool);
+  const gitUsername = defaultGitUsername(tool);
+  const files = (Array.isArray(pathsToAdd) ? pathsToAdd : [pathsToAdd])
+    .filter(Boolean)
+    .map(file => JSON.stringify(file))
+    .join(' ');
+
+  const pushCode = await runStream('bash', ['-lc', `
+set -euo pipefail
+cd ${JSON.stringify(repoDir)}
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=true
+${gitSkipTlsVerify ? 'git config --local http.sslVerify false || true' : 'true'}
+${gitUsesBearerAuth && token
+  ? `git config --local --unset-all http.extraHeader || true
+git config --local http.extraHeader ${JSON.stringify(gitBearerExtraHeader(token))} || true
+git remote set-url origin ${JSON.stringify(repoUrl)}`
+  : `git config --local credential.helper store || true
+git remote set-url origin ${JSON.stringify(authenticatedGitUrl(repoUrl, token, gitUsername))}`}
+
+# Drop any previously tracked plaintext preflight JSON / vault pass from the index.
+git ls-files -z -- 'ado-preflight-*.json' 'ado-extra-vars.json' '.vault_pass' 2>/dev/null \
+  | while IFS= read -r -d '' f; do
+      case "$f" in
+        *.json.vault.yml) continue ;;
+      esac
+      git rm -f --cached -- "$f" || true
+    done
+
+git add -f -- ${files}
+if git diff --cached --quiet; then
+  echo "No changes to commit (already up to date)."
+else
+  git -c user.email="ado-preflight@localhost" -c user.name="ADO Preflight UI" commit -m ${JSON.stringify(commitMessage)}
+fi
+
+git push origin ${JSON.stringify(`HEAD:${branch}`)}
+echo "Pushed to origin/${branch}"
+
+git remote set-url origin ${JSON.stringify(repoUrl)} || true
+`], repoDir, 'Committing and pushing to Git', buildAnsibleEnv(false, gitSkipTlsVerify));
+
+  return {
+    ok: pushCode === 0,
+    code: pushCode,
+    error: pushCode === 0 ? null : 'Git commit/push failed. Check logs.'
+  };
 }
 
 function redactGitArgsForLog(args) {
@@ -1085,7 +1416,7 @@ function selectedComponentAppsFrom(data) {
       out.push(component);
       const selected = data.component_apps?.[component] || [];
       out.push(...selected);
-    } else {
+    } else if (!orphanOpenShiftPlaybookApps.includes(component)) {
       out.push(component);
     }
   }
@@ -1172,6 +1503,21 @@ function pruneInactiveComponentApps(data) {
   const groups = ['openshift', 'rhel', 'patching', 'aws', 'provision'];
   const components = Array.isArray(data.components) ? data.components : [];
   const allSelected = components.includes('all');
+  const catalogs = {
+    openshift: openshiftApps,
+    rhel: rhelApps,
+    patching: patchingApps,
+    aws: awsApps,
+    provision: provisionApps
+  };
+  const catalogApps = new Set([
+    ...openshiftApps,
+    ...rhelApps,
+    ...patchingApps,
+    ...awsApps,
+    ...provisionApps
+  ]);
+  const orphanApps = new Set(orphanOpenShiftPlaybookApps);
 
   if (!data.component_apps) data.component_apps = {};
 
@@ -1182,6 +1528,39 @@ function pruneInactiveComponentApps(data) {
 
     if (!allSelected && !components.includes(group)) {
       data.component_apps[group] = [];
+    } else {
+      const catalog = new Set(catalogs[group] || []);
+      data.component_apps[group] = data.component_apps[group].filter(app => catalog.has(app));
+    }
+  }
+
+  if (!allSelected) {
+    const appsInGroups = new Set(
+      groups.flatMap(group => (
+        Array.isArray(data.component_apps[group]) ? data.component_apps[group] : []
+      ))
+    );
+    const nextComponents = [];
+    for (const component of components) {
+      if (groups.includes(component)) {
+        nextComponents.push(component);
+        continue;
+      }
+      if (appsInGroups.has(component) || catalogApps.has(component) || orphanApps.has(component)) {
+        continue;
+      }
+      nextComponents.push(component);
+    }
+    for (const group of groups) {
+      const apps = data.component_apps[group] || [];
+      const opts = data.component_options?.[group] || [];
+      if ((apps.length > 0 || (Array.isArray(opts) && opts.length > 0)) && !nextComponents.includes(group)) {
+        nextComponents.push(group);
+      }
+    }
+    data.components = nextComponents;
+    if (Array.isArray(data.selected_component_apps)) {
+      data.selected_component_apps = data.selected_component_apps.filter(app => !orphanApps.has(app));
     }
   }
 
@@ -1255,6 +1634,17 @@ function defaultComponentConfig(component) {
   if (component === 'grafana') {
     Object.assign(config, {
       hostname: '',
+      storage: '',
+      replicas: 1,
+      database_type: 'sqlite',
+      database_provision: true,
+      postgres_storage: '',
+      postgres_storage_size: '5Gi',
+      postgres_image: '',
+      postgres_database: 'grafana',
+      postgres_user: 'grafana',
+      postgres_password: '',
+      postgres_host: '',
       folders: [
         { name: 'Openshift', source_type: 'path', source: '', dashboards_path: 'dashboards', alerts_path: 'alerts' }
       ],
@@ -1309,6 +1699,7 @@ function defaultComponentConfig(component) {
 
   if (component === 'acm') {
     Object.assign(config, {
+      policy_enabled: false, policy_name: 'namespace-label', policy_namespace: 'policies', policy_target_namespace: '', policy_label_key: '', policy_label_value: '', policy_cluster_set: '', policy_selector_key: '', policy_selector_value: '', policy_remediation: 'inform',
       channel: 'release-2.17'
     });
   }
@@ -1333,8 +1724,13 @@ function defaultComponentConfig(component) {
     });
   }
 
+  if (component === 'pega') {
+    Object.assign(config, {"database_mode": "new", "database_chart_path": "", "database_values_file": "", "namespace": "pega", "release_name": "pega", "chart_path": "", "values_file": "", "allowed_registries": "", "helm_binary": "helm", "timeout": "20m0s", "opensearch_chart_path": "", "opensearch_values_file": "", "backingservices_chart_path": "", "backingservices_values_file": ""});
+  }
+
   if (component === 'devspaces') {
     Object.assign(config, {
+      delivery_mode: 'direct', gitops_repo_url: '', gitops_revision: 'main', gitops_path: '', gitops_namespace: 'openshift-gitops', gitops_project: 'default', gitops_destination: 'https://kubernetes.default.svc',
       namespace: 'openshift-devspaces',
       disable_default_samples: true,
       customize_workspace: false,
@@ -1469,8 +1865,8 @@ function buildDefaultGalaxyCredentials(org = 'ADO', hubHostname = '') {
       url: 'https://galaxy.ansible.com/',
       auth_url: '',
       token: '',
-      enabled: true,
-      attach_to_org: true,
+      enabled: false,
+      attach_to_org: false,
       order: 5
     }
   ];
@@ -2388,6 +2784,12 @@ function normalizePreflightPayload(input) {
   });
 
   if (data.openshift.htpasswd_action === undefined) data.openshift.htpasswd_action = 'add';
+  if (!String(data.openshift.htpasswd_idp_name || '').trim()) {
+    data.openshift.htpasswd_idp_name = 'htpasswd-admin';
+  }
+  if (!String(data.openshift.htpasswd_secret || '').trim()) {
+    data.openshift.htpasswd_secret = `${data.openshift.htpasswd_idp_name}-secret`;
+  }
   if (!Array.isArray(data.openshift.htpasswd_users) || data.openshift.htpasswd_users.length === 0) {
     data.openshift.htpasswd_users = [{
       name: data.openshift.admin_username || 'admin',
@@ -2415,6 +2817,20 @@ function normalizePreflightPayload(input) {
       if (!data.component_config.grafana.dashboards_source && firstFolder.source) {
         data.component_config.grafana.dashboards_source = firstFolder.source;
       }
+    }
+    const dbType = String(data.component_config.grafana.database_type || 'sqlite').toLowerCase();
+    data.component_config.grafana.database_type = (dbType === 'postgres') ? 'postgres' : 'sqlite';
+    if (data.component_config.grafana.database_provision === undefined) {
+      data.component_config.grafana.database_provision = true;
+    }
+    if (!data.component_config.grafana.postgres_storage_size) {
+      data.component_config.grafana.postgres_storage_size = '5Gi';
+    }
+    if (!data.component_config.grafana.postgres_database) {
+      data.component_config.grafana.postgres_database = 'grafana';
+    }
+    if (!data.component_config.grafana.postgres_user) {
+      data.component_config.grafana.postgres_user = 'grafana';
     }
     if (!data.component_config.grafana.email || typeof data.component_config.grafana.email !== 'object') {
       data.component_config.grafana.email = { enabled: false };
@@ -2457,11 +2873,8 @@ function normalizePreflightPayload(input) {
   stripInactiveAapSections(data);
 
   const appsDomain = String(data.openshift?.apps_domain || '').trim();
-  if (
-    data.component_config?.acs
-    && !String(data.component_config.acs.hostname || '').trim()
-    && appsDomain
-  ) {
+  if (data.component_config?.acs && appsDomain) {
+    // Always derive Central route host from apps domain — do not keep form overrides.
     data.component_config.acs.hostname = `central.${appsDomain}`;
   }
 
@@ -3929,11 +4342,13 @@ function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
         ...envOverrides
       }
     });
+    activeRunChild = child;
 
     child.stdout.on('data', d => append(d.toString()));
     child.stderr.on('data', d => append(d.toString()));
 
     child.on('close', code => {
+      if (activeRunChild === child) activeRunChild = null;
       append(`\n[exit code ${code}]\n`);
 
       if (eventLabel) {
@@ -3943,6 +4358,97 @@ function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
       resolve(code);
     });
   });
+}
+
+function stopActiveRun(signal = 'SIGTERM') {
+  const child = activeRunChild;
+  if (!child || child.killed) return false;
+  try {
+    child.kill(signal);
+    return true;
+  } catch (err) {
+    event(`Failed to stop active run: ${err.message}`);
+    return false;
+  }
+}
+
+function flushWorkspace({ wipeCollections = false } = {}) {
+  const removed = [];
+  const noted = [];
+  const killed = stopActiveRun('SIGTERM');
+  if (killed) noted.push('stopped active bootstrap/playbook process');
+  // Best-effort: leftover ansible from a previous broken run.
+  for (const pattern of [
+    'ansible-playbook.*/workspace/bootstrap-sample',
+    'local_components.py.*/workspace/bootstrap-sample',
+    'python3.*/workspace/bootstrap-sample/local_components'
+  ]) {
+    try {
+      execFileSync('pkill', ['-f', pattern], { stdio: 'ignore' });
+      noted.push(`pkill ${pattern}`);
+    } catch {
+      // no matching processes
+    }
+  }
+
+  bootstrapRunning = false;
+  bootstrapStartedAt = null;
+  localComponentContext = null;
+  latestLog = '';
+  latestEvents = '';
+  latestDebug = {
+    repoDir: '',
+    preflightPath: '',
+    extraVarsPath: '',
+    normalizedPayload: null,
+    selectedComponents: '',
+    selectedComponentApps: [],
+    result: null
+  };
+
+  const targets = [
+    path.join(workRoot, 'bootstrap-sample'),
+    path.join(workRoot, 'ado-source'),
+    path.join(workRoot, 'install-collections.sh'),
+    path.join(workRoot, 'stage-ado-source.py')
+  ];
+  if (wipeCollections) {
+    targets.push(path.join(workRoot, 'collections'));
+  }
+  // Drop staged collection copies at /workspace root (not under collections/).
+  try {
+    for (const name of fs.readdirSync(workRoot)) {
+      if (/^infra-ado-.*\.tar\.gz$/.test(name) || /^ado-.*\.tar\.gz$/.test(name)) {
+        targets.push(path.join(workRoot, name));
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  for (const target of targets) {
+    try {
+      if (!fs.existsSync(target)) continue;
+      fs.rmSync(target, { recursive: true, force: true });
+      removed.push(target);
+    } catch (err) {
+      noted.push(`failed to remove ${target}: ${err.message}`);
+    }
+  }
+
+  // Git credential helper file written during bootstrap push mode.
+  const gitCreds = path.join(process.env.HOME || '/tmp', '.git-credentials');
+  try {
+    if (fs.existsSync(gitCreds)) {
+      fs.rmSync(gitCreds, { force: true });
+      removed.push(gitCreds);
+    }
+  } catch (err) {
+    noted.push(`failed to remove git credentials: ${err.message}`);
+  }
+
+  fs.mkdirSync(workRoot, { recursive: true });
+  return { removed, noted, wipeCollections: Boolean(wipeCollections) };
 }
 
 function writeIfMissing(filePath, content) {
@@ -4547,6 +5053,344 @@ app.delete('/api/rhbk-standalone-zip', (req, res) => {
   fs.unlink(candidate, () => res.json({ ok: true }));
 });
 
+function resolveLocalComponentsRunner(repoDir) {
+  // Prefer the collection copy so local/no-AAP runner fixes apply without requiring a
+  // full re-bootstrap just to refresh the vendored script in the generated repo.
+  const candidates = [
+    path.join('/workspace/collections/ansible_collections/infra/ado/roles/bootstrap_generate_playbook_repo/files/local_components.py'),
+    path.join('/opt/ado-collections/extracted/roles/bootstrap_generate_playbook_repo/files/local_components.py'),
+    path.join(__dirname, 'collections', 'ansible_collections', 'infra', 'ado', 'roles', 'bootstrap_generate_playbook_repo', 'files', 'local_components.py'),
+    path.join(repoDir, 'local_components.py')
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return path.join(repoDir, 'local_components.py');
+}
+
+function loadYamlFile(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  try {
+    // Minimal YAML subset for flat htpasswd keys (js-yaml may be unavailable).
+    const text = fs.readFileSync(filePath, 'utf8');
+    if (text.startsWith('$ANSIBLE_VAULT')) return {};
+    const out = {};
+    for (const line of text.split(/\r?\n/)) {
+      const match = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+      if (!match) continue;
+      let value = match[2].trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      out[match[1]] = value;
+    }
+    return out;
+  } catch (_err) {
+    return {};
+  }
+}
+
+function htpasswdFormVarsFromBootstrapRepo(repoDir, environment) {
+  const formVars = {};
+  const envName = String(environment || 'dev').trim() || 'dev';
+  const envDir = path.join(repoDir, 'group_vars', 'all', envName);
+  for (const fileName of ['vars_admin_htpasswd.yml', 'vars_htpass_admin.yml', 'vars_openshift.yml']) {
+    const data = loadYamlFile(path.join(envDir, fileName));
+    for (const key of ['htpasswd_idp_name', 'htpasswd_idp', 'htpasswd_secret', 'htpasswd_action']) {
+      if (data[key] && !formVars[key]) formVars[key] = String(data[key]).trim();
+    }
+  }
+  let preflightPath = latestDebug.preflightPath;
+  if (!preflightPath || !fs.existsSync(preflightPath)) {
+    const matches = fs.readdirSync(repoDir)
+      .filter((name) => name.startsWith('ado-preflight-') && name.endsWith('.json'))
+      .map((name) => path.join(repoDir, name));
+    matches.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    preflightPath = matches[0] || '';
+  }
+  if (preflightPath && fs.existsSync(preflightPath)) {
+    try {
+      const preflight = JSON.parse(fs.readFileSync(preflightPath, 'utf8'));
+      const openshift = preflight.openshift || {};
+      const idp = String(openshift.htpasswd_idp_name || '').trim();
+      const secret = String(openshift.htpasswd_secret || '').trim() || (idp ? `${idp}-secret` : '');
+      if (idp) {
+        formVars.htpasswd_idp_name = idp;
+        formVars.htpasswd_idp = idp;
+      }
+      if (secret) formVars.htpasswd_secret = secret;
+      if (openshift.htpasswd_action) {
+        formVars.htpasswd_action = openshift.htpasswd_action;
+      }
+    } catch (_err) {
+      // ignore malformed preflight
+    }
+  }
+  return formVars;
+}
+
+function stepsIncludeHtpasswd(steps) {
+  return (Array.isArray(steps) ? steps : []).some((step) => {
+    const text = String(step || '').toLowerCase();
+    return text.includes('htpass') || text.includes('htpasswd') || text.includes('admin_htpasswd');
+  });
+}
+
+function componentRequestFile(body) {
+  if (!localComponentContext || body.planId !== localComponentContext.id) {
+    throw new Error('Run bootstrap successfully with Not using AAP before selecting components.');
+  }
+  const directory = fs.mkdtempSync(path.join(require('os').tmpdir(), 'ado-components-'));
+  const file = path.join(directory, 'request.json');
+  const steps = Array.isArray(body.steps) ? body.steps : [];
+  let form_vars = {};
+  // Only attach htpasswd_* when an HTPasswd playbook is selected — never for cert-manager alone.
+  if (stepsIncludeHtpasswd(steps)) {
+    const fromRepo = htpasswdFormVarsFromBootstrapRepo(
+      localComponentContext.repoDir,
+      localComponentContext.environment || 'dev'
+    );
+    const fromBody = body.form_vars && typeof body.form_vars === 'object' ? body.form_vars : {};
+    form_vars = { ...fromRepo, ...fromBody };
+    if (form_vars.htpasswd_idp_name) {
+      append(`Component form_vars htpasswd_idp_name=${form_vars.htpasswd_idp_name} secret=${form_vars.htpasswd_secret || ''}\n`);
+    }
+  }
+  const step_options = (body.step_options && typeof body.step_options === 'object')
+    ? body.step_options
+    : {};
+  fs.writeFileSync(file, JSON.stringify({
+    steps,
+    values: body.values || {},
+    form_vars,
+    extra_args: String(body.extra_args || ''),
+    step_options
+  }), { mode: 0o600 });
+  return { directory, file };
+}
+
+function previewComponentCommands(file) {
+  const { repoDir } = localComponentContext;
+  const runner = resolveLocalComponentsRunner(repoDir);
+  return JSON.parse(execFileSync('python3', [runner, '--repo', repoDir, '--request', file, '--preview'], { encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024 }));
+}
+
+app.get('/api/components/plan', (req, res) => {
+  if (!localComponentContext) return res.status(404).json({ error: 'No successful local bootstrap is available.' });
+  try {
+    const plan = JSON.parse(fs.readFileSync(path.join(localComponentContext.repoDir, 'component-run-plan.json'), 'utf8'));
+    res.json({ ...plan, planId: localComponentContext.id });
+  } catch (err) { res.status(409).json({ error: 'Regenerate bootstrap to create the component execution plan.' }); }
+});
+
+/**
+ * Map playbook path → component key used in vars_{component}.yml / vault_{component}.yml.
+ * Falls back to hyphen→underscore of the playbook directory name.
+ */
+function componentKeyFromPlaybook(playbookPath) {
+  const normalized = String(playbookPath || '').replace(/\\/g, '/');
+  const map = {
+    'cert-manager': 'cert_manager',
+    'admin_htpasswd': 'admin_htpasswd',
+    htpass: 'admin_htpasswd',
+    openshift: 'openshift',
+    console: 'console',
+    rhbk: 'rhbk',
+    grafana: 'grafana',
+    gitlab: 'gitlab',
+    quay: 'quay',
+    minio: 'minio',
+    netbox: 'netbox',
+    bookstack: 'bookstack',
+    zabbix: 'zabbix',
+    acm: 'acm',
+    acs: 'acs',
+    gitops: 'gitops',
+    oadp: 'oadp',
+    pega: 'pega',
+    dirsrv: 'dirsrv',
+    kafka: 'kafka',
+    eck: 'eck',
+    'dev-hub': 'dev_hub',
+    'dev_hub': 'dev_hub',
+    'devspaces': 'devspaces'
+  };
+  const parts = normalized.split('/').filter(Boolean);
+  const dir = parts.length >= 2 && parts[0] === 'playbooks' ? parts[1] : parts[0];
+  if (normalized.includes('htpass')) return 'admin_htpasswd';
+  if (normalized.includes('console-banner')) return 'console';
+  return map[dir] || String(dir || '').replace(/-/g, '_');
+}
+
+function redactGroupVarsText(fileName, text) {
+  const raw = String(text || '');
+  if (raw.startsWith('$ANSIBLE_VAULT')) {
+    return '# Ansible Vault encrypted — contents hidden in explain.\n# Decrypt with --vault-password-file .vault_pass when the playbook runs.\n';
+  }
+  let out = raw
+    .replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g, '-----BEGIN …-----\n(redacted PEM)\n-----END …-----')
+    .replace(/^([A-Za-z0-9_]*?(?:password|passwd|token|secret|api_key|private_key|oauth|bearer)[A-Za-z0-9_]*):\s*.+$/gim, '$1: (redacted)');
+  // Long single-line base64 (e.g. idm_ca_bundle_content_base64)
+  out = out.replace(/^([A-Za-z0-9_]*(?:base64|pem|crt|key)[A-Za-z0-9_]*):\s*'?[A-Za-z0-9+/=]{80,}'?\s*$/gim, '$1: (redacted)');
+  if (/vault/i.test(fileName) && out.length > 4000) {
+    return `# ${fileName} truncated for explain (${out.length} chars).\n${out.slice(0, 4000)}\n# …\n`;
+  }
+  return out;
+}
+
+function listGroupVarsForPlaybook(repoDir, playbookPath, envName) {
+  const env = String(envName || 'dev').trim() || 'dev';
+  const envDir = path.join(repoDir, 'group_vars', 'all', env);
+  const relBase = `group_vars/all/${env}`;
+  if (!fs.existsSync(envDir)) {
+    return {
+      env,
+      dir: relBase,
+      playbook: playbookPath,
+      component: componentKeyFromPlaybook(playbookPath),
+      files: [],
+      error: `Directory ${relBase} not found. Run Bootstrap first.`
+    };
+  }
+  const component = componentKeyFromPlaybook(playbookPath);
+  const preferred = [
+    'infra_config_vars.yml',
+    `vars_${component}.yml`,
+    `vault_${component}.yml`,
+    'vars_openshift.yml',
+    'vault_openshift.yml'
+  ];
+  if (component === 'console') {
+    preferred.push('vars_console.yml', 'vault_console.yml');
+  }
+  if (component === 'admin_htpasswd') {
+    preferred.push('vars_admin_htpasswd.yml', 'vault_admin_htpasswd.yml');
+  }
+  const onDisk = fs.readdirSync(envDir)
+    .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+    .sort();
+  const ordered = [];
+  const seen = new Set();
+  for (const name of preferred) {
+    if (onDisk.includes(name) && !seen.has(name)) {
+      ordered.push(name);
+      seen.add(name);
+    }
+  }
+  for (const name of onDisk) {
+    if (!seen.has(name)) {
+      ordered.push(name);
+      seen.add(name);
+    }
+  }
+  const files = ordered.map((name) => {
+    const full = path.join(envDir, name);
+    let content = '';
+    let missing = false;
+    try {
+      content = redactGroupVarsText(name, fs.readFileSync(full, 'utf8'));
+    } catch (_err) {
+      missing = true;
+      content = `# Unable to read ${name}\n`;
+    }
+    return {
+      name,
+      path: `${relBase}/${name}`,
+      preferred: preferred.includes(name),
+      vault: /^vault_/i.test(name) || content.includes('Ansible Vault encrypted'),
+      missing,
+      content
+    };
+  });
+  return {
+    env,
+    dir: relBase,
+    playbook: playbookPath,
+    component,
+    defaultFile: files.find((f) => f.preferred && f.name.startsWith('vars_'))?.name
+      || files.find((f) => f.preferred)?.name
+      || files[0]?.name
+      || '',
+    files
+  };
+}
+
+app.get('/api/components/group-vars', (req, res) => {
+  const playbook = String(req.query.playbook || '').trim();
+  const env = String(req.query.env || localComponentContext?.environment || 'dev').trim() || 'dev';
+  if (!playbook || playbook.includes('..') || !playbook.startsWith('playbooks/')) {
+    return res.status(400).json({ error: 'Query playbook=playbooks/.../file.yml is required.' });
+  }
+  const repoDir = localComponentContext?.repoDir
+    || latestDebug.repoDir
+    || path.join(workRoot, 'bootstrap-sample');
+  if (!fs.existsSync(repoDir)) {
+    return res.status(404).json({ error: 'Bootstrap repo not found. Run Bootstrap first.' });
+  }
+  try {
+    res.json(listGroupVarsForPlaybook(repoDir, playbook, env));
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+app.post('/api/components/preview', (req, res) => {
+  let request;
+  try {
+    request = componentRequestFile(req.body);
+    res.json({ commands: previewComponentCommands(request.file) });
+  } catch (err) {
+    res.status(400).json({ error: err.stderr ? String(err.stderr).trim() : err.message });
+  } finally { if (request) fs.rmSync(request.directory, { recursive: true, force: true }); }
+});
+
+app.post('/api/components/run', async (req, res) => {
+  if (bootstrapRunning) return res.status(409).json({ error: 'A run is already in progress.' });
+  let request;
+  let context;
+  try {
+    request = componentRequestFile(req.body);
+    previewComponentCommands(request.file); // Validate every selected step before any mutation.
+    context = { ...localComponentContext };
+  } catch (err) {
+    if (request) fs.rmSync(request.directory, { recursive: true, force: true });
+    return res.status(400).json({ error: err.stderr ? String(err.stderr).trim() : err.message });
+  }
+  bootstrapRunning = true;
+  bootstrapStartedAt = Date.now();
+  latestLog = '';
+  latestEvents = '';
+  latestDebug.result = null;
+  res.status(202).json({ status: 'started' });
+  try {
+    event('Refreshing infra.ado from baked /opt/ado-collections before component run');
+    const refreshCode = await runStream('bash', ['-lc', [
+      'set -euo pipefail',
+      'COLLECTION_DIR=/opt/ado-collections',
+      'mkdir -p /workspace/collections',
+      'ado_archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name \'infra-ado-*.tar.gz\' | sort -V | tail -n 1)"',
+      'if [ -z "$ado_archive" ]; then echo "ERROR: no infra-ado-*.tar.gz in $COLLECTION_DIR"; exit 1; fi',
+      'echo "Installing $ado_archive"',
+      'ansible-galaxy collection install "$ado_archive" -p /workspace/collections --force --no-deps'
+    ].join('\n')], context.repoDir, 'Refreshing infra.ado collection', context.env);
+    if (refreshCode !== 0) {
+      throw new Error(`Failed to refresh infra.ado collection (exit ${refreshCode})`);
+    }
+    event('Running selected generated components in the pod');
+    const code = await runStream('python3', [resolveLocalComponentsRunner(context.repoDir), '--repo', context.repoDir, '--request', request.file], context.repoDir, 'Running selected components', context.env);
+    latestDebug.result = { status: code === 0 ? 'complete' : 'failed', exitCode: code, phase: 'components', bootstrapRuntime: formatBootstrapRuntime(Date.now() - bootstrapStartedAt) };
+    event(`Bootstrap finished exitCode=${code}`);
+  } catch (err) {
+    latestDebug.result = { status: 'failed', exitCode: 2, phase: 'components', error: err.message };
+    append(`Component execution failed: ${err.message}\n`);
+    event('Bootstrap finished exitCode=2');
+  } finally {
+    bootstrapRunning = false;
+    bootstrapStartedAt = null;
+    fs.rmSync(request.directory, { recursive: true, force: true });
+  }
+});
+
 app.get('/api/logs' , (req, res) => {
   res.type('text/plain').send(latestLog);
 });
@@ -4569,6 +5413,34 @@ app.get('/api/bootstrap/result', (req, res) => {
     });
   }
   res.json(latestDebug.result);
+});
+
+app.post('/api/workspace/flush', (req, res) => {
+  if (deployOpenshiftRunning) {
+    return res.status(409).json({
+      error: 'OpenShift deploy is running. Wait for it to finish before flushing the workspace.'
+    });
+  }
+  const wipeCollections = req.body?.wipe_collections === true
+    || req.query?.wipe_collections === '1'
+    || req.query?.wipe_collections === 'true';
+  const wasRunning = bootstrapRunning;
+  const result = flushWorkspace({ wipeCollections });
+  event(`Workspace flushed (wipeCollections=${wipeCollections}, wasRunning=${wasRunning})`);
+  append('\n=== Workspace flushed ===\n');
+  append(`Removed:\n${result.removed.map(p => `  - ${p}`).join('\n') || '  (nothing)'}\n`);
+  if (result.noted.length) {
+    append(`Notes:\n${result.noted.map(p => `  - ${p}`).join('\n')}\n`);
+  }
+  append('Import JSON / change selections, then Run Bootstrap again for a clean plan.\n');
+  res.json({
+    ok: true,
+    wasRunning,
+    ...result,
+    message: wipeCollections
+      ? 'Stopped runs and cleared bootstrap clone, staged sources, and installed collections.'
+      : 'Stopped runs and cleared bootstrap clone / staged sources. Collections kept for faster next bootstrap.'
+  });
 });
 
 app.get('/api/deploy/openshift/status', (req, res) => {
@@ -4836,6 +5708,40 @@ app.post('/api/openshift/storageclasses', async (req, res) => {
   }
 });
 
+app.post('/api/openshift/packagemanifests', async (req, res) => {
+  const apiHost = String(req.body?.api_host || req.body?.host || '').trim();
+  const token = String(req.body?.token || req.body?.api_key || '').trim();
+  const skipTls = req.body?.skip_tls_verify !== false;
+  if (!apiHost || !token) {
+    res.status(400).json({
+      error: 'OpenShift API host and token are required to list PackageManifests.'
+    });
+    return;
+  }
+
+  try {
+    const body = await openshiftApiGetJson(
+      apiHost,
+      token,
+      '/apis/packages.operators.coreos.com/v1/packagemanifests',
+      skipTls,
+      { maxBytes: 20000000, timeoutMs: 60000 }
+    );
+    const operators = parseOpenShiftPackageManifests(body);
+    event(
+      `Listed ${operators.length} catalog operators `
+      + `(excluded ${ADO_OWNED_OPERATOR_PACKAGES.size} ADO-owned packages)`
+    );
+    res.json({
+      operators,
+      excludedPackages: [...ADO_OWNED_OPERATOR_PACKAGES].sort()
+    });
+  } catch (err) {
+    event(`Failed listing OpenShift PackageManifests: ${err.message}`);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.post('/api/openshift-agent/validate', (req, res) => {
   const validation = validateAgentInstaller(req.body);
   res.json({
@@ -4964,6 +5870,196 @@ app.post('/api/keycloak/realm-public-key', async (req, res) => {
 });
 
 app.post('/api/bootstrap', async (req, res) => {
+  return handleScaffoldingRequest(req, res);
+});
+
+app.post('/api/publish', async (req, res) => {
+  return handlePublishEncryptedJsonRequest(req, res);
+});
+
+/**
+ * Encrypt current preflight JSON with ansible-vault (Vault password from form)
+ * and push only ado-preflight-<env>.json.vault.yml to the Project Git repo.
+ * Never pushes plaintext ado-preflight-*.json.
+ */
+async function handlePublishEncryptedJsonRequest(req, res) {
+  latestLog = '';
+  latestEvents = '';
+  latestDebug = {
+    repoDir: '',
+    preflightPath: '',
+    extraVarsPath: '',
+    normalizedPayload: null,
+    selectedComponents: '',
+    selectedComponentApps: [],
+    result: null
+  };
+
+  event('Publish encrypted JSON started');
+
+  const data = normalizePreflightPayload(req.body || {});
+  const envName = data.environment || 'prod';
+  const repoUrl = data?.aap?.git_url || data?.git?.url || '';
+  const branch = String(data?.aap?.git_branch || data?.git?.branch || 'main').trim() || 'main';
+  const gitToken = data?.git?.token || '';
+  const vaultPassword = String(data?.aap?.vault_password || data.vault_password || '').trim();
+  const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
+  const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
+
+  if (!repoUrl) {
+    event('Publish failed: missing Project Git Source URL');
+    return res.status(400).json({ error: 'Missing Project Git Source URL (Git Configuration).' });
+  }
+  if (!gitToken) {
+    event('Publish failed: Git token required');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'Git token is required to push the encrypted preflight JSON.'
+    });
+  }
+  if (!vaultPassword) {
+    event('Publish failed: vault password required');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'Vault password is required (Credentials → Vault / AAP vault password).'
+    });
+  }
+
+  const selectedComponentApps = selectedComponentAppsFrom(data);
+  data.selected_component_apps = selectedComponentApps;
+  pruneSelectedPayload(data, selectedComponentApps);
+  latestDebug.normalizedPayload = redactSecrets(data);
+  latestDebug.selectedComponents = Array.isArray(data.components) ? data.components.join(',') : '';
+  latestDebug.selectedComponentApps = selectedComponentApps;
+
+  const repoDir = path.join(workRoot, 'bootstrap-sample');
+  const plainFile = `ado-preflight-${envName}.json`;
+  const vaultFile = `${plainFile}.vault.yml`;
+  const plainPath = path.join(repoDir, plainFile);
+  const vaultPath = path.join(repoDir, vaultFile);
+  const vaultPassPath = path.join(repoDir, '.vault_pass');
+  latestDebug.repoDir = repoDir;
+  latestDebug.preflightPath = vaultPath;
+
+  append(`\nMode: publish-encrypted-json\n`);
+  append(`Git URL: ${repoUrl}\n`);
+  append(`Git branch: ${branch}\n`);
+  append(`Vault file: ${vaultFile}\n`);
+  event(`Encrypting and pushing ${vaultFile} to ${repoUrl} (${branch})`);
+
+  const prepared = await prepareGitAuthAndClone({
+    repoUrl,
+    branch,
+    repoDir,
+    token: gitToken,
+    scmTool,
+    gitSkipTlsVerify,
+    gitName: data?.git?.name || 'ADO Preflight UI',
+    gitEmail: data?.git?.email || 'ado-preflight@localhost',
+    cleanRepoDir: true
+  });
+
+  if (!prepared.ok) {
+    event(`Publish failed during git clone exitCode=${prepared.code}`);
+    latestDebug.result = {
+      status: 'failed',
+      exitCode: prepared.code,
+      mode: 'publish',
+      repoDir,
+      error: prepared.error
+    };
+    return res.json(latestDebug.result);
+  }
+
+  ensurePreflightSecretsGitignore(repoDir);
+
+  event(`Writing plaintext ${plainFile} (local only; will encrypt then remove)`);
+  fs.writeFileSync(plainPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(vaultPassPath, `${vaultPassword}\n`, { mode: 0o600 });
+
+  event('Encrypting preflight JSON with ansible-vault');
+  const encryptCode = await runStream(
+    'ansible-vault',
+    ['encrypt', plainFile, '--vault-password-file', '.vault_pass'],
+    repoDir,
+    'Encrypting preflight JSON'
+  );
+  try { fs.rmSync(vaultPassPath, { force: true }); } catch (_err) { /* ignore */ }
+
+  if (encryptCode !== 0) {
+    try { fs.rmSync(plainPath, { force: true }); } catch (_err) { /* ignore */ }
+    event(`Publish failed during ansible-vault encrypt exitCode=${encryptCode}`);
+    latestDebug.result = {
+      status: 'failed',
+      exitCode: encryptCode,
+      mode: 'publish',
+      repoDir,
+      error: 'ansible-vault encrypt failed. Check logs / Vault password.'
+    };
+    return res.json(latestDebug.result);
+  }
+
+  // Encrypted content stays in plainFile name until rename → *.json.vault.yml
+  try {
+    if (fs.existsSync(vaultPath)) fs.rmSync(vaultPath, { force: true });
+    fs.renameSync(plainPath, vaultPath);
+  } catch (err) {
+    event(`Publish failed renaming to ${vaultFile}: ${err.message}`);
+    latestDebug.result = {
+      status: 'failed',
+      exitCode: 2,
+      mode: 'publish',
+      error: err.message
+    };
+    return res.json(latestDebug.result);
+  }
+
+  const pushed = await gitCommitAndPush({
+    repoDir,
+    repoUrl,
+    branch,
+    pathsToAdd: ['.gitignore', vaultFile],
+    commitMessage: `Add encrypted preflight JSON ${vaultFile}`,
+    token: gitToken,
+    scmTool,
+    gitSkipTlsVerify
+  });
+
+  // Keep vaulted file; never leave plaintext beside it.
+  try { fs.rmSync(plainPath, { force: true }); } catch (_err) { /* ignore */ }
+  try { fs.rmSync(vaultPassPath, { force: true }); } catch (_err) { /* ignore */ }
+
+  event(`Publish encrypted JSON finished exitCode=${pushed.code}`);
+  latestDebug.result = {
+    status: pushed.ok ? 'complete' : 'failed',
+    exitCode: pushed.code,
+    mode: 'publish',
+    repoDir,
+    preflightFile: vaultFile,
+    branch,
+    encryptJson: true,
+    gitTokenProvided: Boolean(gitToken),
+    bootstrapRecap: [
+      '',
+      '=== ADO Publish Recap ===',
+      'Mode: push encrypted preflight JSON only',
+      `Git: ${repoUrl}`,
+      `Branch: ${branch}`,
+      `File: ${vaultFile}`,
+      'Encrypted: yes (ansible-vault)',
+      'Plaintext ado-preflight-*.json: not committed',
+      'Bootstrap: skipped',
+      ''
+    ].join('\n'),
+    error: pushed.error || undefined
+  };
+
+  return res.json(latestDebug.result);
+}
+
+async function handleScaffoldingRequest(req, res) {
   if (bootstrapRunning) {
     return res.status(409).json({
       status: 'running',
@@ -4992,6 +6088,19 @@ app.post('/api/bootstrap', async (req, res) => {
   if (!repoUrl) {
     event('Bootstrap failed: missing Project Git Source URL');
     return res.status(400).json({ error: 'Missing Project Git Source URL' });
+  }
+
+  const vaultPassword = String(data?.aap?.vault_password || data.vault_password || '').trim();
+  if (!vaultPassword) {
+    event('Bootstrap failed: missing Vault password');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error:
+        'Vault password is required (Credentials → Vault). '
+        + 'It is written to .vault_pass and must match aap.vault_password in the preflight JSON. '
+        + 'There is no silent redhat123 default.'
+    });
   }
 
   const gitToken = data?.git?.token || '';
@@ -5233,7 +6342,7 @@ app.post('/api/bootstrap', async (req, res) => {
   delete data.verbosity;
   const ansibleVerbosity = data.ansible.verbosity;
   const ansibleVerbosityFlag = verbosityFlag(ansibleVerbosity);
-  const ansibleExtraArgsRaw = String(data?.ansible?.extra_args || '').trim();
+  const ansibleExtraArgsRaw = resolveAnsibleExtraArgs(data);
   const ansibleExtraArgsShell = formatAnsibleExtraArgsForShell(ansibleExtraArgsRaw);
   const skipTlsVerify = data?.aap?.skip_tls_verify === true;
   const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
@@ -5293,6 +6402,7 @@ app.post('/api/bootstrap', async (req, res) => {
     }
   }
 
+  localComponentContext = null;
   bootstrapRunning = true;
   bootstrapStartedAt = Date.now();
   res.status(202).json({
@@ -5654,6 +6764,8 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
 
   event(`Writing preflight JSON ${preflightFile}`);
   fs.writeFileSync(preflightPath, JSON.stringify(data, null, 2));
+  ensurePreflightSecretsGitignore(repoDir);
+  event('Ensured .gitignore excludes plaintext ado-preflight-*.json from git commits');
 
   event('Writing ado-extra-vars.json for debug only; not passed to Ansible');
   fs.writeFileSync(extraVarsPath, JSON.stringify({
@@ -5691,11 +6803,8 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     bootstrap_controller_vars_only: varsOnly
   }, null, 2));
 
-  event('Writing vault password file');
-  fs.writeFileSync(
-    vaultPassPath,
-    data?.aap?.vault_password || data.vault_password || 'redhat123'
-  );
+  event('Writing vault password file (.vault_pass from aap.vault_password)');
+  fs.writeFileSync(vaultPassPath, `${vaultPassword}\n`, { mode: 0o600 });
 
   const gitPrepBash = overrideAll
     ? `echo "Git override (all): removing group_vars, playbooks, and configs"
@@ -5744,6 +6853,17 @@ rm -rf collections/ansible_collections/infra/ado
 echo ""
 echo "=== Prepare generated bootstrap content ==="
 ${gitPrepBash}
+
+echo ""
+echo "=== Ignore plaintext preflight JSON / vault pass (never commit secrets) ==="
+git ls-files -z -- 'ado-preflight-*.json' 'ado-extra-vars.json' '.vault_pass' 2>/dev/null \
+  | while IFS= read -r -d '' f; do
+      case "$f" in
+        *.json.vault.yml) continue ;;
+      esac
+      git rm -f --cached -- "$f" || true
+    done
+git add -f -- .gitignore || true
 
 echo ""
 echo "=== Effective preflight JSON ==="
@@ -5812,6 +6932,20 @@ ansible-playbook \\
 `], workRoot, 'Running ansible-playbook', bootstrapEnv);
 
   const runtimeMs = bootstrapStartedAt ? Date.now() - bootstrapStartedAt : null;
+  localComponentContext = code === 0 && !configureAap && !hubUpdateCollectionOnly && !varsOnly
+    ? {
+      id: require('crypto').randomUUID(),
+      repoDir,
+      environment: envName,
+      preflightPath,
+      env: {
+        ...bootstrapEnv,
+        ANSIBLE_COLLECTIONS_PATH: '/workspace/collections:/usr/share/ansible/collections',
+        ANSIBLE_COLLECTIONS_PATHS: '/workspace/collections:/usr/share/ansible/collections',
+        ANSIBLE_FORCE_COLOR: 'false'
+      }
+    }
+    : null;
   const bootstrapRecap = buildBootstrapRecap(
     data,
     repoDir,
@@ -5863,7 +6997,7 @@ ansible-playbook \\
     bootstrapRunning = false;
     bootstrapStartedAt = null;
   }
-});
+}
 
 app.use((req, res) => {
   res.sendFile(path.join(uiDir, 'index.html'));

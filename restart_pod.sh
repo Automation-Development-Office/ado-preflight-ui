@@ -41,7 +41,26 @@ free_port
 
 # Fedora SELinux: rootless podman needs label=disable or RUN fails with
 # "cannot apply additional memory protection after relocation"
-podman build --security-opt label=disable --network=host -t "${NAME}:latest" -f Containerfile .
+ADO_COLLECTIONS_SHA="$(
+  find collections -maxdepth 1 -type f \( -name 'infra-ado-*.tar.gz' -o -name 'ado-*.tar.gz' \) \
+    -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | awk '{print $1}'
+)"
+if [[ -z "${ADO_COLLECTIONS_SHA}" ]]; then
+  ADO_COLLECTIONS_SHA="missing-$(date +%s)"
+fi
+ADO_UI_SHA="$(
+  find src -type f \( -name '*.jsx' -o -name '*.js' -o -name '*.css' -o -name '*.tsx' -o -name '*.ts' \) \
+    -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | awk '{print $1}'
+)"
+if [[ -z "${ADO_UI_SHA}" ]]; then
+  ADO_UI_SHA="missing-$(date +%s)"
+fi
+echo "ADO_COLLECTIONS_SHA=${ADO_COLLECTIONS_SHA}"
+echo "ADO_UI_SHA=${ADO_UI_SHA}"
+podman build --security-opt label=disable --network=host \
+  --build-arg "ADO_COLLECTIONS_SHA=${ADO_COLLECTIONS_SHA}" \
+  --build-arg "ADO_UI_SHA=${ADO_UI_SHA}" \
+  -t "${NAME}:latest" -f Containerfile .
 
 free_port
 
