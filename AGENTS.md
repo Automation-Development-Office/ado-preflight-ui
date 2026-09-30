@@ -31,6 +31,9 @@ For a product capability:
 | Schema changes: update `server.js` + `src/App.jsx` **and** `ado` env generation/contract | Change payload shape in UI only |
 | After collection fixes, rebuild/copy the collection tarball used by this container | Assume neighboring live `ado` checkout is what the runtime executes |
 | Add/update `.changeset/*` for user-visible UI behavior | Hand-wave release/change documentation |
+| OpenShift Apps Domain autofills as `apps.<Base Infrastructure Domain>` and routed hostnames as `<prefix>.<apps_domain>`, but both stay editable. A custom value sets `apps_domain_manual` / `hostname_manual` | Lock those fields read-only, or overwrite a typed override on the next domain change |
+| Quay **Use existing MinIO** shows API host, port, namespace, bucket, access key, and secret key on the Quay tab. It does not select or deploy MinIO | Hide those fields, or add Deploy MinIO because the Quay option is checked |
+| Every password/token/secret field has Show/Hide and remasks after 30 seconds (`SECRET_REVEAL_MS`) | Ship a bare `type="password"` input with no Show button or no auto-hide |
 
 Preflight executes the baked `collections/infra-ado-*.tar.gz` inside the container.
 

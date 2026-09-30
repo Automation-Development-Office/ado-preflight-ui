@@ -4,13 +4,17 @@
 
 ### Minor Changes
 
+- Quay **Use existing MinIO** fields copy host/keys from the MinIO tab when that component is filled. Bootstrap / ``ocp_quay`` also inherit ``vars_minio.yml`` when MinIO was installed separately.
+- RHBK **Add Client** includes Quay, MinIO console, and Developer Hub (not only Grafana/GitLab/BookStack/NetBox). Selected apps get a client row when the Client option is on.
+- OpenShift **Apps Domain** and app hostnames still autofill from Base Infrastructure Domain, but the fields stay editable. A custom value is kept; matching the default tracks the domain again.
+- Quay **Use existing MinIO** only points registry blobs at an already-installed MinIO. It no longer auto-selects or lists **Deploy MinIO**. The Quay tab collects MinIO API host, port, namespace, bucket, access key, and secret key.
 - Secret **Show** buttons (AAP OAuth/Hub token/admin password and other token fields) automatically return to **Hide** after 30 seconds.
 - **Not using AAP**: each generated playbook has an **Options** popup (per-step `state`, typed fields such as ACM/Virt channel and KubeSecondaryDNS, plus freeform `-e`). Common extra vars `state` remains the default for every playbook. ADO Assistant walkthrough and Preview **?** explain cover Options + ACM Fleet Management console plug-ins (including stuck-uninstall heal / thorough `state=absent`).
 - **Not using AAP**: add **Common extra vars** (`state=present` default / `state=absent`) between Additional ansible-playbook options and the black command preview. Inserts ``-e state=…`` into the scaffolding preview and each Run selected playbooks step (overrides a freeform ``-e state=`` in Additional options).
 - **Security**: Stop committing plaintext ``ado-preflight-*.json`` on bootstrap git push. Actions → **Upload encrypted JSON to Git** encrypts with ansible-vault (Vault password) as ``ado-preflight-<env>.json.vault.yml`` and pushes that file only. Removed Preview JSON and moved Deploy to OpenShift into OpenShift Tools (removed console button / Actions duplicate).
 - Add **Playwright** browser smoke tests (`e2e/`, ``npm run test:e2e``) covering Core Environment load and OpenShift Tools tabs; CI runs unit + Playwright chromium.
 - **OpenShift Tools**: Agent / install-config and Catalog operators are tabs (Git repository note stays a card).
-- **ACS**: Central Route Hostname is read-only in the form (derived as ``central.<apps_domain>``). Form overrides are ignored; normalize + env overlay always set it from the OpenShift apps domain.
+- **ACS**: Central Route Hostname autofills as ``central.<apps_domain>`` and stays editable like other OpenShift app hosts.
 - Rename the **OpenShift Install** tab to **OpenShift Tools**, remove the Install AAP redirect card, and add **Catalog operators (install only)** with **Pull available operators** (PackageManifest checkbox grid; ADO-owned packages excluded). Selections store in ``component_config.catalog_operators``.
 - Local playbook **Explain (?)** loads on-disk ``group_vars/all/<env>/`` for the selected playbook (dropdown of files, secrets/vault/PEM redacted). Cert-manager explain notes that ``state`` defaults to present when omitted from the CLI; a callout shows effective ``state`` when it is not yet in the vars file.
 - **Dev Spaces**: custom getting-started sample form (display name, description, tags, git/devfile URL) plus bundled ADO sample icon or upload. Writes `custom_sample_*` into preflight JSON for `infra.ado.ocp_devspaces`.

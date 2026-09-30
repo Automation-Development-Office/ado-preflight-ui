@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { selectProfileApps } from '../src/profileSelection.mjs';
-const groups = ['openshift', 'rhel', 'patching', 'aws', 'provision'];
-const catalogs = { openshift: ['openshift', 'grafana'], rhel: ['rhel', 'grafana', 'aap'], patching: ['patching'], aws: ['ec2_ami_copy'], provision: ['openshift_virt'] };
-const apply = (source, group, apps) => selectProfileApps(source, group, apps, groups, catalogs, ['grafana']);
+import { selectProfileApps, satelliteProfileOptions } from '../src/profileSelection.mjs';
+const groups = ['openshift', 'rhel', 'patching', 'aws', 'provision', 'satellite'];
+const catalogs = { openshift: ['openshift', 'grafana'], rhel: ['rhel', 'grafana', 'aap'], patching: ['patching'], aws: ['ec2_ami_copy'], provision: ['openshift_virt'], satellite: ['satellite'] };
+const apply = (source, group, apps, profileName) => selectProfileApps(source, group, apps, groups, catalogs, ['grafana', 'satellite'], profileName);
 test('hybrid profile updates preserve other target selections and configuration', () => {
   const source = { components: ['openshift', 'rhel'], component_apps: { openshift: ['openshift'], rhel: ['rhel', 'aap'] }, component_config: { aap: { hostname: 'example.test' } } };
   const result = apply(source, 'openshift', ['openshift', 'grafana']);
@@ -27,4 +27,18 @@ test('removing a component removes its legacy top-level selector', () => {
   const result = apply({ components: ['rhel', 'grafana'], component_apps: { rhel: ['grafana'] } }, 'rhel', ['rhel']);
   assert.ok(!result.components.includes('grafana'));
   assert.deepEqual(result.selected_component_apps, []);
+});
+test('Satellite target applies existing option keys from the profile name', () => {
+  const result = apply({ components: [] }, 'satellite', ['satellite'], 'Server');
+  assert.deepEqual(result.components, ['satellite']);
+  assert.deepEqual(result.component_apps.satellite, ['satellite']);
+  assert.deepEqual(result.component_options.satellite, ['satellite_server_install']);
+});
+test('Satellite full profile uses the existing satellite option set', () => {
+  const result = apply({ components: ['satellite'] }, 'satellite', ['satellite'], 'Full Satellite');
+  assert.deepEqual(result.component_options.satellite, satelliteProfileOptions['Full Satellite']);
+});
+test('Satellite custom profile does not invent option keys', () => {
+  const result = apply({ components: ['satellite'], component_options: { satellite: ['satellite_content_view'] } }, 'satellite', ['satellite'], 'Custom');
+  assert.deepEqual(result.component_options.satellite, ['satellite_content_view']);
 });

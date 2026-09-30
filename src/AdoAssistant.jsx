@@ -265,8 +265,8 @@ export default function AdoAssistant({
           <Button type="submit" variant="secondary" isDisabled={!knowledge}>Ask</Button>
         </form>
         <div className="ado-assistant-navigation" style={{ marginTop: '8px', gap: '8px', flexWrap: 'wrap' }}>
-          <Button variant="secondary" onClick={() => startGuide('aap')}>Start AAP walkthrough</Button>
-          <Button variant="secondary" onClick={() => startGuide('local')}>Start Not using AAP walkthrough</Button>
+          <Button variant="secondary" onClick={() => startGuide('aap')}>Start ADO walk through with AAP</Button>
+          <Button variant="secondary" onClick={() => startGuide('local')}>Start ADO walk through without AAP</Button>
         </div>
         {guideDef && current && (
           <div className="ado-assistant-step">

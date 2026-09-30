@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Checkbox, FormGroup, Grid, GridItem } from '@patternfly/react-core';
+import { satelliteProfileOptions } from './profileSelection.mjs';
 
 export const profiles = {
   openshift: {
@@ -18,11 +19,27 @@ export const profiles = {
     Patching: ['rhel', 'satellite', 'idm'],
     'STIG / Compliance': ['rhel', 'compliance', 'stig'],
     'Full Platform': ['rhel', 'aap', 'satellite', 'idm', 'grafana', 'compliance', 'stig']
+  },
+  satellite: {
+    Server: ['satellite'],
+    'Client Satellite Registration': ['satellite'],
+    'Content view': ['satellite'],
+    Capsule: ['satellite'],
+    'Dynamic inventory': ['satellite'],
+    'OIDC / Keycloak': ['satellite'],
+    'Full Satellite': ['satellite']
   }
 };
 
-const targets = { openshift: 'OpenShift', rhel: 'Standalone / RHEL', patching: 'Patching', aws: 'AWS', provision: 'Provisioning' };
-const signature = apps => [...apps].sort().join(',');
+const targets = {
+  openshift: 'OpenShift',
+  rhel: 'Standalone / RHEL',
+  satellite: 'Satellite',
+  patching: 'Patching',
+  aws: 'AWS',
+  provision: 'Provisioning'
+};
+const signature = (apps, options = []) => `${[...apps].sort().join(',')}|${[...options].sort().join(',')}`;
 
 export default function BootstrapProfiles({ data, getApps, onTarget, onApps, isDark, borderColor, mutedTextColor, fieldBg, fieldColor }) {
   const [chosen, setChosen] = useState({});
@@ -52,10 +69,14 @@ export default function BootstrapProfiles({ data, getApps, onTarget, onApps, isD
     {active.map(group => {
       const apps = getApps(group);
       const selected = all ? apps : (data.component_apps?.[group] || []);
+      const selectedOptions = group === 'satellite' ? (data.component_options?.satellite || []) : [];
       const choice = chosen[group];
-      const current = choice?.signature === signature(selected) ? choice.name : 'Custom';
+      const current = choice?.signature === signature(selected, selectedOptions) ? choice.name : 'Custom';
       const change = (next, name = 'Custom') => {
-        onApps(group, next, () => setChosen(prev => ({ ...prev, [group]: { name, signature: signature(next) } })));
+        const nextOptions = group === 'satellite' && name !== 'Custom' && satelliteProfileOptions[name]
+          ? satelliteProfileOptions[name]
+          : selectedOptions;
+        onApps(group, next, () => setChosen(prev => ({ ...prev, [group]: { name, signature: signature(next, nextOptions) } })), name);
       };
       return <GridItem key={group} span={12}>
         <div style={{ padding: '12px', border: `1px solid ${borderColor}`, borderRadius: '6px', background: isDark ? '#1f1f1f' : '#fafafa' }}>
