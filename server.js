@@ -208,13 +208,125 @@ const packageJson = require('./package.json');
 
 const openshiftApps = [
   'aap', 'acs', 'acm', 'bookstack', 'cert_manager', 'console', 'devspaces', 'dev_hub',
-  'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio', 'netbox',
-  'oadp', 'openshift', 'pega', 'quay', 'rhbk'
+  'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio', 'mtv', 'netbox',
+  'oadp', 'ocp_compliance', 'ocp_virtualization', 'openshift', 'pega', 'quay', 'rhbk',
+  'zabbix'
+];
+const orphanOpenShiftPlaybookApps = [
+  'gitlab_runner',
+  'web_terminal',
+  'ocp_descheduler'
 ];
 const rhelApps = ['rhel', 'satellite', 'idm', 'aap', 'dirsrv', 'eck', 'gitlab', 'grafana', 'kafka', 'rhbk', 'compliance', 'stig'];
 const patchingApps = ['patching', 'satellite', 'idm'];
 const awsApps = ['ec2_ami_copy'];
 const provisionApps = ['aws_instance', 'openshift_virt'];
+const satelliteApps = ['satellite'];
+const APP_ROUTE_PREFIXES = {
+  aap: 'aap-aap',
+  grafana: 'grafana',
+  zabbix: 'zabbix',
+  rhbk: 'keycloak',
+  gitlab: 'gitlab-git',
+  bookstack: 'bookstack',
+  netbox: 'netbox-netbox',
+  quay: 'quay',
+  minio: 'minio',
+  devspaces: 'devspaces',
+  eck: 'kibana',
+  elastic: 'kibana',
+  kafka: 'kafka',
+  gitops: 'openshift-gitops-server-openshift-gitops',
+  acs: 'central'
+};
+
+function deriveAppsDomainFromInfrastructure(domain) {
+  const d = String(domain || '').trim().replace(/^\.+|\.+$/g, '');
+  if (!d) return '';
+  if (d.startsWith('apps.')) return d;
+  return `apps.${d}`;
+}
+
+function applyDerivedAppsDomain(data) {
+  if (!data.openshift) data.openshift = {};
+  if (data.openshift.apps_domain_manual === true) return data;
+  const derived = deriveAppsDomainFromInfrastructure(data.domain);
+  if (derived) data.openshift.apps_domain = derived;
+  return data;
+}
+
+function resolveAppsDomain(data) {
+  applyDerivedAppsDomain(data);
+  const apps = String(data?.openshift?.apps_domain || '').trim().replace(/^\.+|\.+$/g, '');
+  if (apps) return apps;
+  return deriveAppsDomainFromInfrastructure(data?.domain);
+}
+
+function applyDerivedRouteHostnames(data) {
+  const apps = resolveAppsDomain(data);
+  if (!apps || !data.component_config) return data;
+  for (const [component, prefix] of Object.entries(APP_ROUTE_PREFIXES)) {
+    const row = data.component_config[component];
+    if (!row || row.hostname_manual === true) continue;
+    const derived = `${prefix}.${apps}`;
+    row.hostname = derived;
+    if (component === 'bookstack') row.route_host = derived;
+    if (component === 'minio') {
+      const ns = String(row.namespace || row.name_space || 'minio').trim() || 'minio';
+      row.console_hostname = `minio-console-${ns}.${apps}`;
+      row.api_hostname = `minio-api-${ns}.${apps}`;
+    }
+  }
+  return data;
+}
+
+function derivedHostsForComponent(data, component, apps) {
+  const out = {};
+  const domain = String(apps || '').trim().replace(/^\.+|\.+$/g, '');
+  if (!domain) return out;
+  if (component === 'dev_hub') {
+    const instance = String(data?.component_config?.dev_hub?.instance_name || 'chad-lab').trim() || 'chad-lab';
+    out.hostname = `backstage-${instance}-rhdh.${domain}`;
+    return out;
+  }
+  const prefix = APP_ROUTE_PREFIXES[component];
+  if (prefix) out.hostname = `${prefix}.${domain}`;
+  if (component === 'bookstack' && out.hostname) out.route_host = out.hostname;
+  if (component === 'minio') {
+    const row = data?.component_config?.minio || {};
+    const ns = String(row.namespace || row.name_space || 'minio').trim() || 'minio';
+    out.console_hostname = `minio-console-${ns}.${domain}`;
+    out.api_hostname = `minio-api-${ns}.${domain}`;
+  }
+  return out;
+}
+
+function stampDerivedManualFlags(data) {
+  if (!data.openshift) data.openshift = {};
+  const derivedApps = deriveAppsDomainFromInfrastructure(data.domain);
+  const currentApps = String(data.openshift.apps_domain || '').trim().replace(/^\.+|\.+$/g, '');
+  if (
+    data.openshift.apps_domain_manual !== true
+    && derivedApps
+    && currentApps
+    && currentApps !== derivedApps
+  ) {
+    data.openshift.apps_domain_manual = true;
+  }
+  if (!data.component_config) return data;
+  const apps = currentApps || derivedApps;
+  Object.keys(data.component_config).forEach(component => {
+    const row = data.component_config[component];
+    if (!row || typeof row !== 'object' || row.hostname_manual === true) return;
+    const derived = derivedHostsForComponent(data, component, apps);
+    const custom = Object.entries(derived).some(([key, value]) => {
+      const have = String(row[key] || '').trim();
+      return have && have !== value;
+    });
+    if (custom) row.hostname_manual = true;
+  });
+  return data;
+}
 const AAP_VERSION_NUMBER = {
   '2.4': '24',
   '2.5': '25',
@@ -253,6 +365,19 @@ function attachAapLicenseRequested(data) {
 
 function installAapFullRequested(data) {
   return data?.pre_installs?.install_aap === true;
+}
+
+function dedicatedHubPostgresRequested(data) {
+  return (data?.component_options?.aap || []).includes('dedicated_hub_postgres');
+}
+
+function installAapTarget(data) {
+  const raw = String(
+    data?.pre_installs?.aap?.install_target
+    || data?.component_config?.aap?.install_target
+    || 'openshift'
+  ).trim().toLowerCase();
+  return raw === 'rhel' ? 'rhel' : 'openshift';
 }
 
 function installAapRequested(data) {
@@ -323,11 +448,71 @@ function parseOpenShiftStorageClasses(body) {
     });
 }
 
-function openshiftApiGetJson(apiHost, token, apiPath, skipTls) {
+/** Package names already covered by full ADO OpenShift Applications components. */
+const ADO_OWNED_OPERATOR_PACKAGES = new Set([
+  'ansible-automation-platform-operator',
+  'rhacs-operator',
+  'advanced-cluster-management',
+  'openshift-cert-manager-operator',
+  'devspaces',
+  'gitlab-operator-kubernetes',
+  'openshift-gitops-operator',
+  'grafana-operator',
+  'confluent-for-kubernetes',
+  'elasticsearch-eck-operator-certified',
+  'redhat-oadp-operator',
+  'quay-operator',
+  'rhdh',
+  'rhbk-operator',
+  'compliance-operator',
+  'web-terminal',
+  'kubevirt-hyperconverged',
+  'cluster-kube-descheduler-operator'
+]);
+
+function parseOpenShiftPackageManifests(body) {
+  const items = Array.isArray(body?.items) ? body.items : [];
+  const byName = new Map();
+  for (const item of items) {
+    const name = String(item?.metadata?.name || item?.status?.packageName || '').trim();
+    if (!name) continue;
+    if (ADO_OWNED_OPERATOR_PACKAGES.has(name)) continue;
+    const status = item?.status || {};
+    const channel = String(status.defaultChannel || '').trim();
+    const source = String(status.catalogSource || '').trim();
+    const sourceNamespace = String(status.catalogSourceNamespace || '').trim();
+    const displayName = String(
+      status.channels?.find?.(ch => ch?.name === channel)?.currentCSVDesc?.displayName
+      || status.provider?.name
+      || name
+    ).trim();
+    const existing = byName.get(name);
+    // Prefer redhat-operators / certified-operators when duplicates exist across catalogs.
+    const preferSource = /^(redhat-operators|certified-operators|community-operators|redhat-marketplace)$/i;
+    if (
+      !existing
+      || (preferSource.test(source) && !preferSource.test(existing.source))
+    ) {
+      byName.set(name, {
+        name,
+        displayName: displayName || name,
+        channel,
+        source,
+        sourceNamespace,
+        adoOwned: false
+      });
+    }
+  }
+  return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function openshiftApiGetJson(apiHost, token, apiPath, skipTls, options = {}) {
   const base = normalizeOpenShiftApiHost(apiHost);
   if (!base) {
     return Promise.reject(new Error('OpenShift API host is required'));
   }
+  const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 2000000;
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 15000;
   const url = new URL(apiPath, `${base}/`);
   return new Promise((resolve, reject) => {
     const req = https.request(
@@ -342,13 +527,13 @@ function openshiftApiGetJson(apiHost, token, apiPath, skipTls) {
           Accept: 'application/json'
         },
         rejectUnauthorized: !skipTls,
-        timeout: 15000
+        timeout: timeoutMs
       },
       res => {
         let payload = '';
         res.on('data', chunk => {
           payload += chunk;
-          if (payload.length > 2000000) {
+          if (payload.length > maxBytes) {
             req.destroy();
             reject(new Error('OpenShift response too large'));
           }
@@ -386,7 +571,8 @@ const openshiftOptionApps = {
   ldap_auth: 'openshift_ldap_auth',
   oauth_rhbk: 'openshift_oauth_rhbk',
   discover_routes_print: 'openshift_discover_routes_print',
-  update_pull_secret: 'openshift_update_pull_secret'
+  update_pull_secret: 'openshift_update_pull_secret',
+  integrated_image_registry: 'integrated_image_registry'
 };
 
 function pushAlternateRouteApps(data, out) {
@@ -420,12 +606,14 @@ const gitlabOptionApps = {
   standalone: 'gitlab_standalone'
 };
 const grafanaOptionApps = {
+  install: 'grafana',
   standalone: 'grafana_standalone',
   oidc: 'grafana_oidc',
   email: 'grafana_email',
   datasources: 'grafana_datasources',
   folders: 'grafana_folders',
   dashboards: 'grafana_dashboards',
+  alerts: 'grafana_alerts',
   alternate_route: 'grafana_alternate_route'
 };
 const quayOptionApps = { oidc: 'quay_oidc' };
@@ -439,15 +627,30 @@ const DEFAULT_HUB_EE_IMAGE_NAME = 'ado-ee';
 app.use(express.json({ limit: '100mb' }));
 app.use(express.static(uiDir));
 app.use('/examples', express.static(path.join(__dirname, 'examples')));
+// Small Dev Spaces sample icon (bundled; not the full marketing PNG)
+app.get('/ado-sample-icon.png', (req, res) => {
+  const candidates = [
+    path.join(__dirname, 'ado-sample-icon.png'),
+    path.join(__dirname, 'public', 'ado-sample-icon.png'),
+    path.join(uiDir, 'ado-sample-icon.png')
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return res.sendFile(p);
+  }
+  return res.status(404).type('text/plain').send('ado-sample-icon.png not found');
+});
 
 let latestLog = '';
 let latestEvents = '';
 let bootstrapRunning = false;
+let bootstrapEpoch = 0;
+let localComponentContext = null;
 let bootstrapStartedAt = null;
 let deployOpenshiftRunning = false;
 let latestDeployLog = '';
 let latestDeployEvents = '';
 let latestDeployResult = null;
+let activeRunChild = null;
 let latestDebug = {
   repoDir: '',
   preflightPath: '',
@@ -465,30 +668,41 @@ function capText(value, maxLength) {
   return value;
 }
 
+function redactLogText(text) {
+  if (text == null) return text;
+  return String(text)
+    .replace(/("(?:oauth_token|oauthtoken|galaxy_hub_token|vault_controller_oauthtoken|controller_oauthtoken)"\s*:\s*")[^"]*(")/gi, '$1[redacted]$2')
+    .replace(/('(?:oauth_token|oauthtoken|galaxy_hub_token|vault_controller_oauthtoken|controller_oauthtoken)'\s*:\s*')[^']*(')/gi, '$1[redacted]$2')
+    .replace(/((?:vault_controller_oauthtoken|controller_oauthtoken|oauth_token|galaxy_hub_token)\s*:\s*)(\S+)/gi, '$1[redacted]')
+    .replace(/(Authorization:\s*Bearer\s+)\S+/gi, '$1[redacted]');
+}
+
 function event(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  const line = redactLogText(`[${new Date().toISOString()}] ${msg}\n`);
   latestEvents += line;
   latestEvents = capText(latestEvents, 200000);
   process.stdout.write(line);
 }
 
 function append(msg) {
-  latestLog += msg;
+  const safe = redactLogText(msg);
+  latestLog += safe;
   latestLog = capText(latestLog, 500000);
-  process.stdout.write(msg);
+  process.stdout.write(safe);
 }
 
 function deployEvent(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  const line = redactLogText(`[${new Date().toISOString()}] ${msg}\n`);
   latestDeployEvents += line;
   latestDeployEvents = capText(latestDeployEvents, 200000);
   process.stdout.write(`[deploy] ${line}`);
 }
 
 function appendDeploy(msg) {
-  latestDeployLog += msg;
+  const safe = redactLogText(msg);
+  latestDeployLog += safe;
   latestDeployLog = capText(latestDeployLog, 500000);
-  process.stdout.write(msg);
+  process.stdout.write(safe);
 }
 
 function deployOpenshiftEnabled() {
@@ -894,6 +1108,27 @@ function formatAnsibleExtraArgsForShell(input) {
   return tokenizeAnsibleExtraArgs(input).map(shellSingleQuote).join(' ');
 }
 
+/** Strip -e/--extra-vars state=… tokens from freeform extra args. */
+function withoutStateExtraVar(raw) {
+  return String(raw || '')
+    .replace(/(?:^|\s)(?:-e|--extra-vars)(?:=|\s+)state=\S+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Not using AAP: merge ansible.state (present|absent) into extra args.
+ * Common control wins over a freeform -e state= in ansible.extra_args.
+ */
+function resolveAnsibleExtraArgs(data) {
+  const raw = String(data?.ansible?.extra_args || '').trim();
+  if (data?.aap?.enabled !== false) return raw;
+  const state = data?.ansible?.state === 'absent' ? 'absent' : 'present';
+  const base = withoutStateExtraVar(raw);
+  const stateFlag = `-e state=${state}`;
+  return base ? `${base} ${stateFlag}` : stateFlag;
+}
+
 function buildAnsibleEnv(skipTlsVerify = false, gitSkipTlsVerify = true) {
   const ansibleEnv = {
     ...process.env,
@@ -931,8 +1166,249 @@ function usesBearerGitAuth(scmTool) {
   return String(scmTool || '').trim().toLowerCase() === 'bitbucket';
 }
 
+function defaultGitUsername(scmTool) {
+  return usesBearerGitAuth(scmTool) ? 'x-token-auth' : 'oauth2';
+}
+
+function authenticatedGitUrl(repoUrl, token, username) {
+  if (!token || !repoUrl) return String(repoUrl || '');
+  try {
+    const u = new URL(repoUrl);
+    u.username = username || defaultGitUsername('gitlab');
+    u.password = String(token);
+    return u.toString();
+  } catch {
+    return String(repoUrl);
+  }
+}
+
 function gitBearerExtraHeader(token) {
   return `Authorization: Bearer ${String(token || '').trim()}`;
+}
+
+/** Ensure plaintext preflight JSON / vault pass never enter git commits. */
+function ensurePreflightSecretsGitignore(repoDir) {
+  const gitignorePath = path.join(repoDir, '.gitignore');
+  const block = [
+    '# ADO preflight secrets — never commit plaintext JSON or vault pass',
+    'ado-preflight-*.json',
+    '!ado-preflight-*.json.vault.yml',
+    'ado-extra-vars.json',
+    '.vault_pass',
+    '.vault_pass.*',
+    ''
+  ].join('\n');
+  let existing = '';
+  try {
+    existing = fs.readFileSync(gitignorePath, 'utf8');
+  } catch {
+    existing = '';
+  }
+  if (existing.includes('ado-preflight-*.json')) {
+    if (!existing.includes('!ado-preflight-*.json.vault.yml')) {
+      fs.writeFileSync(
+        gitignorePath,
+        `${existing.trimEnd()}\n!ado-preflight-*.json.vault.yml\n`
+      );
+    }
+    return;
+  }
+  fs.writeFileSync(
+    gitignorePath,
+    existing ? `${existing.trimEnd()}\n\n${block}` : block
+  );
+}
+
+async function prepareGitAuthAndClone({
+  repoUrl,
+  branch,
+  repoDir,
+  token,
+  scmTool,
+  gitSkipTlsVerify = true,
+  gitName = 'ADO Preflight UI',
+  gitEmail = 'ado-preflight@localhost',
+  cleanRepoDir = true
+}) {
+  const tool = String(scmTool || 'gitlab').trim().toLowerCase();
+  const gitUsesBearerAuth = usesBearerGitAuth(tool);
+  const gitUsername = defaultGitUsername(tool);
+  const gitEnv = buildAnsibleEnv(false, gitSkipTlsVerify);
+
+  configureGitCredentials(repoUrl, token, tool);
+
+  if (cleanRepoDir) {
+    event(`Cleaning repo directory ${repoDir}`);
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(path.dirname(repoDir), { recursive: true });
+  fs.mkdirSync(workRoot, { recursive: true });
+
+  await runStream(
+    'git',
+    ['config', '--global', 'user.email', gitEmail],
+    workRoot,
+    'Configuring Git user email'
+  );
+  await runStream(
+    'git',
+    ['config', '--global', 'user.name', gitName],
+    workRoot,
+    'Configuring Git user name'
+  );
+
+  if (!gitUsesBearerAuth) {
+    await runStream(
+      'git',
+      ['config', '--global', 'credential.helper', 'store'],
+      workRoot,
+      'Configuring Git credential helper'
+    );
+    await runStream(
+      'git',
+      ['config', '--global', 'credential.useHttpPath', 'false'],
+      workRoot,
+      'Configuring Git credential scope'
+    );
+  }
+
+  const cloneUrl = (!gitUsesBearerAuth && token)
+    ? authenticatedGitUrl(repoUrl, token, gitUsername)
+    : repoUrl;
+
+  const cloneArgs = buildGitCloneArgs({
+    repoUrl: cloneUrl,
+    branch,
+    repoDir,
+    token,
+    scmTool: tool,
+    gitSkipTlsVerify
+  });
+
+  const cloneCode = await runStream(
+    'git',
+    cloneArgs,
+    workRoot,
+    gitUsesBearerAuth
+      ? 'Cloning Git repository with Authorization Bearer header'
+      : 'Cloning Git repository',
+    gitEnv
+  );
+
+  if (cloneCode !== 0 || !fs.existsSync(repoDir)) {
+    return {
+      ok: false,
+      code: cloneCode || 128,
+      error: 'Git clone failed. Check logs.'
+    };
+  }
+
+  event('Git repository cloned');
+
+  if (gitSkipTlsVerify) {
+    await runStream(
+      'git',
+      ['config', '--local', 'http.sslVerify', 'false'],
+      repoDir,
+      'Disabling git SSL verify'
+    );
+  }
+
+  if (gitUsesBearerAuth && token) {
+    await runStream(
+      'git',
+      ['config', '--local', '--unset-all', 'http.extraHeader'],
+      repoDir,
+      'Clearing previous Bitbucket Bearer headers'
+    );
+    await runStream(
+      'git',
+      ['config', '--local', 'http.extraHeader', gitBearerExtraHeader(token)],
+      repoDir,
+      'Configuring local Bitbucket Bearer auth for push'
+    );
+    await runStream(
+      'git',
+      ['remote', 'set-url', 'origin', repoUrl],
+      repoDir,
+      'Setting origin remote URL'
+    );
+  } else if (token) {
+    await runStream(
+      'git',
+      ['remote', 'set-url', 'origin', authenticatedGitUrl(repoUrl, token, gitUsername)],
+      repoDir,
+      'Setting authenticated origin remote URL'
+    );
+    await runStream(
+      'git',
+      ['config', '--local', 'credential.helper', 'store'],
+      repoDir,
+      'Configuring local Git credential helper'
+    );
+  }
+
+  return { ok: true, code: 0, error: null };
+}
+
+async function gitCommitAndPush({
+  repoDir,
+  repoUrl,
+  branch,
+  pathsToAdd,
+  commitMessage,
+  token,
+  scmTool,
+  gitSkipTlsVerify = true
+}) {
+  const tool = String(scmTool || 'gitlab').trim().toLowerCase();
+  const gitUsesBearerAuth = usesBearerGitAuth(tool);
+  const gitUsername = defaultGitUsername(tool);
+  const files = (Array.isArray(pathsToAdd) ? pathsToAdd : [pathsToAdd])
+    .filter(Boolean)
+    .map(file => JSON.stringify(file))
+    .join(' ');
+
+  const pushCode = await runStream('bash', ['-lc', `
+set -euo pipefail
+cd ${JSON.stringify(repoDir)}
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=true
+${gitSkipTlsVerify ? 'git config --local http.sslVerify false || true' : 'true'}
+${gitUsesBearerAuth && token
+  ? `git config --local --unset-all http.extraHeader || true
+git config --local http.extraHeader ${JSON.stringify(gitBearerExtraHeader(token))} || true
+git remote set-url origin ${JSON.stringify(repoUrl)}`
+  : `git config --local credential.helper store || true
+git remote set-url origin ${JSON.stringify(authenticatedGitUrl(repoUrl, token, gitUsername))}`}
+
+# Drop any previously tracked plaintext preflight JSON / vault pass from the index.
+git ls-files -z -- 'ado-preflight-*.json' 'ado-extra-vars.json' '.vault_pass' 2>/dev/null \
+  | while IFS= read -r -d '' f; do
+      case "$f" in
+        *.json.vault.yml) continue ;;
+      esac
+      git rm -f --cached -- "$f" || true
+    done
+
+git add -f -- ${files}
+if git diff --cached --quiet; then
+  echo "No changes to commit (already up to date)."
+else
+  git -c user.email="ado-preflight@localhost" -c user.name="ADO Preflight UI" commit -m ${JSON.stringify(commitMessage)}
+fi
+
+git push origin ${JSON.stringify(`HEAD:${branch}`)}
+echo "Pushed to origin/${branch}"
+
+git remote set-url origin ${JSON.stringify(repoUrl)} || true
+`], repoDir, 'Committing and pushing to Git', buildAnsibleEnv(false, gitSkipTlsVerify));
+
+  return {
+    ok: pushCode === 0,
+    code: pushCode,
+    error: pushCode === 0 ? null : 'Git commit/push failed. Check logs.'
+  };
 }
 
 function redactGitArgsForLog(args) {
@@ -1059,19 +1535,22 @@ async function prepareBootstrapGitRepo({
 
 function selectedComponentAppsFrom(data) {
   if (Array.isArray(data.components) && data.components.includes('all')) {
-    return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...awsApps, ...provisionApps, 'jira'])];
+    return [...new Set([...openshiftApps, ...rhelApps, ...patchingApps, ...awsApps, ...provisionApps, ...satelliteApps, 'jira'])];
   }
 
   const out = [];
-  const groups = ['openshift', 'rhel', 'patching', 'aws', 'provision'];
+  const groups = ['openshift', 'rhel', 'patching', 'aws', 'provision', 'satellite'];
   const components = Array.isArray(data.components) ? data.components : [];
 
   for (const component of components) {
     if (groups.includes(component)) {
-      out.push(component);
       const selected = data.component_apps?.[component] || [];
-      out.push(...selected);
-    } else {
+      if (selected.length > 0) {
+        out.push(...selected);
+      } else {
+        out.push(component);
+      }
+    } else if (!orphanOpenShiftPlaybookApps.includes(component)) {
       out.push(component);
     }
   }
@@ -1109,8 +1588,20 @@ function selectedComponentAppsFrom(data) {
     || (data.component_apps?.openshift || []).includes('grafana')
     || (data.component_apps?.rhel || []).includes('grafana');
   if (grafanaSelected) {
-    for (const option of data.component_options?.grafana || []) {
+    const grafanaOpts = (data.component_options?.grafana || []).map(o => String(o).toLowerCase());
+    for (const option of grafanaOpts) {
       if (grafanaOptionApps[option]) out.push(grafanaOptionApps[option]);
+    }
+    // Satellite-style: drop bare grafana (OCP install JT) unless install selected or no options.
+    const wantInstall = grafanaOpts.length === 0 || grafanaOpts.includes('install');
+    const wantStandalone = grafanaOpts.includes('standalone');
+    if (!wantInstall || wantStandalone) {
+      for (let i = out.length - 1; i >= 0; i -= 1) {
+        if (out[i] === 'grafana') out.splice(i, 1);
+      }
+    }
+    if (wantInstall && !wantStandalone && !out.includes('grafana')) {
+      out.push('grafana');
     }
   }
 
@@ -1143,9 +1634,26 @@ function selectedComponentAppsFrom(data) {
 }
 
 function pruneInactiveComponentApps(data) {
-  const groups = ['openshift', 'rhel', 'patching', 'aws', 'provision'];
+  const groups = ['openshift', 'rhel', 'patching', 'aws', 'provision', 'satellite'];
   const components = Array.isArray(data.components) ? data.components : [];
   const allSelected = components.includes('all');
+  const catalogs = {
+    openshift: openshiftApps,
+    rhel: rhelApps,
+    patching: patchingApps,
+    aws: awsApps,
+    provision: provisionApps,
+    satellite: satelliteApps
+  };
+  const catalogApps = new Set([
+    ...openshiftApps,
+    ...rhelApps,
+    ...patchingApps,
+    ...awsApps,
+    ...provisionApps,
+    ...satelliteApps
+  ]);
+  const orphanApps = new Set(orphanOpenShiftPlaybookApps);
 
   if (!data.component_apps) data.component_apps = {};
 
@@ -1156,6 +1664,43 @@ function pruneInactiveComponentApps(data) {
 
     if (!allSelected && !components.includes(group)) {
       data.component_apps[group] = [];
+    } else {
+      const catalog = new Set(catalogs[group] || []);
+      data.component_apps[group] = data.component_apps[group].filter(app => catalog.has(app));
+    }
+  }
+
+  if (components.includes('satellite') && data.component_apps.satellite.length === 0) {
+    data.component_apps.satellite = ['satellite'];
+  }
+
+  if (!allSelected) {
+    const appsInGroups = new Set(
+      groups.flatMap(group => (
+        Array.isArray(data.component_apps[group]) ? data.component_apps[group] : []
+      ))
+    );
+    const nextComponents = [];
+    for (const component of components) {
+      if (groups.includes(component)) {
+        nextComponents.push(component);
+        continue;
+      }
+      if (appsInGroups.has(component) || catalogApps.has(component) || orphanApps.has(component)) {
+        continue;
+      }
+      nextComponents.push(component);
+    }
+    for (const group of groups) {
+      const apps = data.component_apps[group] || [];
+      const opts = data.component_options?.[group] || [];
+      if ((apps.length > 0 || (Array.isArray(opts) && opts.length > 0)) && !nextComponents.includes(group)) {
+        nextComponents.push(group);
+      }
+    }
+    data.components = nextComponents;
+    if (Array.isArray(data.selected_component_apps)) {
+      data.selected_component_apps = data.selected_component_apps.filter(app => !orphanApps.has(app));
     }
   }
 
@@ -1214,9 +1759,9 @@ function defaultComponentConfig(component) {
       custom_cert_chain_file: '',
       admin_password: '',
       directory_manager_password: '',
-      ad_domain: 'ad.lab',
-      ad_dc_hostname: 'adwindows.ad.lab',
-      ad_dc_ip: '192.168.0.61',
+      ad_domain: '',
+      ad_dc_hostname: '',
+      ad_dc_ip: '',
       ad_admin: 'Administrator',
       ad_admin_password: '',
       ad_two_way: true,
@@ -1228,7 +1773,18 @@ function defaultComponentConfig(component) {
 
   if (component === 'grafana') {
     Object.assign(config, {
-      hostname: 'grafana-ado.server.lab',
+      hostname: '',
+      storage: '',
+      replicas: 1,
+      database_type: 'sqlite',
+      database_provision: true,
+      postgres_storage: '',
+      postgres_storage_size: '5Gi',
+      postgres_image: '',
+      postgres_database: 'grafana',
+      postgres_user: 'grafana',
+      postgres_password: '',
+      postgres_host: '',
       folders: [
         { name: 'Openshift', source_type: 'path', source: '', dashboards_path: 'dashboards', alerts_path: 'alerts' }
       ],
@@ -1248,7 +1804,7 @@ function defaultComponentConfig(component) {
         issuer: ''
       },
       alerts_enabled: false,
-      standalone_hostname: 'grafana-ado.server.lab',
+      standalone_hostname: '',
       standalone_admin_user: 'admin',
       standalone_admin_password: 'redhat123',
       standalone_http_port: 3000,
@@ -1264,9 +1820,15 @@ function defaultComponentConfig(component) {
 
   if (component === 'gitlab') {
     Object.assign(config, {
-      hostname: 'gitlab-ado.server.lab',
-      standalone_hostname: 'gitlab-ado.server.lab',
-      standalone_external_url: 'http://gitlab-ado.server.lab',
+      hostname: '',
+      database_provision: true,
+      postgres_storage: '',
+      postgres_storage_size: '10Gi',
+      postgres_image: '',
+      postgres_host: '',
+      postgres_password: '',
+      standalone_hostname: '',
+      standalone_external_url: '',
       standalone_root_password: 'redhat123',
       standalone_edition: 'ce',
       standalone_http_port: 80,
@@ -1281,8 +1843,23 @@ function defaultComponentConfig(component) {
     });
   }
 
+  if (component === 'zabbix') {
+    Object.assign(config, {
+      replicas: 1,
+      saml_enabled: true,
+      database_type: 'postgres',
+      database_provision: true,
+      postgres_storage: '',
+      postgres_storage_size: '10Gi',
+      postgres_image: '',
+      postgres_host: '',
+      postgres_password: ''
+    });
+  }
+
   if (component === 'acm') {
     Object.assign(config, {
+      policy_enabled: false, policy_name: 'namespace-label', policy_namespace: 'policies', policy_target_namespace: '', policy_label_key: '', policy_label_value: '', policy_cluster_set: '', policy_selector_key: '', policy_selector_value: '', policy_remediation: 'inform',
       channel: 'release-2.17'
     });
   }
@@ -1307,15 +1884,39 @@ function defaultComponentConfig(component) {
     });
   }
 
+  if (component === 'aap_hub_harden') {
+    return {
+      namespace: '',
+      storage_class: '',
+      aap_name: '',
+      hub_name: ''
+    };
+  }
+
+  if (component === 'pega') {
+    Object.assign(config, {"database_mode": "new", "database_chart_path": "", "database_values_file": "", "namespace": "pega", "release_name": "pega", "chart_path": "", "values_file": "", "allowed_registries": "", "helm_binary": "helm", "timeout": "20m0s", "opensearch_chart_path": "", "opensearch_values_file": "", "backingservices_chart_path": "", "backingservices_values_file": ""});
+  }
+
   if (component === 'devspaces') {
     Object.assign(config, {
+      delivery_mode: 'direct', gitops_repo_url: '', gitops_revision: 'main', gitops_path: '', gitops_namespace: 'openshift-gitops', gitops_project: 'default', gitops_destination: 'https://kubernetes.default.svc',
       namespace: 'openshift-devspaces',
       disable_default_samples: true,
       customize_workspace: false,
       default_devfile_url: '',
       default_workspace_image: '',
       che_image_tag: '',
-      dashboard_image: ''
+      dashboard_image: '',
+      custom_sample_enabled: false,
+      custom_sample_display_name: 'ADO',
+      custom_sample_description: 'ADO default Dev Spaces workspace',
+      custom_sample_tags: 'ado',
+      custom_sample_url: '',
+      custom_sample_icon_source: 'bundled',
+      custom_sample_icon_filename: '',
+      custom_sample_icon_base64: '',
+      custom_sample_icon_mediatype: 'image/png',
+      status_exporter_enabled: true
     });
   }
 
@@ -1326,7 +1927,7 @@ function defaultComponentConfig(component) {
       group_mapper_claim: 'groups',
       group_mapper_group_path: '',
       group_mapper_sync_mode: 'IMPORT',
-      standalone_hostname: 'keycloak-ado.server.lab',
+      standalone_hostname: '',
       standalone_zip: '',
       standalone_zip_file: '',
       standalone_zip_upload_path: '',
@@ -1359,6 +1960,17 @@ function hostnameFromUrl(value) {
 }
 
 /** Hub Galaxy credential URLs must use Hub hostname, not Contoller hostname. */
+/** Hub API host defaults from Contoller AAP Hostname unless hub_hostname_manual. */
+function resolveHubHostnameFromAap(aap = {}, { honorManual = true } = {}) {
+  const controllerHost = hostnameFromUrl(aap?.hostname);
+  if (honorManual && aap?.hub_hostname_manual === true) {
+    const manual = hostnameFromUrl(aap?.hub_hostname) || String(aap?.hub_hostname || '').trim();
+    return manual || controllerHost;
+  }
+  return controllerHost;
+}
+
+
 function galaxyHubHostnameForCredentials(aap = {}) {
   const hub = hostnameFromUrl(aap.hub_hostname);
   if (hub) return hub;
@@ -1422,8 +2034,8 @@ function buildDefaultGalaxyCredentials(org = 'ADO', hubHostname = '') {
       url: 'https://galaxy.ansible.com/',
       auth_url: '',
       token: '',
-      enabled: true,
-      attach_to_org: true,
+      enabled: false,
+      attach_to_org: false,
       order: 5
     }
   ];
@@ -1557,11 +2169,13 @@ function hydrateSelectedComponentConfigs(data) {
     ...(Array.isArray(data.components) ? data.components : [])
   ]);
   if (installAapRequested(data)) allowedConfig.add('aap');
+  if (dedicatedHubPostgresRequested(data)) allowedConfig.add('aap_hub_harden');
 
   if (!data.component_config) data.component_config = {};
 
   const hydrateList = new Set(selectedComponentApps);
   if (installAapRequested(data)) hydrateList.add('aap');
+  if (dedicatedHubPostgresRequested(data)) hydrateList.add('aap_hub_harden');
   if (Array.isArray(data.components) && data.components.includes('aws')) {
     hydrateList.add('aws');
   }
@@ -1585,7 +2199,8 @@ function hydrateSelectedComponentConfigs(data) {
     Object.entries(data.component_config).filter(([component]) => allowedConfig.has(component))
   );
 
-  return data;
+  stampDerivedManualFlags(data);
+  return applyDerivedRouteHostnames(data);
 }
 
 function normalizeAdditionalEnvironments(value) {
@@ -1660,14 +2275,26 @@ function syncAapStandaloneFields(aap) {
   aap.hub_update_collection_only = aap.standalone_run === true;
 }
 
+function galaxySetupRequested(data) {
+  if (data?.aap?.galaxy_setup_enabled === true) return true;
+  const creds = data?.aap?.galaxy_credentials;
+  return Array.isArray(creds) && creds.some(cred => (
+    cred
+    && cred.enabled !== false
+    && (cred.id || cred.name || cred.url)
+  ));
+}
+
 function aapStandaloneWorkSelected(data) {
   return (
     data?.aap?.hub_publish_ado_collection === true
+    || data?.aap?.hub_publish_preflight_collections === true
     || data?.aap?.hub_push_ee === true
-    || data?.aap?.galaxy_setup_enabled === true
+    || galaxySetupRequested(data)
     || aapAuthConfigRequested(data)
     || attachAapLicenseRequested(data)
     || installAapFullRequested(data)
+    || dedicatedHubPostgresRequested(data)
   );
 }
 
@@ -1721,12 +2348,18 @@ function normalizePreflightPayload(input) {
 
   if (hubUpdateCollectionOnly) {
     // Standalone AAP run: skip component playbooks; apply enabled AAP tabs only.
+    const keepHubHarden = dedicatedHubPostgresRequested(data);
+    const hubHardenCfg = data.component_config?.aap_hub_harden;
     data.components = [];
     delete data.component;
     data.platform = [];
-    data.component_apps = { openshift: [], rhel: [], patching: [], aws: [], provision: [] };
+    data.component_apps = { openshift: [], rhel: [], patching: [], aws: [], provision: [], satellite: [] };
     data.component_config = {};
     data.component_options = {};
+    if (keepHubHarden) {
+      data.component_options = { aap: ['dedicated_hub_postgres'] };
+      if (hubHardenCfg) data.component_config.aap_hub_harden = hubHardenCfg;
+    }
     if (!data.git) data.git = {};
     data.git.vars_only = false;
     // Hub/AAP-tabs-only never git-pushes — JSON may still say auto_push: true.
@@ -1882,13 +2515,14 @@ function normalizePreflightPayload(input) {
   if (data.aap.hub_ee_tag === undefined) data.aap.hub_ee_tag = 'latest';
   if (data.aap.hub_ee_registry === undefined) data.aap.hub_ee_registry = '';
   if (data.aap.hub_hostname === undefined) data.aap.hub_hostname = '';
-  // Hub hostname required for Hub work — default from AAP hostname host.
-  if (!String(data.aap.hub_hostname || '').trim()) {
-    data.aap.hub_hostname = hostnameFromUrl(data.aap.hostname);
-  } else {
-    data.aap.hub_hostname = hostnameFromUrl(data.aap.hub_hostname) || String(data.aap.hub_hostname).trim();
-  }
-  if (!String(data.aap.hub_ee_registry || '').trim()) {
+  if (data.aap.hub_hostname_manual === undefined) data.aap.hub_hostname_manual = false;
+  data.aap.hub_hostname_manual = data.aap.hub_hostname_manual === true;
+  // Hub hostname auto-discovers from Contoller AAP Hostname unless operator set Hub manually.
+  data.aap.hub_hostname = resolveHubHostnameFromAap(data.aap);
+  if (
+    data.aap.hub_hostname_manual !== true
+    || !String(data.aap.hub_ee_registry || '').trim()
+  ) {
     data.aap.hub_ee_registry = data.aap.hub_hostname;
   } else {
     data.aap.hub_ee_registry = hostnameFromUrl(data.aap.hub_ee_registry)
@@ -1932,14 +2566,17 @@ function normalizePreflightPayload(input) {
     registry: data.aap.hub_ee_registry,
     publish_ado_collection: data.aap.hub_publish_ado_collection === true,
     publish_preflight_collections: data.aap.hub_publish_preflight_collections === true,
-    publish_preflight_collection_names: Array.isArray(data.aap.hub_publish_preflight_collection_names)
+    publish_preflight_collection_names: data.aap.hub_publish_preflight_collections === true
+      && Array.isArray(data.aap.hub_publish_preflight_collection_names)
       ? data.aap.hub_publish_preflight_collection_names
       : [],
     force_ado_collection_update: data.aap.hub_force_ado_collection_update === true,
     mark_ado_validated: data.aap.hub_mark_ado_validated === true,
     update_only: data.aap.hub_update_collection_only === true,
-    push_ee: data.aap.hub_push_ee === true,
-    ee: {
+    push_ee: data.aap.hub_push_ee === true
+  };
+  if (data.aap.hub_push_ee === true) {
+    data.hub.ee = {
       source_image: data.aap.hub_ee_source_image,
       name: data.aap.hub_ee_name,
       tag: data.aap.hub_ee_tag,
@@ -1947,8 +2584,8 @@ function normalizePreflightPayload(input) {
       create_execution_environment: data.aap.hub_ee_create_execution_environment !== false,
       execution_environment_name: data.aap.hub_ee_execution_environment_name,
       description: data.aap.hub_ee_description
-    }
-  };
+    };
+  }
   if (data.aap.galaxy_setup_enabled === undefined) data.aap.galaxy_setup_enabled = false;
   if (data.aap.ignore_galaxy_cert === undefined) data.aap.ignore_galaxy_cert = false;
   if (data.aap.galaxy_hub_token === undefined) data.aap.galaxy_hub_token = '';
@@ -2024,10 +2661,6 @@ function normalizePreflightPayload(input) {
         registry.host = hubHost || hostnameFromUrl(data.aap.hostname);
       }
     }
-    if (!sharedHubToken) {
-      data.aap.galaxy_setup_enabled = false;
-      data.aap.galaxy_credentials = [];
-    }
   } else {
     data.aap.galaxy_credentials = [];
   }
@@ -2098,11 +2731,11 @@ function normalizePreflightPayload(input) {
     if (!data.component_config.satellite.oidc.realm) {
       data.component_config.satellite.oidc.realm = 'rhlab';
     }
-    if (!data.component_config.satellite.oidc.keycloak_url) {
-      data.component_config.satellite.oidc.keycloak_url = 'https://keycloak.apps.ocp.prod.rhlab';
+    if (data.component_config.satellite.oidc.keycloak_url === undefined) {
+      data.component_config.satellite.oidc.keycloak_url = '';
     }
-    if (!data.component_config.satellite.oidc.issuer) {
-      data.component_config.satellite.oidc.issuer = 'https://keycloak.apps.ocp.prod.rhlab/realms/rhlab';
+    if (data.component_config.satellite.oidc.issuer === undefined) {
+      data.component_config.satellite.oidc.issuer = '';
     }
     if (data.component_config.satellite.oidc.client_secret === undefined) {
       data.component_config.satellite.oidc.client_secret = '';
@@ -2139,9 +2772,9 @@ function normalizePreflightPayload(input) {
     if (data.component_config.idm.custom_cert_file === undefined) data.component_config.idm.custom_cert_file = '';
     if (data.component_config.idm.custom_cert_key_file === undefined) data.component_config.idm.custom_cert_key_file = '';
     if (data.component_config.idm.custom_cert_chain_file === undefined) data.component_config.idm.custom_cert_chain_file = '';
-    if (data.component_config.idm.ad_domain === undefined) data.component_config.idm.ad_domain = 'ad.lab';
-    if (data.component_config.idm.ad_dc_hostname === undefined) data.component_config.idm.ad_dc_hostname = 'adwindows.ad.lab';
-    if (data.component_config.idm.ad_dc_ip === undefined) data.component_config.idm.ad_dc_ip = '192.168.0.61';
+    if (data.component_config.idm.ad_domain === undefined) data.component_config.idm.ad_domain = '';
+    if (data.component_config.idm.ad_dc_hostname === undefined) data.component_config.idm.ad_dc_hostname = '';
+    if (data.component_config.idm.ad_dc_ip === undefined) data.component_config.idm.ad_dc_ip = '';
     if (data.component_config.idm.ad_admin === undefined) data.component_config.idm.ad_admin = 'Administrator';
     if (data.component_config.idm.ad_admin_password === undefined) data.component_config.idm.ad_admin_password = '';
     if (data.component_config.idm.ad_two_way === undefined) data.component_config.idm.ad_two_way = true;
@@ -2160,11 +2793,20 @@ function normalizePreflightPayload(input) {
   if (data.openshift.banner_location === undefined) data.openshift.banner_location = 'BannerTop';
   if (data.openshift.banner_background_color === undefined) data.openshift.banner_background_color = '#1f7a1f';
   if (data.openshift.banner_text_color === undefined) data.openshift.banner_text_color = '#ffffff';
+  if (data.openshift.banner_state === undefined) data.openshift.banner_state = 'add';
   if (!data.openshift.oauth_rhbk || typeof data.openshift.oauth_rhbk !== 'object') {
     data.openshift.oauth_rhbk = { idp_name: 'Keycloak' };
   }
   if (!String(data.openshift.oauth_rhbk.idp_name || '').trim()) {
     data.openshift.oauth_rhbk.idp_name = 'Keycloak';
+  }
+  if (data.openshift.oauth_rhbk.client_id === undefined) data.openshift.oauth_rhbk.client_id = '';
+  if (data.openshift.oauth_rhbk.keycloak_hostname === undefined) data.openshift.oauth_rhbk.keycloak_hostname = '';
+  if (data.openshift.oauth_rhbk.realm === undefined) data.openshift.oauth_rhbk.realm = 'rhlab';
+  if (data.openshift.oauth_rhbk.extra_scopes === undefined) data.openshift.oauth_rhbk.extra_scopes = 'groups';
+  if (data.openshift.oauth_rhbk.mapping_method === undefined) data.openshift.oauth_rhbk.mapping_method = 'claim';
+  if (data.openshift.oauth_rhbk.fetch_client_secret === undefined) {
+    data.openshift.oauth_rhbk.fetch_client_secret = true;
   }
   if (!data.openshift.ldap_auth || typeof data.openshift.ldap_auth !== 'object') {
     data.openshift.ldap_auth = { idp_name: 'LDAP_IDM' };
@@ -2172,6 +2814,25 @@ function normalizePreflightPayload(input) {
   if (!String(data.openshift.ldap_auth.idp_name || '').trim()) {
     data.openshift.ldap_auth.idp_name = 'LDAP_IDM';
   }
+  if (data.openshift.ldap_auth.connection_url === undefined) {
+    data.openshift.ldap_auth.connection_url = 'ldap://idm.server.lab';
+  }
+  if (data.openshift.ldap_auth.bind_dn === undefined) {
+    data.openshift.ldap_auth.bind_dn = 'cn=Directory Manager';
+  }
+  if (data.openshift.ldap_auth.bind_credential === undefined) {
+    data.openshift.ldap_auth.bind_credential = '';
+  }
+  if (data.openshift.ldap_auth.users_dn === undefined) {
+    data.openshift.ldap_auth.users_dn = 'cn=users,cn=accounts,dc=server,dc=lab';
+  }
+  if (data.openshift.ldap_auth.username_ldap_attribute === undefined) {
+    data.openshift.ldap_auth.username_ldap_attribute = 'uid';
+  }
+  if (data.openshift.ldap_auth.mapping_method === undefined) {
+    data.openshift.ldap_auth.mapping_method = 'claim';
+  }
+  if (data.openshift.ldap_auth.insecure === undefined) data.openshift.ldap_auth.insecure = false;
   data.openshift.agent_installer = normalizeAgentInstaller(data.openshift.agent_installer || {});
 
   if (!data.component_config.cert_manager) data.component_config.cert_manager = {};
@@ -2187,6 +2848,37 @@ function normalizePreflightPayload(input) {
   if (data.component_config.cert_manager.awspca_pca_arn === undefined) data.component_config.cert_manager.awspca_pca_arn = '';
   if (data.component_config.cert_manager.awspca_access_key_id === undefined) data.component_config.cert_manager.awspca_access_key_id = '';
   if (data.component_config.cert_manager.awspca_secret_access_key === undefined) data.component_config.cert_manager.awspca_secret_access_key = '';
+  if (data.component_config.cert_manager.idm_ca_bundle_filename === undefined) data.component_config.cert_manager.idm_ca_bundle_filename = '';
+  if (data.component_config.cert_manager.idm_ca_bundle_content_base64 === undefined) {
+    data.component_config.cert_manager.idm_ca_bundle_content_base64 = '';
+  }
+  if (data.component_config.cert_manager.update_default_ingress === undefined) {
+    data.component_config.cert_manager.update_default_ingress = false;
+  }
+  if (data.component_config.cert_manager.trust_ca_clusterwide === undefined) {
+    data.component_config.cert_manager.trust_ca_clusterwide = true;
+  }
+  if (data.component_config.cert_manager.ingress_tls_crt === undefined) data.component_config.cert_manager.ingress_tls_crt = '';
+  if (data.component_config.cert_manager.ingress_tls_key === undefined) data.component_config.cert_manager.ingress_tls_key = '';
+  if (data.component_config.cert_manager.ingress_ca_crt === undefined) data.component_config.cert_manager.ingress_ca_crt = '';
+
+  // UI option for Default Ingress Cert tab when only the config flag is set.
+  if (data.component_config.cert_manager.update_default_ingress === true) {
+    if (!Array.isArray(data.component_options?.openshift)) {
+      data.component_options = data.component_options || {};
+      data.component_options.openshift = [];
+    }
+    if (!data.component_options.openshift.includes('update_default_ingress')) {
+      data.component_options.openshift.push('update_default_ingress');
+    }
+    if (!Array.isArray(data.component_apps?.openshift)) {
+      data.component_apps = data.component_apps || {};
+      data.component_apps.openshift = [];
+    }
+    if (!data.component_apps.openshift.includes('cert_manager')) {
+      data.component_apps.openshift.push('cert_manager');
+    }
+  }
 
   if (!data.pre_installs) data.pre_installs = {};
   if (data.pre_installs.install_aap === undefined) data.pre_installs.install_aap = false;
@@ -2281,6 +2973,12 @@ function normalizePreflightPayload(input) {
   });
 
   if (data.openshift.htpasswd_action === undefined) data.openshift.htpasswd_action = 'add';
+  if (!String(data.openshift.htpasswd_idp_name || '').trim()) {
+    data.openshift.htpasswd_idp_name = 'htpasswd-admin';
+  }
+  if (!String(data.openshift.htpasswd_secret || '').trim()) {
+    data.openshift.htpasswd_secret = `${data.openshift.htpasswd_idp_name}-secret`;
+  }
   if (!Array.isArray(data.openshift.htpasswd_users) || data.openshift.htpasswd_users.length === 0) {
     data.openshift.htpasswd_users = [{
       name: data.openshift.admin_username || 'admin',
@@ -2309,6 +3007,20 @@ function normalizePreflightPayload(input) {
         data.component_config.grafana.dashboards_source = firstFolder.source;
       }
     }
+    const dbType = String(data.component_config.grafana.database_type || 'sqlite').toLowerCase();
+    data.component_config.grafana.database_type = (dbType === 'postgres') ? 'postgres' : 'sqlite';
+    if (data.component_config.grafana.database_provision === undefined) {
+      data.component_config.grafana.database_provision = true;
+    }
+    if (!data.component_config.grafana.postgres_storage_size) {
+      data.component_config.grafana.postgres_storage_size = '5Gi';
+    }
+    if (!data.component_config.grafana.postgres_database) {
+      data.component_config.grafana.postgres_database = 'grafana';
+    }
+    if (!data.component_config.grafana.postgres_user) {
+      data.component_config.grafana.postgres_user = 'grafana';
+    }
     if (!data.component_config.grafana.email || typeof data.component_config.grafana.email !== 'object') {
       data.component_config.grafana.email = { enabled: false };
     } else {
@@ -2321,6 +3033,27 @@ function normalizePreflightPayload(input) {
     }
     if (!data.component_config.grafana.oidc || typeof data.component_config.grafana.oidc !== 'object') {
       data.component_config.grafana.oidc = { enabled: false };
+    }
+  }
+
+  if (data.component_config && data.component_config.gitlab && typeof data.component_config.gitlab === 'object') {
+    if (data.component_config.gitlab.database_provision === undefined) {
+      data.component_config.gitlab.database_provision = true;
+    }
+    if (!data.component_config.gitlab.postgres_storage_size) {
+      data.component_config.gitlab.postgres_storage_size = '10Gi';
+    }
+  }
+  if (data.component_config && data.component_config.zabbix && typeof data.component_config.zabbix === 'object') {
+    const zabbixDb = String(data.component_config.zabbix.database_type || 'postgres').toLowerCase();
+    data.component_config.zabbix.database_type = (zabbixDb === 'mysql' || zabbixDb === 'mariadb')
+      ? 'mysql'
+      : 'postgres';
+    if (data.component_config.zabbix.database_provision === undefined) {
+      data.component_config.zabbix.database_provision = true;
+    }
+    if (!data.component_config.zabbix.postgres_storage_size) {
+      data.component_config.zabbix.postgres_storage_size = '10Gi';
     }
   }
 
@@ -2352,8 +3085,8 @@ function normalizePreflightPayload(input) {
   const appsDomain = String(data.openshift?.apps_domain || '').trim();
   if (
     data.component_config?.acs
-    && !String(data.component_config.acs.hostname || '').trim()
     && appsDomain
+    && data.component_config.acs.hostname_manual !== true
   ) {
     data.component_config.acs.hostname = `central.${appsDomain}`;
   }
@@ -3758,11 +4491,18 @@ function pruneSelectedPayload(data, selectedComponentApps) {
       componentOptions[component] = options;
     }
   }
+  if (dedicatedHubPostgresRequested(data)) {
+    componentOptions.aap = data.component_options?.aap || ['dedicated_hub_postgres'];
+    if (data.component_config?.aap_hub_harden) {
+      componentConfig.aap_hub_harden = { ...data.component_config.aap_hub_harden };
+    }
+  }
 
   data.component_config = componentConfig;
   data.component_options = componentOptions;
 
   const keepOpenShiftAuth = installAapFullRequested(data)
+    || dedicatedHubPostgresRequested(data)
     || data?.pre_installs?.openshift_agent_enabled === true
     || allowedConfig.has('openshift');
   if (!keepOpenShiftAuth) {
@@ -3822,11 +4562,13 @@ function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
         ...envOverrides
       }
     });
+    activeRunChild = child;
 
     child.stdout.on('data', d => append(d.toString()));
     child.stderr.on('data', d => append(d.toString()));
 
     child.on('close', code => {
+      if (activeRunChild === child) activeRunChild = null;
       append(`\n[exit code ${code}]\n`);
 
       if (eventLabel) {
@@ -3836,6 +4578,98 @@ function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
       resolve(code);
     });
   });
+}
+
+function stopActiveRun(signal = 'SIGTERM') {
+  const child = activeRunChild;
+  if (!child || child.killed) return false;
+  try {
+    child.kill(signal);
+    return true;
+  } catch (err) {
+    event(`Failed to stop active run: ${err.message}`);
+    return false;
+  }
+}
+
+function flushWorkspace({ wipeCollections = false } = {}) {
+  const removed = [];
+  const noted = [];
+  bootstrapEpoch += 1;
+  const killed = stopActiveRun('SIGTERM');
+  if (killed) noted.push('stopped active bootstrap/playbook process');
+  // Best-effort: leftover ansible from a previous broken run.
+  for (const pattern of [
+    'ansible-playbook.*/workspace/bootstrap-sample',
+    'local_components.py.*/workspace/bootstrap-sample',
+    'python3.*/workspace/bootstrap-sample/local_components'
+  ]) {
+    try {
+      execFileSync('pkill', ['-f', pattern], { stdio: 'ignore' });
+      noted.push(`pkill ${pattern}`);
+    } catch {
+      // no matching processes
+    }
+  }
+
+  bootstrapRunning = false;
+  bootstrapStartedAt = null;
+  localComponentContext = null;
+  latestLog = '';
+  latestEvents = '';
+  latestDebug = {
+    repoDir: '',
+    preflightPath: '',
+    extraVarsPath: '',
+    normalizedPayload: null,
+    selectedComponents: '',
+    selectedComponentApps: [],
+    result: null
+  };
+
+  const targets = [
+    path.join(workRoot, 'bootstrap-sample'),
+    path.join(workRoot, 'ado-source'),
+    path.join(workRoot, 'install-collections.sh'),
+    path.join(workRoot, 'stage-ado-source.py')
+  ];
+  if (wipeCollections) {
+    targets.push(path.join(workRoot, 'collections'));
+  }
+  // Drop staged collection copies at /workspace root (not under collections/).
+  try {
+    for (const name of fs.readdirSync(workRoot)) {
+      if (/^infra-ado-.*\.tar\.gz$/.test(name) || /^ado-.*\.tar\.gz$/.test(name)) {
+        targets.push(path.join(workRoot, name));
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  for (const target of targets) {
+    try {
+      if (!fs.existsSync(target)) continue;
+      fs.rmSync(target, { recursive: true, force: true });
+      removed.push(target);
+    } catch (err) {
+      noted.push(`failed to remove ${target}: ${err.message}`);
+    }
+  }
+
+  // Git credential helper file written during bootstrap push mode.
+  const gitCreds = path.join(process.env.HOME || '/tmp', '.git-credentials');
+  try {
+    if (fs.existsSync(gitCreds)) {
+      fs.rmSync(gitCreds, { force: true });
+      removed.push(gitCreds);
+    }
+  } catch (err) {
+    noted.push(`failed to remove git credentials: ${err.message}`);
+  }
+
+  fs.mkdirSync(workRoot, { recursive: true });
+  return { removed, noted, wipeCollections: Boolean(wipeCollections) };
 }
 
 function writeIfMissing(filePath, content) {
@@ -4255,6 +5089,23 @@ function formatBootstrapRuntime(ms) {
   return `${sec}s`;
 }
 
+function listLocalPlanPlaybooks(repoDir) {
+  const planPath = path.join(repoDir, 'component-run-plan.json');
+  if (!fs.existsSync(planPath)) {
+    return ['none (re-run Bootstrap so the local playbook plan is written)'];
+  }
+  try {
+    const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+    const names = (plan.steps || [])
+      .filter(step => step && step.available !== false)
+      .map(step => step.playbook || step.id)
+      .filter(Boolean);
+    return names.length ? names : ['none (no playbooks generated for this selection)'];
+  } catch (_err) {
+    return ['none (component-run-plan.json unreadable)'];
+  }
+}
+
 function buildBootstrapRecap(data, repoDir, selectedComponentApps, runtimeMs) {
   const controllerDir = path.join(repoDir, 'configs', 'controller');
   const jobTemplatesDir = path.join(repoDir, 'configs', 'job_templates');
@@ -4317,15 +5168,47 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, runtimeMs) {
     `Git SSL verify: ${data?.git?.skip_tls_verify === false ? 'enabled' : 'disabled (default)'}`
   ];
 
-  appendListRecap(lines, 'Components', selectedComponentApps);
-  appendListRecap(lines, 'Job Templates', readConfigNames([
-    path.join(controllerDir, 'job_templates.yml'),
-    ...listYamlFiles(jobTemplatesDir)
-  ]));
-  appendListRecap(lines, 'Workflow Templates', readConfigNames([
-    path.join(workflowsDir, 'bootstrap_workflows.yml'),
-    ...listYamlFiles(workflowsDir)
-  ]));
+  // Hub-only / standalone / Not using AAP: do not list leftover JT/WF YAML
+  // from a prior full bootstrap in bootstrap-sample — those were not applied.
+  if (data?.aap?.enabled === false) {
+    appendListRecap(lines, 'Components', selectedComponentApps);
+    appendListRecap(lines, 'Generated playbooks', listLocalPlanPlaybooks(repoDir));
+    appendListRecap(lines, 'Job Templates', [
+      'skipped (Not using AAP — run playbooks from the local runner)'
+    ]);
+    appendListRecap(lines, 'Workflow Templates', [
+      'skipped (Not using AAP)'
+    ]);
+    appendListRecap(lines, 'Credentials', [
+      'skipped (Not using AAP)'
+    ]);
+    appendListRecap(lines, 'Inventories', [
+      'skipped (Not using AAP)'
+    ]);
+    appendListRecap(lines, 'Inventory Sources', ['none']);
+    appendListRecap(lines, 'Hosts', ['none']);
+    lines.push('');
+    return lines.join('\n');
+  }
+  if (aapStandaloneRun(data) || data?.aap?.hub_update_collection_only === true) {
+    appendListRecap(lines, 'Components', selectedComponentApps?.length ? selectedComponentApps : ['none (hub-only)']);
+    appendListRecap(lines, 'Job Templates', [
+      'skipped (hub-only — Contoller JT/WF apply not run; ignore leftover configs on disk)'
+    ]);
+    appendListRecap(lines, 'Workflow Templates', [
+      'skipped (hub-only)'
+    ]);
+  } else {
+    appendListRecap(lines, 'Components', selectedComponentApps);
+    appendListRecap(lines, 'Job Templates', readConfigNames([
+      path.join(controllerDir, 'job_templates.yml'),
+      ...listYamlFiles(jobTemplatesDir)
+    ]));
+    appendListRecap(lines, 'Workflow Templates', readConfigNames([
+      path.join(workflowsDir, 'bootstrap_workflows.yml'),
+      ...listYamlFiles(workflowsDir)
+    ]));
+  }
   const expectedObjects = expectedRecapObjects(data, selectedComponentApps);
   appendListRecap(lines, 'Credentials', mergeRecapValues(
     readControllerConfigNames(
@@ -4428,6 +5311,345 @@ app.delete('/api/rhbk-standalone-zip', (req, res) => {
   fs.unlink(candidate, () => res.json({ ok: true }));
 });
 
+function resolveLocalComponentsRunner(repoDir) {
+  // Prefer the collection copy so local/no-AAP runner fixes apply without requiring a
+  // full re-bootstrap just to refresh the vendored script in the generated repo.
+  const candidates = [
+    path.join('/workspace/collections/ansible_collections/infra/ado/roles/bootstrap_generate_playbook_repo/files/local_components.py'),
+    path.join('/opt/ado-collections/extracted/roles/bootstrap_generate_playbook_repo/files/local_components.py'),
+    path.join(__dirname, 'collections', 'ansible_collections', 'infra', 'ado', 'roles', 'bootstrap_generate_playbook_repo', 'files', 'local_components.py'),
+    path.join(repoDir, 'local_components.py')
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return path.join(repoDir, 'local_components.py');
+}
+
+function loadYamlFile(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  try {
+    // Minimal YAML subset for flat htpasswd keys (js-yaml may be unavailable).
+    const text = fs.readFileSync(filePath, 'utf8');
+    if (text.startsWith('$ANSIBLE_VAULT')) return {};
+    const out = {};
+    for (const line of text.split(/\r?\n/)) {
+      const match = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+      if (!match) continue;
+      let value = match[2].trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      out[match[1]] = value;
+    }
+    return out;
+  } catch (_err) {
+    return {};
+  }
+}
+
+function htpasswdFormVarsFromBootstrapRepo(repoDir, environment) {
+  const formVars = {};
+  const envName = String(environment || 'dev').trim() || 'dev';
+  const envDir = path.join(repoDir, 'group_vars', 'all', envName);
+  for (const fileName of ['vars_admin_htpasswd.yml', 'vars_htpass_admin.yml', 'vars_openshift.yml']) {
+    const data = loadYamlFile(path.join(envDir, fileName));
+    for (const key of ['htpasswd_idp_name', 'htpasswd_idp', 'htpasswd_secret', 'htpasswd_action']) {
+      if (data[key] && !formVars[key]) formVars[key] = String(data[key]).trim();
+    }
+  }
+  let preflightPath = latestDebug.preflightPath;
+  if (!preflightPath || !fs.existsSync(preflightPath)) {
+    const matches = fs.readdirSync(repoDir)
+      .filter((name) => name.startsWith('ado-preflight-') && name.endsWith('.json'))
+      .map((name) => path.join(repoDir, name));
+    matches.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    preflightPath = matches[0] || '';
+  }
+  if (preflightPath && fs.existsSync(preflightPath)) {
+    try {
+      const preflight = JSON.parse(fs.readFileSync(preflightPath, 'utf8'));
+      const openshift = preflight.openshift || {};
+      const idp = String(openshift.htpasswd_idp_name || '').trim();
+      const secret = String(openshift.htpasswd_secret || '').trim() || (idp ? `${idp}-secret` : '');
+      if (idp) {
+        formVars.htpasswd_idp_name = idp;
+        formVars.htpasswd_idp = idp;
+      }
+      if (secret) formVars.htpasswd_secret = secret;
+      if (openshift.htpasswd_action) {
+        formVars.htpasswd_action = openshift.htpasswd_action;
+      }
+    } catch (_err) {
+      // ignore malformed preflight
+    }
+  }
+  return formVars;
+}
+
+function stepsIncludeHtpasswd(steps) {
+  return (Array.isArray(steps) ? steps : []).some((step) => {
+    const text = String(step || '').toLowerCase();
+    return text.includes('htpass') || text.includes('htpasswd') || text.includes('admin_htpasswd');
+  });
+}
+
+function componentRequestFile(body) {
+  if (!localComponentContext || body.planId !== localComponentContext.id) {
+    throw new Error('Run bootstrap successfully with Not using AAP before selecting components.');
+  }
+  const directory = fs.mkdtempSync(path.join(require('os').tmpdir(), 'ado-components-'));
+  const file = path.join(directory, 'request.json');
+  const steps = Array.isArray(body.steps) ? body.steps : [];
+  let form_vars = {};
+  // Only attach htpasswd_* when an HTPasswd playbook is selected — never for cert-manager alone.
+  if (stepsIncludeHtpasswd(steps)) {
+    const fromRepo = htpasswdFormVarsFromBootstrapRepo(
+      localComponentContext.repoDir,
+      localComponentContext.environment || 'dev'
+    );
+    const fromBody = body.form_vars && typeof body.form_vars === 'object' ? body.form_vars : {};
+    form_vars = { ...fromRepo, ...fromBody };
+    if (form_vars.htpasswd_idp_name) {
+      append(`Component form_vars htpasswd_idp_name=${form_vars.htpasswd_idp_name} secret=${form_vars.htpasswd_secret || ''}\n`);
+    }
+  }
+  const step_options = (body.step_options && typeof body.step_options === 'object')
+    ? body.step_options
+    : {};
+  fs.writeFileSync(file, JSON.stringify({
+    steps,
+    values: body.values || {},
+    form_vars,
+    extra_args: String(body.extra_args || ''),
+    step_options
+  }), { mode: 0o600 });
+  return { directory, file };
+}
+
+function previewComponentCommands(file) {
+  const { repoDir } = localComponentContext;
+  const runner = resolveLocalComponentsRunner(repoDir);
+  return JSON.parse(execFileSync('python3', [runner, '--repo', repoDir, '--request', file, '--preview'], { encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024 }));
+}
+
+app.get('/api/components/plan', (req, res) => {
+  if (!localComponentContext) return res.status(404).json({ error: 'No successful local bootstrap is available.' });
+  try {
+    const plan = JSON.parse(fs.readFileSync(path.join(localComponentContext.repoDir, 'component-run-plan.json'), 'utf8'));
+    res.json({ ...plan, planId: localComponentContext.id });
+  } catch (err) { res.status(409).json({ error: 'Regenerate bootstrap to create the component execution plan.' }); }
+});
+
+/**
+ * Map playbook path → component key used in vars_{component}.yml / vault_{component}.yml.
+ * Falls back to hyphen→underscore of the playbook directory name.
+ */
+function componentKeyFromPlaybook(playbookPath) {
+  const normalized = String(playbookPath || '').replace(/\\/g, '/');
+  const map = {
+    'cert-manager': 'cert_manager',
+    'admin_htpasswd': 'admin_htpasswd',
+    htpass: 'admin_htpasswd',
+    openshift: 'openshift',
+    console: 'console',
+    rhbk: 'rhbk',
+    grafana: 'grafana',
+    gitlab: 'gitlab',
+    quay: 'quay',
+    minio: 'minio',
+    netbox: 'netbox',
+    bookstack: 'bookstack',
+    zabbix: 'zabbix',
+    acm: 'acm',
+    acs: 'acs',
+    gitops: 'gitops',
+    oadp: 'oadp',
+    pega: 'pega',
+    dirsrv: 'dirsrv',
+    kafka: 'kafka',
+    eck: 'eck',
+    'dev-hub': 'dev_hub',
+    'dev_hub': 'dev_hub',
+    'devspaces': 'devspaces',
+    ocp_compliance: 'ocp_compliance'
+  };
+  const parts = normalized.split('/').filter(Boolean);
+  const dir = parts.length >= 2 && parts[0] === 'playbooks' ? parts[1] : parts[0];
+  if (normalized.includes('htpass')) return 'admin_htpasswd';
+  if (normalized.includes('console-banner')) return 'console';
+  return map[dir] || String(dir || '').replace(/-/g, '_');
+}
+
+function redactGroupVarsText(fileName, text) {
+  const raw = String(text || '');
+  if (raw.startsWith('$ANSIBLE_VAULT')) {
+    return '# Ansible Vault encrypted — contents hidden in explain.\n# Decrypt with --vault-password-file .vault_pass when the playbook runs.\n';
+  }
+  let out = raw
+    .replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g, '-----BEGIN …-----\n(redacted PEM)\n-----END …-----')
+    .replace(/^([A-Za-z0-9_]*?(?:password|passwd|token|secret|api_key|private_key|oauth|bearer)[A-Za-z0-9_]*):\s*.+$/gim, '$1: (redacted)');
+  // Long single-line base64 (e.g. idm_ca_bundle_content_base64)
+  out = out.replace(/^([A-Za-z0-9_]*(?:base64|pem|crt|key)[A-Za-z0-9_]*):\s*'?[A-Za-z0-9+/=]{80,}'?\s*$/gim, '$1: (redacted)');
+  if (/vault/i.test(fileName) && out.length > 4000) {
+    return `# ${fileName} truncated for explain (${out.length} chars).\n${out.slice(0, 4000)}\n# …\n`;
+  }
+  return out;
+}
+
+function listGroupVarsForPlaybook(repoDir, playbookPath, envName) {
+  const env = String(envName || 'dev').trim() || 'dev';
+  const envDir = path.join(repoDir, 'group_vars', 'all', env);
+  const relBase = `group_vars/all/${env}`;
+  if (!fs.existsSync(envDir)) {
+    return {
+      env,
+      dir: relBase,
+      playbook: playbookPath,
+      component: componentKeyFromPlaybook(playbookPath),
+      files: [],
+      error: `Directory ${relBase} not found. Run Bootstrap first.`
+    };
+  }
+  const component = componentKeyFromPlaybook(playbookPath);
+  const preferred = [
+    'infra_config_vars.yml',
+    `vars_${component}.yml`,
+    `vault_${component}.yml`,
+    'vars_openshift.yml',
+    'vault_openshift.yml'
+  ];
+  if (component === 'console') {
+    preferred.push('vars_console.yml', 'vault_console.yml');
+  }
+  if (component === 'admin_htpasswd') {
+    preferred.push('vars_admin_htpasswd.yml', 'vault_admin_htpasswd.yml');
+  }
+  const onDisk = fs.readdirSync(envDir)
+    .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+    .sort();
+  const ordered = [];
+  const seen = new Set();
+  for (const name of preferred) {
+    if (onDisk.includes(name) && !seen.has(name)) {
+      ordered.push(name);
+      seen.add(name);
+    }
+  }
+  for (const name of onDisk) {
+    if (!seen.has(name)) {
+      ordered.push(name);
+      seen.add(name);
+    }
+  }
+  const files = ordered.map((name) => {
+    const full = path.join(envDir, name);
+    let content = '';
+    let missing = false;
+    try {
+      content = redactGroupVarsText(name, fs.readFileSync(full, 'utf8'));
+    } catch (_err) {
+      missing = true;
+      content = `# Unable to read ${name}\n`;
+    }
+    return {
+      name,
+      path: `${relBase}/${name}`,
+      preferred: preferred.includes(name),
+      vault: /^vault_/i.test(name) || content.includes('Ansible Vault encrypted'),
+      missing,
+      content
+    };
+  });
+  return {
+    env,
+    dir: relBase,
+    playbook: playbookPath,
+    component,
+    defaultFile: files.find((f) => f.preferred && f.name.startsWith('vars_'))?.name
+      || files.find((f) => f.preferred)?.name
+      || files[0]?.name
+      || '',
+    files
+  };
+}
+
+app.get('/api/components/group-vars', (req, res) => {
+  const playbook = String(req.query.playbook || '').trim();
+  const env = String(req.query.env || localComponentContext?.environment || 'dev').trim() || 'dev';
+  if (!playbook || playbook.includes('..') || !playbook.startsWith('playbooks/')) {
+    return res.status(400).json({ error: 'Query playbook=playbooks/.../file.yml is required.' });
+  }
+  const repoDir = localComponentContext?.repoDir
+    || latestDebug.repoDir
+    || path.join(workRoot, 'bootstrap-sample');
+  if (!fs.existsSync(repoDir)) {
+    return res.status(404).json({ error: 'Bootstrap repo not found. Run Bootstrap first.' });
+  }
+  try {
+    res.json(listGroupVarsForPlaybook(repoDir, playbook, env));
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+app.post('/api/components/preview', (req, res) => {
+  let request;
+  try {
+    request = componentRequestFile(req.body);
+    res.json({ commands: previewComponentCommands(request.file) });
+  } catch (err) {
+    res.status(400).json({ error: err.stderr ? String(err.stderr).trim() : err.message });
+  } finally { if (request) fs.rmSync(request.directory, { recursive: true, force: true }); }
+});
+
+app.post('/api/components/run', async (req, res) => {
+  if (bootstrapRunning) return res.status(409).json({ error: 'A run is already in progress.' });
+  let request;
+  let context;
+  try {
+    request = componentRequestFile(req.body);
+    previewComponentCommands(request.file); // Validate every selected step before any mutation.
+    context = { ...localComponentContext };
+  } catch (err) {
+    if (request) fs.rmSync(request.directory, { recursive: true, force: true });
+    return res.status(400).json({ error: err.stderr ? String(err.stderr).trim() : err.message });
+  }
+  bootstrapRunning = true;
+  bootstrapStartedAt = Date.now();
+  latestLog = '';
+  latestEvents = '';
+  latestDebug.result = null;
+  res.status(202).json({ status: 'started' });
+  try {
+    event('Refreshing infra.ado from baked /opt/ado-collections before component run');
+    const refreshCode = await runStream('bash', ['-lc', [
+      'set -euo pipefail',
+      'COLLECTION_DIR=/opt/ado-collections',
+      'mkdir -p /workspace/collections',
+      'ado_archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name \'infra-ado-*.tar.gz\' | sort -V | tail -n 1)"',
+      'if [ -z "$ado_archive" ]; then echo "ERROR: no infra-ado-*.tar.gz in $COLLECTION_DIR"; exit 1; fi',
+      'echo "Installing $ado_archive"',
+      'ansible-galaxy collection install "$ado_archive" -p /workspace/collections --force --no-deps'
+    ].join('\n')], context.repoDir, 'Refreshing infra.ado collection', context.env);
+    if (refreshCode !== 0) {
+      throw new Error(`Failed to refresh infra.ado collection (exit ${refreshCode})`);
+    }
+    event('Running selected generated components in the pod');
+    const code = await runStream('python3', [resolveLocalComponentsRunner(context.repoDir), '--repo', context.repoDir, '--request', request.file], context.repoDir, 'Running selected components', context.env);
+    latestDebug.result = { status: code === 0 ? 'complete' : 'failed', exitCode: code, phase: 'components', bootstrapRuntime: formatBootstrapRuntime(Date.now() - bootstrapStartedAt) };
+    event(`Bootstrap finished exitCode=${code}`);
+  } catch (err) {
+    latestDebug.result = { status: 'failed', exitCode: 2, phase: 'components', error: err.message };
+    append(`Component execution failed: ${err.message}\n`);
+    event('Bootstrap finished exitCode=2');
+  } finally {
+    bootstrapRunning = false;
+    bootstrapStartedAt = null;
+    fs.rmSync(request.directory, { recursive: true, force: true });
+  }
+});
+
 app.get('/api/logs' , (req, res) => {
   res.type('text/plain').send(latestLog);
 });
@@ -4450,6 +5672,34 @@ app.get('/api/bootstrap/result', (req, res) => {
     });
   }
   res.json(latestDebug.result);
+});
+
+app.post('/api/workspace/flush', (req, res) => {
+  if (deployOpenshiftRunning) {
+    return res.status(409).json({
+      error: 'OpenShift deploy is running. Wait for it to finish before flushing the workspace.'
+    });
+  }
+  const wipeCollections = req.body?.wipe_collections === true
+    || req.query?.wipe_collections === '1'
+    || req.query?.wipe_collections === 'true';
+  const wasRunning = bootstrapRunning;
+  const result = flushWorkspace({ wipeCollections });
+  event(`Workspace flushed (wipeCollections=${wipeCollections}, wasRunning=${wasRunning})`);
+  append('\n=== Workspace flushed ===\n');
+  append(`Removed:\n${result.removed.map(p => `  - ${p}`).join('\n') || '  (nothing)'}\n`);
+  if (result.noted.length) {
+    append(`Notes:\n${result.noted.map(p => `  - ${p}`).join('\n')}\n`);
+  }
+  append('Import JSON / change selections, then Run Bootstrap again for a clean plan.\n');
+  res.json({
+    ok: true,
+    wasRunning,
+    ...result,
+    message: wipeCollections
+      ? 'Stopped runs and cleared bootstrap clone, staged sources, and installed collections.'
+      : 'Stopped runs and cleared bootstrap clone / staged sources. Collections kept for faster next bootstrap.'
+  });
 });
 
 app.get('/api/deploy/openshift/status', (req, res) => {
@@ -4612,6 +5862,26 @@ app.get('/api/readme/ado', (req, res) => {
   res.type('text/plain').send(result.text);
 });
 
+app.get('/api/readme/known-bugs', (req, res) => {
+  const result = readTextFromCandidates([
+    process.env.ADO_PREFLIGHT_KNOWN_BUGS,
+    path.join(__dirname, 'known-bugs.md'),
+    path.join(__dirname, '..', 'known-bugs.md'),
+    path.join(process.cwd(), 'known-bugs.md'),
+    path.join('/opt', 'app-root', 'src', 'known-bugs.md'),
+    path.join('/opt', 'app-root', 'known-bugs.md'),
+    path.join('/workspace', 'ado-preflight-ui', 'known-bugs.md')
+  ]);
+
+  if (!result.text) {
+    event(`Known bugs markdown not found in: ${result.checked.join(', ')}`);
+    res.type('text/plain').send(documentationFallback('Known Bugs', result.checked));
+    return;
+  }
+
+  res.type('text/plain').send(result.text);
+});
+
 app.get('/api/readme/ado/role/:roleName', (req, res) => {
   const roleName = String(req.params.roleName || '').trim();
 
@@ -4693,6 +5963,40 @@ app.post('/api/openshift/storageclasses', async (req, res) => {
     res.json({ storageClasses });
   } catch (err) {
     event(`Failed listing OpenShift storage classes: ${err.message}`);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/api/openshift/packagemanifests', async (req, res) => {
+  const apiHost = String(req.body?.api_host || req.body?.host || '').trim();
+  const token = String(req.body?.token || req.body?.api_key || '').trim();
+  const skipTls = req.body?.skip_tls_verify !== false;
+  if (!apiHost || !token) {
+    res.status(400).json({
+      error: 'OpenShift API host and token are required to list PackageManifests.'
+    });
+    return;
+  }
+
+  try {
+    const body = await openshiftApiGetJson(
+      apiHost,
+      token,
+      '/apis/packages.operators.coreos.com/v1/packagemanifests',
+      skipTls,
+      { maxBytes: 20000000, timeoutMs: 60000 }
+    );
+    const operators = parseOpenShiftPackageManifests(body);
+    event(
+      `Listed ${operators.length} catalog operators `
+      + `(excluded ${ADO_OWNED_OPERATOR_PACKAGES.size} ADO-owned packages)`
+    );
+    res.json({
+      operators,
+      excludedPackages: [...ADO_OWNED_OPERATOR_PACKAGES].sort()
+    });
+  } catch (err) {
+    event(`Failed listing OpenShift PackageManifests: ${err.message}`);
     res.status(502).json({ error: err.message });
   }
 });
@@ -4825,6 +6129,196 @@ app.post('/api/keycloak/realm-public-key', async (req, res) => {
 });
 
 app.post('/api/bootstrap', async (req, res) => {
+  return handleScaffoldingRequest(req, res);
+});
+
+app.post('/api/publish', async (req, res) => {
+  return handlePublishEncryptedJsonRequest(req, res);
+});
+
+/**
+ * Encrypt current preflight JSON with ansible-vault (Vault password from form)
+ * and push only ado-preflight-<env>.json.vault.yml to the Project Git repo.
+ * Never pushes plaintext ado-preflight-*.json.
+ */
+async function handlePublishEncryptedJsonRequest(req, res) {
+  latestLog = '';
+  latestEvents = '';
+  latestDebug = {
+    repoDir: '',
+    preflightPath: '',
+    extraVarsPath: '',
+    normalizedPayload: null,
+    selectedComponents: '',
+    selectedComponentApps: [],
+    result: null
+  };
+
+  event('Publish encrypted JSON started');
+
+  const data = normalizePreflightPayload(req.body || {});
+  const envName = data.environment || 'prod';
+  const repoUrl = data?.aap?.git_url || data?.git?.url || '';
+  const branch = String(data?.aap?.git_branch || data?.git?.branch || 'main').trim() || 'main';
+  const gitToken = data?.git?.token || '';
+  const vaultPassword = String(data?.aap?.vault_password || data.vault_password || '').trim();
+  const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
+  const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
+
+  if (!repoUrl) {
+    event('Publish failed: missing Project Git Source URL');
+    return res.status(400).json({ error: 'Missing Project Git Source URL (Git Configuration).' });
+  }
+  if (!gitToken) {
+    event('Publish failed: Git token required');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'Git token is required to push the encrypted preflight JSON.'
+    });
+  }
+  if (!vaultPassword) {
+    event('Publish failed: vault password required');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error: 'Vault password is required (Credentials → Vault / AAP vault password).'
+    });
+  }
+
+  const selectedComponentApps = selectedComponentAppsFrom(data);
+  data.selected_component_apps = selectedComponentApps;
+  pruneSelectedPayload(data, selectedComponentApps);
+  latestDebug.normalizedPayload = redactSecrets(data);
+  latestDebug.selectedComponents = Array.isArray(data.components) ? data.components.join(',') : '';
+  latestDebug.selectedComponentApps = selectedComponentApps;
+
+  const repoDir = path.join(workRoot, 'bootstrap-sample');
+  const plainFile = `ado-preflight-${envName}.json`;
+  const vaultFile = `${plainFile}.vault.yml`;
+  const plainPath = path.join(repoDir, plainFile);
+  const vaultPath = path.join(repoDir, vaultFile);
+  const vaultPassPath = path.join(repoDir, '.vault_pass');
+  latestDebug.repoDir = repoDir;
+  latestDebug.preflightPath = vaultPath;
+
+  append(`\nMode: publish-encrypted-json\n`);
+  append(`Git URL: ${repoUrl}\n`);
+  append(`Git branch: ${branch}\n`);
+  append(`Vault file: ${vaultFile}\n`);
+  event(`Encrypting and pushing ${vaultFile} to ${repoUrl} (${branch})`);
+
+  const prepared = await prepareGitAuthAndClone({
+    repoUrl,
+    branch,
+    repoDir,
+    token: gitToken,
+    scmTool,
+    gitSkipTlsVerify,
+    gitName: data?.git?.name || 'ADO Preflight UI',
+    gitEmail: data?.git?.email || 'ado-preflight@localhost',
+    cleanRepoDir: true
+  });
+
+  if (!prepared.ok) {
+    event(`Publish failed during git clone exitCode=${prepared.code}`);
+    latestDebug.result = {
+      status: 'failed',
+      exitCode: prepared.code,
+      mode: 'publish',
+      repoDir,
+      error: prepared.error
+    };
+    return res.json(latestDebug.result);
+  }
+
+  ensurePreflightSecretsGitignore(repoDir);
+
+  event(`Writing plaintext ${plainFile} (local only; will encrypt then remove)`);
+  fs.writeFileSync(plainPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(vaultPassPath, `${vaultPassword}\n`, { mode: 0o600 });
+
+  event('Encrypting preflight JSON with ansible-vault');
+  const encryptCode = await runStream(
+    'ansible-vault',
+    ['encrypt', plainFile, '--vault-password-file', '.vault_pass'],
+    repoDir,
+    'Encrypting preflight JSON'
+  );
+  try { fs.rmSync(vaultPassPath, { force: true }); } catch (_err) { /* ignore */ }
+
+  if (encryptCode !== 0) {
+    try { fs.rmSync(plainPath, { force: true }); } catch (_err) { /* ignore */ }
+    event(`Publish failed during ansible-vault encrypt exitCode=${encryptCode}`);
+    latestDebug.result = {
+      status: 'failed',
+      exitCode: encryptCode,
+      mode: 'publish',
+      repoDir,
+      error: 'ansible-vault encrypt failed. Check logs / Vault password.'
+    };
+    return res.json(latestDebug.result);
+  }
+
+  // Encrypted content stays in plainFile name until rename → *.json.vault.yml
+  try {
+    if (fs.existsSync(vaultPath)) fs.rmSync(vaultPath, { force: true });
+    fs.renameSync(plainPath, vaultPath);
+  } catch (err) {
+    event(`Publish failed renaming to ${vaultFile}: ${err.message}`);
+    latestDebug.result = {
+      status: 'failed',
+      exitCode: 2,
+      mode: 'publish',
+      error: err.message
+    };
+    return res.json(latestDebug.result);
+  }
+
+  const pushed = await gitCommitAndPush({
+    repoDir,
+    repoUrl,
+    branch,
+    pathsToAdd: ['.gitignore', vaultFile],
+    commitMessage: `Add encrypted preflight JSON ${vaultFile}`,
+    token: gitToken,
+    scmTool,
+    gitSkipTlsVerify
+  });
+
+  // Keep vaulted file; never leave plaintext beside it.
+  try { fs.rmSync(plainPath, { force: true }); } catch (_err) { /* ignore */ }
+  try { fs.rmSync(vaultPassPath, { force: true }); } catch (_err) { /* ignore */ }
+
+  event(`Publish encrypted JSON finished exitCode=${pushed.code}`);
+  latestDebug.result = {
+    status: pushed.ok ? 'complete' : 'failed',
+    exitCode: pushed.code,
+    mode: 'publish',
+    repoDir,
+    preflightFile: vaultFile,
+    branch,
+    encryptJson: true,
+    gitTokenProvided: Boolean(gitToken),
+    bootstrapRecap: [
+      '',
+      '=== ADO Publish Recap ===',
+      'Mode: push encrypted preflight JSON only',
+      `Git: ${repoUrl}`,
+      `Branch: ${branch}`,
+      `File: ${vaultFile}`,
+      'Encrypted: yes (ansible-vault)',
+      'Plaintext ado-preflight-*.json: not committed',
+      'Bootstrap: skipped',
+      ''
+    ].join('\n'),
+    error: pushed.error || undefined
+  };
+
+  return res.json(latestDebug.result);
+}
+
+async function handleScaffoldingRequest(req, res) {
   if (bootstrapRunning) {
     return res.status(409).json({
       status: 'running',
@@ -4853,6 +6347,19 @@ app.post('/api/bootstrap', async (req, res) => {
   if (!repoUrl) {
     event('Bootstrap failed: missing Project Git Source URL');
     return res.status(400).json({ error: 'Missing Project Git Source URL' });
+  }
+
+  const vaultPassword = String(data?.aap?.vault_password || data.vault_password || '').trim();
+  if (!vaultPassword) {
+    event('Bootstrap failed: missing Vault password');
+    return res.status(400).json({
+      status: 'failed',
+      exitCode: 2,
+      error:
+        'Vault password is required (Credentials → Vault). '
+        + 'It is written to .vault_pass and must match aap.vault_password in the preflight JSON. '
+        + 'There is no silent redhat123 default.'
+    });
   }
 
   const gitToken = data?.git?.token || '';
@@ -4896,11 +6403,18 @@ app.post('/api/bootstrap', async (req, res) => {
       exitCode: 2,
       error:
         'Standalone AAP run is enabled on General, but no AAP tab work is selected. '
-        + 'Enable Install AAP, License, Hub, Galaxy, or Add authentication options, or turn off Standalone.'
+        + 'Enable Install AAP, License, Hub, AAP tools, Galaxy, or Add authentication options, or turn off Standalone.'
     });
   }
 
-  if ((hubPublishRequested || hubPushEeRequested || hubUpdateCollectionOnly)
+  const dedicatedHubOnly = dedicatedHubPostgresRequested(data)
+    && !hubPublishRequested
+    && !hubPushEeRequested
+    && !gatewayAuthRequested
+    && !attachAapLicenseRequested(data)
+    && !installAapFullRequested(data);
+
+  if ((hubPublishRequested || hubPushEeRequested || (hubUpdateCollectionOnly && !dedicatedHubOnly))
     && !String(data?.aap?.hostname || '').trim()) {
     event('Bootstrap failed: Hub work needs General → AAP Hostname URL');
     return res.status(400).json({
@@ -4911,7 +6425,7 @@ app.post('/api/bootstrap', async (req, res) => {
     });
   }
 
-  if ((hubPublishRequested || hubPushEeRequested || hubUpdateCollectionOnly)
+  if ((hubPublishRequested || hubPushEeRequested || (hubUpdateCollectionOnly && !dedicatedHubOnly))
     && !String(data?.aap?.hub_hostname || data?.hub?.hostname || '').trim()
     && !hostnameFromUrl(data?.aap?.hostname)) {
     event('Bootstrap failed: Hub work needs Hub hostname');
@@ -4938,7 +6452,7 @@ app.post('/api/bootstrap', async (req, res) => {
   }
 
   const keycloakOidcEnabled = data?.aap?.auth?.keycloak_oidc?.enabled === true;
-  if (keycloakOidcEnabled) {
+  if (aapEnabled && keycloakOidcEnabled) {
     const oidc = data.aap.auth.keycloak_oidc || {};
     const missing = [];
     if (!String(oidc.key || '').trim()) missing.push('Client ID (KEY)');
@@ -4968,7 +6482,7 @@ app.post('/api/bootstrap', async (req, res) => {
     }
   }
 
-  if (aapOnboardRequested(data) && !keycloakOidcEnabled) {
+  if (aapEnabled && aapOnboardRequested(data) && !keycloakOidcEnabled) {
     event('Bootstrap failed: Onboard tenants require Keycloak OIDC on Add authentication');
     return res.status(400).json({
       status: 'failed',
@@ -4979,7 +6493,7 @@ app.post('/api/bootstrap', async (req, res) => {
     });
   }
 
-  if (aapOnboardRequested(data)) {
+  if (aapEnabled && aapOnboardRequested(data)) {
     const invalidTenants = activeOnboardTenants(data.aap).filter((tenant) => {
       const missing = [];
       if (!String(tenant.admin_groups || '').trim()) missing.push('admin Keycloak group(s)');
@@ -5000,7 +6514,7 @@ app.post('/api/bootstrap', async (req, res) => {
     }
   }
 
-  if (onboardKeycloakGroupsRequested(data.aap)) {
+  if (aapEnabled && onboardKeycloakGroupsRequested(data.aap)) {
     const kc = data.aap.onboard.keycloak || {};
     const missing = [];
     if (!String(kc.base_url || '').trim()) missing.push('Keycloak base URL');
@@ -5019,7 +6533,7 @@ app.post('/api/bootstrap', async (req, res) => {
     }
   }
 
-  if (aapAuthConfigRequested(data) && !hasAnsiblePlatformCollection()) {
+  if (aapEnabled && aapAuthConfigRequested(data) && !hasAnsiblePlatformCollection()) {
     event('Bootstrap failed: ansible.platform collection tarball missing (required for Add authentication)');
     return res.status(400).json({
       status: 'failed',
@@ -5048,16 +6562,46 @@ app.post('/api/bootstrap', async (req, res) => {
     });
   }
 
-  if (installAapDuringBootstrap) {
+  if (dedicatedHubPostgresRequested(data)) {
     const hasOcToken = Boolean(String(data?.openshift?.token || '').trim());
     const hasOcKubeconfig = Boolean(String(data?.openshift?.kubeconfig_content || '').trim());
     const hasOcApiHost = Boolean(String(data?.openshift?.api_host || '').trim());
     if (!hasOcKubeconfig && !(hasOcToken && hasOcApiHost)) {
-      event('Bootstrap failed: Install AAP needs OpenShift API host + token (or kubeconfig)');
+      event('Bootstrap failed: Separate Hub Postgres needs OpenShift API host + token (or kubeconfig)');
       return res.status(400).json({
         status: 'failed',
         exitCode: 2,
-        error: 'Install AAP is enabled, so OpenShift API host and token (or kubeconfig) are required. Uncheck Install AAP on the Install / Run tab if you only want to configure an existing Contoller (patching / Satellite / IdM).'
+        error: 'AAP Tools → Separate Hub onto dedicated Postgres needs OpenShift API host and token (or kubeconfig).'
+      });
+    }
+  }
+
+  if (installAapDuringBootstrap && installAapTarget(data) !== 'rhel') {
+    const hasOcToken = Boolean(String(data?.openshift?.token || '').trim());
+    const hasOcKubeconfig = Boolean(String(data?.openshift?.kubeconfig_content || '').trim());
+    const hasOcApiHost = Boolean(String(data?.openshift?.api_host || '').trim());
+    if (!hasOcKubeconfig && !(hasOcToken && hasOcApiHost)) {
+      event('Bootstrap failed: Install AAP on OpenShift needs OpenShift API host + token (or kubeconfig)');
+      return res.status(400).json({
+        status: 'failed',
+        exitCode: 2,
+        error: 'Install AAP on OpenShift needs OpenShift API host and token (or kubeconfig). Switch the install target to Standalone (RHEL), or uncheck Install AAP if you only want to configure an existing Controller.'
+      });
+    }
+  }
+
+  if (installAapDuringBootstrap && installAapTarget(data) === 'rhel') {
+    const standaloneHost = String(
+      data?.pre_installs?.aap?.standalone_hostname
+      || data?.component_config?.aap?.standalone_hostname
+      || ''
+    ).trim();
+    if (!standaloneHost) {
+      event('Bootstrap failed: Standalone (RHEL) Install AAP needs a RHEL hostname');
+      return res.status(400).json({
+        status: 'failed',
+        exitCode: 2,
+        error: 'Standalone (RHEL) Install AAP needs a RHEL / VM hostname. OpenShift API is not used for this path.'
       });
     }
   }
@@ -5094,7 +6638,7 @@ app.post('/api/bootstrap', async (req, res) => {
   delete data.verbosity;
   const ansibleVerbosity = data.ansible.verbosity;
   const ansibleVerbosityFlag = verbosityFlag(ansibleVerbosity);
-  const ansibleExtraArgsRaw = String(data?.ansible?.extra_args || '').trim();
+  const ansibleExtraArgsRaw = resolveAnsibleExtraArgs(data);
   const ansibleExtraArgsShell = formatAnsibleExtraArgsForShell(ansibleExtraArgsRaw);
   const skipTlsVerify = data?.aap?.skip_tls_verify === true;
   const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
@@ -5154,8 +6698,10 @@ app.post('/api/bootstrap', async (req, res) => {
     }
   }
 
+  localComponentContext = null;
   bootstrapRunning = true;
   bootstrapStartedAt = Date.now();
+  const scaffoldingEpoch = bootstrapEpoch;
   res.status(202).json({
     status: 'started',
     message: 'Bootstrap running. Poll /api/logs, /api/events, and /api/bootstrap/result until complete.'
@@ -5184,6 +6730,7 @@ set -euo pipefail
 COLLECTION_DIR="${collectionDir}"
 HUB_PUBLISH="${hubPublishRequested ? 'true' : 'false'}"
 GATEWAY_AUTH="${gatewayAuthRequested ? 'true' : 'false'}"
+INSTALL_AAP="${installAapDuringBootstrap ? 'true' : 'false'}"
 
 rm -rf /workspace/collections
 mkdir -p /workspace/collections
@@ -5213,6 +6760,9 @@ else
     mkdir -p /workspace/ado-source
     tar -xzf "$ado_archive" -C /workspace/ado-source
     python3 "${stageAdoSourceScript}"
+    # bootstrap_controller stages this path when present (avoids rebuild drift)
+    cp -f "$ado_archive" "/workspace/$(basename "$ado_archive")"
+    echo "Staged Hub publish tarball: /workspace/$(basename "$ado_archive")"
   else
     echo "Skipping ADO source staging (Hub collection update not requested)."
     rm -rf /workspace/ado-source
@@ -5238,6 +6788,18 @@ ansible-galaxy collection install "$COLLECTION_DIR"/infra-controller_configurati
 echo ""
 echo "=== Installing infra.aap_configuration Collection ==="
 ansible-galaxy collection install "$COLLECTION_DIR"/infra-aap_configuration-*.tar.gz -p /workspace/collections --force --no-deps
+
+echo ""
+echo "=== Installing infra.aap_utilities Collection ==="
+if ls "$COLLECTION_DIR"/infra-aap_utilities-*.tar.gz >/dev/null 2>&1; then
+  ansible-galaxy collection install "$COLLECTION_DIR"/infra-aap_utilities-*.tar.gz -p /workspace/collections --force --no-deps
+else
+  if [ "$INSTALL_AAP" = "true" ]; then
+    echo "ERROR: infra-aap_utilities tarball required for Install AAP on OpenShift but not found in $COLLECTION_DIR." >&2
+    exit 1
+  fi
+  echo "infra-aap_utilities tarball not found; skipping"
+fi
 
 echo ""
 echo "=== Installing ansible.platform Collection ==="
@@ -5512,6 +7074,8 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
 
   event(`Writing preflight JSON ${preflightFile}`);
   fs.writeFileSync(preflightPath, JSON.stringify(data, null, 2));
+  ensurePreflightSecretsGitignore(repoDir);
+  event('Ensured .gitignore excludes plaintext ado-preflight-*.json from git commits');
 
   event('Writing ado-extra-vars.json for debug only; not passed to Ansible');
   fs.writeFileSync(extraVarsPath, JSON.stringify({
@@ -5549,11 +7113,8 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     bootstrap_controller_vars_only: varsOnly
   }, null, 2));
 
-  event('Writing vault password file');
-  fs.writeFileSync(
-    vaultPassPath,
-    data?.aap?.vault_password || data.vault_password || 'redhat123'
-  );
+  event('Writing vault password file (.vault_pass from aap.vault_password)');
+  fs.writeFileSync(vaultPassPath, `${vaultPassword}\n`, { mode: 0o600 });
 
   const gitPrepBash = overrideAll
     ? `echo "Git override (all): removing group_vars, playbooks, and configs"
@@ -5602,6 +7163,17 @@ rm -rf collections/ansible_collections/infra/ado
 echo ""
 echo "=== Prepare generated bootstrap content ==="
 ${gitPrepBash}
+
+echo ""
+echo "=== Ignore plaintext preflight JSON / vault pass (never commit secrets) ==="
+git ls-files -z -- 'ado-preflight-*.json' 'ado-extra-vars.json' '.vault_pass' 2>/dev/null \
+  | while IFS= read -r -d '' f; do
+      case "$f" in
+        *.json.vault.yml) continue ;;
+      esac
+      git rm -f --cached -- "$f" || true
+    done
+git add -f -- .gitignore || true
 
 echo ""
 echo "=== Effective preflight JSON ==="
@@ -5670,6 +7242,20 @@ ansible-playbook \\
 `], workRoot, 'Running ansible-playbook', bootstrapEnv);
 
   const runtimeMs = bootstrapStartedAt ? Date.now() - bootstrapStartedAt : null;
+  localComponentContext = code === 0 && !configureAap && !hubUpdateCollectionOnly && !varsOnly
+    ? {
+      id: require('crypto').randomUUID(),
+      repoDir,
+      environment: envName,
+      preflightPath,
+      env: {
+        ...bootstrapEnv,
+        ANSIBLE_COLLECTIONS_PATH: '/workspace/collections:/usr/share/ansible/collections',
+        ANSIBLE_COLLECTIONS_PATHS: '/workspace/collections:/usr/share/ansible/collections',
+        ANSIBLE_FORCE_COLOR: 'false'
+      }
+    }
+    : null;
   const bootstrapRecap = buildBootstrapRecap(
     data,
     repoDir,
@@ -5677,6 +7263,10 @@ ansible-playbook \\
     runtimeMs
   );
   event(`Bootstrap finished exitCode=${code}`);
+
+  if (scaffoldingEpoch !== bootstrapEpoch) {
+    return;
+  }
 
   latestDebug.result = {
     status: code === 0 ? 'complete' : 'failed',
@@ -5706,6 +7296,9 @@ ansible-playbook \\
 
   append(`\n\nRESULT:\n${JSON.stringify(latestDebug.result, null, 2)}${bootstrapRecap}\n`);
   } catch (err) {
+    if (scaffoldingEpoch !== bootstrapEpoch) {
+      return;
+    }
     event(`Bootstrap failed: ${err.message}`);
     append(`\nFATAL: ${err.message}\n`);
     const runtimeMs = bootstrapStartedAt ? Date.now() - bootstrapStartedAt : null;
@@ -5718,10 +7311,12 @@ ansible-playbook \\
     };
     append(`\n\nRESULT:\n${JSON.stringify(latestDebug.result, null, 2)}\n`);
   } finally {
-    bootstrapRunning = false;
-    bootstrapStartedAt = null;
+    if (scaffoldingEpoch === bootstrapEpoch) {
+      bootstrapRunning = false;
+      bootstrapStartedAt = null;
+    }
   }
-});
+}
 
 app.use((req, res) => {
   res.sendFile(path.join(uiDir, 'index.html'));
