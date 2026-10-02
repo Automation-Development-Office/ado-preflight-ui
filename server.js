@@ -209,7 +209,7 @@ const packageJson = require('./package.json');
 const openshiftApps = [
   'aap', 'acs', 'acm', 'bookstack', 'cert_manager', 'console', 'devspaces', 'dev_hub',
   'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio', 'mtv', 'netbox',
-  'oadp', 'ocp_compliance', 'ocp_virtualization', 'openshift', 'pega', 'quay', 'rhbk',
+  'oadp', 'ocp_compliance', 'ocp_virtualization', 'openshift_networking', 'openshift', 'pega', 'quay', 'rhbk',
   'zabbix'
 ];
 const orphanOpenShiftPlaybookApps = [
@@ -2492,7 +2492,9 @@ function normalizePreflightPayload(input) {
       if (ee.description) data.aap.hub_ee_description = ee.description;
     }
   }
-  const HUB_EE_BAKED_SOURCE = 'docker-archive:/opt/ado-ee/ado-ee.docker.tar';
+  const HUB_EE_BAKED_PATH = '/opt/ado-ee/ado-ee.docker.tar';
+  const HUB_EE_BAKED_SOURCE = `docker-archive:${HUB_EE_BAKED_PATH}`;
+  const HUB_EE_BAKED_AVAILABLE = fs.existsSync(HUB_EE_BAKED_PATH);
   const HUB_EE_REGISTRY_SOURCE = 'ghcr.io/automation-development-office/ado-ee:latest';
   const hubOrg = data.aap.organization || 'ADO';
   // Registry image name must be lowercase (ado-ee). Contoller EE object may stay ORG-ee.
@@ -2538,7 +2540,9 @@ function normalizePreflightPayload(input) {
         data.aap.hub_ee_source_image = HUB_EE_REGISTRY_SOURCE;
       }
     } else if (!src || /^ghcr\.io\//i.test(src)) {
-      data.aap.hub_ee_source_image = HUB_EE_BAKED_SOURCE;
+      data.aap.hub_ee_source_image = HUB_EE_BAKED_AVAILABLE
+        ? HUB_EE_BAKED_SOURCE
+        : HUB_EE_REGISTRY_SOURCE;
     }
   }
   if (data.aap.hub_ee_create_execution_environment === undefined) {
@@ -2781,6 +2785,31 @@ function normalizePreflightPayload(input) {
     if (data.component_config.idm.ad_configure_groups === undefined) data.component_config.idm.ad_configure_groups = true;
     if (data.component_config.idm.ad_map_group === undefined) data.component_config.idm.ad_map_group = '';
     if (data.component_config.idm.ad_map_admins_group === undefined) data.component_config.idm.ad_map_admins_group = '';
+  }
+
+  // Normalize openshift_networking config.
+  // If the feature is selected but not enabled, strip it from the payload.
+  if (selectedComponentApps.includes('openshift_networking')) {
+    if (!data.component_config.openshift_networking) {
+      data.component_config.openshift_networking = {};
+    }
+    const netCfg = data.component_config.openshift_networking;
+    if (!netCfg.enabled) {
+      delete data.component_config.openshift_networking;
+    } else {
+      // Ensure arrays and objects exist
+      if (!Array.isArray(netCfg.tenants)) netCfg.tenants = [];
+      if (!netCfg.cluster_security) netCfg.cluster_security = {};
+      if (!Array.isArray(netCfg.cluster_security.admin_network_policies)) {
+        netCfg.cluster_security.admin_network_policies = [];
+      }
+      if (!Array.isArray(netCfg.physical_networks)) netCfg.physical_networks = [];
+      if (!netCfg.load_balancing) netCfg.load_balancing = {};
+      if (!netCfg.load_balancing.metallb) netCfg.load_balancing.metallb = { enabled: false };
+      if (!netCfg.ingress) netCfg.ingress = {};
+      if (!netCfg.ocp_version) netCfg.ocp_version = '4.18';
+      if (!netCfg.network_provider) netCfg.network_provider = 'OVNKubernetes';
+    }
   }
 
   if (!data.openshift) data.openshift = {};
@@ -5472,7 +5501,8 @@ function componentKeyFromPlaybook(playbookPath) {
     'dev-hub': 'dev_hub',
     'dev_hub': 'dev_hub',
     'devspaces': 'devspaces',
-    ocp_compliance: 'ocp_compliance'
+    ocp_compliance: 'ocp_compliance',
+    openshift_networking: 'openshift_networking'
   };
   const parts = normalized.split('/').filter(Boolean);
   const dir = parts.length >= 2 && parts[0] === 'playbooks' ? parts[1] : parts[0];

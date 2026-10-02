@@ -35,7 +35,9 @@ free_port() {
   sleep 1
 }
 
-bash ./scripts/prepare-ado-ee-archive.sh
+if [[ -x ./scripts/prepare-ado-ee-archive.sh ]]; then
+  bash ./scripts/prepare-ado-ee-archive.sh || echo "WARN: prepare-ado-ee-archive.sh failed — Hub EE push from baked archive will be unavailable."
+fi
 
 free_port
 
@@ -87,4 +89,8 @@ podman run --rm -d \
 
 echo "Preflight UI: http://127.0.0.1:${PORT}"
 echo "Airgap companion: ${AIRGAP_ARCHITECT_URL:-http://host.containers.internal:8081} (host :8081)"
-echo "Hub EE: baked at /opt/ado-ee/ado-ee.docker.tar — Push EE uses skopeo inside the pod (AAP admin password from the form)."
+if [[ -f vendor/ado-ee.docker.tar ]]; then
+  echo "Hub EE: baked at /opt/ado-ee/ado-ee.docker.tar — Push EE uses skopeo inside the pod."
+else
+  echo "Hub EE: no baked archive — Push EE will pull from registry at runtime (requires connectivity)."
+fi

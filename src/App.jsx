@@ -6,6 +6,8 @@ import BootstrapProfiles from './BootstrapProfiles.jsx';
 import AdoAssistant from './AdoAssistant.jsx';
 import { selectProfileApps } from './profileSelection.mjs';
 import { explainLocalPlaybookCommand } from './playbookExplain.mjs';
+import NetworkingConfig from './NetworkingConfig.jsx';
+import { NETWORKING_DEFAULTS, normalizeNetworkingConfig } from './networkingSupport.mjs';
 import {
   Page,
   PageSection,
@@ -45,7 +47,7 @@ import adoLogo from '../ado-logo-redhat.png';
 const openshiftApps = [
   'aap','acs','acm','bookstack','cert_manager','console','devspaces','dev_hub',
   'dirsrv','eck','gitops','gitlab','grafana','kafka','minio','mtv','netbox',
-  'oadp','ocp_compliance','ocp_virtualization','openshift','pega','quay','rhbk','zabbix'
+  'oadp','ocp_compliance','ocp_virtualization','openshift_networking','openshift','pega','quay','rhbk','zabbix'
 ];
 
 // Collection playbook apps not exposed as UI checkboxes. Stale imports leave
@@ -1403,6 +1405,7 @@ const componentOptionLabels = {
   minio: 'MinIO',
   zabbix: 'Zabbix',
   ocp_virtualization: 'OpenShift Virtualization',
+  openshift_networking: 'OpenShift Networking',
   mtv: 'Migration Toolkit for Virtualization (MTV)',
   openshift_virt: 'OpenShift Virt VM',
   ec2_ami_copy: 'EC2 AMI Copy'
@@ -2241,6 +2244,7 @@ const defaults = {
       channel: 'stable',
       enable_kube_secondary_dns: false
     },
+    openshift_networking: { ...NETWORKING_DEFAULTS },
     mtv: {
       channel: 'release-v2.12',
       namespace: 'openshift-mtv'
@@ -3883,7 +3887,7 @@ function App() {
       return JSON.parse(JSON.stringify(defaults.component_config.aws));
     }
 
-    const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching', 'aap_hub_harden'];
+    const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching', 'aap_hub_harden', 'openshift_networking'];
     const fallback = noReplicaComponents.includes(component)
       ? (component === 'patching' || component === 'rhel' ? { hostname: '', hosts: [] } : { hostname: '' })
       : { hostname: '', storage: '', replicas: 1 };
@@ -4450,6 +4454,16 @@ function App() {
         selectedConfig[component] = { ...config };
         if (component === 'idm') {
           delete selectedConfig[component].storage;
+        }
+        if (component === 'openshift_networking') {
+          // Normalize networking config and strip disabled state
+          const netCfg = normalizeNetworkingConfig(config);
+          if (!netCfg.enabled) {
+            // Not enabled — exclude entirely from payload
+            delete selectedConfig[component];
+          } else {
+            selectedConfig[component] = netCfg;
+          }
         }
       }
     });
@@ -13844,6 +13858,8 @@ echo $TOKEN
         return renderDevHubConfig();
       case 'ocp_virtualization':
         return renderOcpVirtualizationConfig();
+      case 'openshift_networking':
+        return <NetworkingConfig data={data} set={set} setData={setData} isDark={isDark} />;
       case 'acm':
         return renderAcmConfig();
       case 'mtv':
@@ -14111,7 +14127,7 @@ ${vaultYaml}
         }
       });
       (data.component_apps?.openshift || []).forEach(app => {
-        if (['acm', 'acs', 'devspaces', 'dev_hub', 'cert_manager', 'quay', 'minio', 'mtv', 'ocp_virtualization', 'ocp_compliance'].includes(app) && !tabs.includes(app)) {
+        if (['acm', 'acs', 'devspaces', 'dev_hub', 'cert_manager', 'quay', 'minio', 'mtv', 'ocp_virtualization', 'openshift_networking', 'ocp_compliance'].includes(app) && !tabs.includes(app)) {
           tabs.push(app);
         }
         if (simpleComponents.includes(app) && !tabs.includes(app)) {
@@ -14168,6 +14184,7 @@ ${vaultYaml}
     if (tab === 'discover_routes_print') return 'Discover Routes';
     if (tab === 'alternate_routes') return 'Alternate Routes';
     if (tab === 'acm') return 'ACM';
+    if (tab === 'openshift_networking') return 'Networking';
     if (tab === 'mtv') return 'MTV';
     if (tab === 'acs') return 'ACS';
     if (tab === 'devspaces') return 'Dev Spaces';

@@ -7,9 +7,10 @@ export const profiles = {
     Core: ['openshift'],
     'Platform Essentials': ['openshift', 'cert_manager', 'rhbk', 'grafana', 'oadp'],
     DevSecOps: ['openshift', 'cert_manager', 'rhbk', 'acs', 'grafana', 'devspaces', 'dev_hub', 'gitops', 'quay'],
-    Virtualization: ['openshift', 'ocp_virtualization', 'oadp', 'grafana'],
+    Networking: ['openshift', 'openshift_networking'],
+    Virtualization: ['openshift', 'ocp_virtualization', 'openshift_networking', 'oadp', 'grafana'],
     Compliance: ['openshift', 'ocp_compliance', 'acs'],
-    'Full Platform': ['openshift', 'cert_manager', 'rhbk', 'grafana', 'oadp', 'acs', 'devspaces', 'dev_hub', 'gitops', 'quay', 'ocp_virtualization', 'acm', 'ocp_compliance']
+    'Full Platform': ['openshift', 'cert_manager', 'rhbk', 'grafana', 'oadp', 'acs', 'devspaces', 'dev_hub', 'gitops', 'quay', 'ocp_virtualization', 'openshift_networking', 'acm', 'ocp_compliance']
   },
   rhel: {
     AAP: ['rhel', 'aap'],

@@ -46,8 +46,10 @@ ARG ADO_COLLECTIONS_SHA=unknown
 RUN mkdir -p /opt/ado-collections && printf '%s\n' "${ADO_COLLECTIONS_SHA}" > /opt/ado-collections/.ado-collections.sha
 COPY collections/ /opt/ado-collections/
 
-# Disconnected Hub EE source (prepared by restart_pod.sh / scripts/prepare-ado-ee-archive.sh).
-COPY vendor/ado-ee.docker.tar /opt/ado-ee/ado-ee.docker.tar
+# Disconnected Hub EE source is optional.  If vendor/ado-ee.docker.tar was
+# prepared (by restart_pod.sh / scripts/prepare-ado-ee-archive.sh), it is
+# baked in.  Otherwise the Hub EE push feature is unavailable at runtime.
+COPY vendor/ado-ee.docker.tar* /opt/ado-ee/
 
 # Only non-ado overlays: ansible.platform 2.7 rejects async on gateway authenticator roles.
 COPY docker/gateway_authenticators_main.yml /opt/ado-ee/gateway_authenticators_main.yml
@@ -63,7 +65,6 @@ RUN set -eux; \
     fi; \
     ADO_ASSISTANT_COLLECTIONS=/opt/ado-collections python3 scripts/build-assistant-knowledge.py; \
     cp public/assistant-knowledge.json dist/assistant-knowledge.json; \
-    test -s /opt/ado-ee/ado-ee.docker.tar; \
     test -s /opt/ado-ee/gateway_authenticators_main.yml; \
     test -s /opt/ado-ee/gateway_authenticator_maps_main.yml; \
     chown -R 1001:0 /workspace /opt/app-root/src /opt/ado-collections /opt/ado-ee; \
@@ -72,7 +73,5 @@ RUN set -eux; \
 USER 1001
 
 EXPOSE 8080
-
-ENV ADO_EE_DOCKER_ARCHIVE=/opt/ado-ee/ado-ee.docker.tar
 
 CMD ["node", "server.js"]
