@@ -123,10 +123,14 @@ const NETWORK_POLICY_TEMPLATES = [
 const MULTI_NETWORK_POLICY_TEMPLATES = [
   { value: 'none', label: 'None', description: 'No policy on secondary networks — all traffic allowed.',
     example: 'Secondary network interfaces have no restrictions. Use when isolation is handled at the physical network level.' },
-  { value: 'default-deny-ingress', label: 'Default Deny Ingress', description: 'Deny all ingress on the secondary network by default.',
+  { value: 'default-deny-ingress', label: 'Default Deny Ingress (Recommended)', description: 'Deny all ingress on the secondary network by default.',
     example: 'Blocks incoming traffic on the secondary NIC. Pods can still send traffic out. Add allow rules to open specific ports.' },
   { value: 'default-deny-all', label: 'Default Deny All', description: 'Deny all ingress and egress on the secondary network.',
     example: 'Fully isolates the secondary interface — no traffic in or out unless explicitly allowed by custom rules.' },
+  { value: 'allow-same-tenant', label: 'Allow Within Tenant', description: 'Allow traffic between namespaces in the same tenant on the secondary network. Deny external ingress.',
+    example: 'VMs or pods on the secondary network can communicate within the tenant but are isolated from other tenants.' },
+  { value: 'allow-from-namespaces', label: 'Allow From Selected Namespaces', description: 'Allow ingress on the secondary network from specific namespace selectors.',
+    example: 'Only traffic from namespaces with matching labels (e.g. env=production) can reach this secondary network.' },
   { value: 'custom', label: 'Custom', description: 'Define custom MultiNetworkPolicy rules for secondary networks.',
     example: 'Full control over secondary network traffic — define sources, destinations, and ports.' }
 ];
@@ -1671,6 +1675,30 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
                         ))}
                       </FormGroup>
                     </GridItem>
+
+                    {sec.multi_network_policy?.template === 'allow-from-namespaces' && (
+                      <GridItem span={6}>
+                        <FormGroup label="Allowed Namespace Selector (key=value per line)">
+                          <TextArea
+                            value={
+                              Object.entries(sec.multi_network_policy?.allowed_namespace_selector || {})
+                                .map(([k, v]) => `${k}=${v}`)
+                                .join('\n')
+                            }
+                            onChange={(_, v) => {
+                              const sel = {};
+                              v.split('\n').forEach(line => {
+                                const [lk, ...lv] = line.split('=');
+                                if (lk?.trim()) sel[lk.trim()] = (lv.join('=') || '').trim();
+                              });
+                              tSet('security.multi_network_policy.allowed_namespace_selector', sel);
+                            }}
+                            rows={3}
+                            style={{ fontFamily: 'monospace', fontSize: '12px' }}
+                          />
+                        </FormGroup>
+                      </GridItem>
+                    )}
 
                     {sec.multi_network_policy?.template === 'custom' && (
                       <GridItem span={12}>

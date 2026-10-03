@@ -1468,7 +1468,22 @@ function buildNetworkPolicies(template, tenant, namespace, _config) {
       },
       _category: 'Security',
     });
-    // Custom from-namespace rules would go here from the security config
+    const nsSel = tenant.security?.network_policy?.allowed_namespace_selector || {};
+    if (Object.keys(nsSel).length > 0) {
+      policies.push({
+        apiVersion: 'networking.k8s.io/v1',
+        kind: 'NetworkPolicy',
+        metadata: { name: `${tenantLabel}-allow-from-ns`, namespace },
+        spec: {
+          podSelector: {},
+          ingress: [{
+            from: [{ namespaceSelector: { matchLabels: nsSel } }],
+          }],
+          policyTypes: ['Ingress'],
+        },
+        _category: 'Security',
+      });
+    }
   }
 
   if (template === 'custom') {
@@ -1547,6 +1562,61 @@ function buildMultiNetworkPolicies(template, tenant, namespace, networkName) {
       },
       _category: 'Security',
     });
+  }
+
+  if (template === 'allow-same-tenant') {
+    policies.push({
+      apiVersion: 'k8s.cni.cncf.io/v1beta1',
+      kind: 'MultiNetworkPolicy',
+      metadata: { name: `${tenantLabel}-mnp-default-deny`, namespace, annotations },
+      spec: {
+        podSelector: {},
+        policyTypes: ['Ingress'],
+      },
+      _category: 'Security',
+    });
+    policies.push({
+      apiVersion: 'k8s.cni.cncf.io/v1beta1',
+      kind: 'MultiNetworkPolicy',
+      metadata: { name: `${tenantLabel}-mnp-allow-same-tenant`, namespace, annotations },
+      spec: {
+        podSelector: {},
+        ingress: [{
+          from: [{ namespaceSelector: { matchLabels: { tenant: tenantLabel } } }],
+        }],
+        policyTypes: ['Ingress'],
+      },
+      _category: 'Security',
+    });
+  }
+
+  if (template === 'allow-from-namespaces') {
+    policies.push({
+      apiVersion: 'k8s.cni.cncf.io/v1beta1',
+      kind: 'MultiNetworkPolicy',
+      metadata: { name: `${tenantLabel}-mnp-default-deny`, namespace, annotations },
+      spec: {
+        podSelector: {},
+        policyTypes: ['Ingress'],
+      },
+      _category: 'Security',
+    });
+    const mnpNsSel = tenant.security?.multi_network_policy?.allowed_namespace_selector || {};
+    if (Object.keys(mnpNsSel).length > 0) {
+      policies.push({
+        apiVersion: 'k8s.cni.cncf.io/v1beta1',
+        kind: 'MultiNetworkPolicy',
+        metadata: { name: `${tenantLabel}-mnp-allow-from-ns`, namespace, annotations },
+        spec: {
+          podSelector: {},
+          ingress: [{
+            from: [{ namespaceSelector: { matchLabels: mnpNsSel } }],
+          }],
+          policyTypes: ['Ingress'],
+        },
+        _category: 'Security',
+      });
+    }
   }
 
   if (template === 'custom') {
