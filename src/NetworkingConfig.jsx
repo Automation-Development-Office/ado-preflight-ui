@@ -69,9 +69,12 @@ import {
   createSubnet,
   createPhysicalNetwork,
   createNetworkPolicyRule,
+  createPolicyPeer,
+  createPolicyPort,
   createAdminNetworkPolicy,
   createAdminNetworkPolicyRule,
   createEgressFirewallRule,
+  createEgressFirewallPort,
   createMetalLBAddressPool,
   createMetalLBBGPPeer,
   supportsFeature,
@@ -101,21 +104,31 @@ import {
 const SECRET_REVEAL_MS = 30000;
 
 const NETWORK_POLICY_TEMPLATES = [
-  { value: 'none', label: 'None', description: 'No default policy — all traffic allowed.' },
-  { value: 'default-deny-ingress', label: 'Default Deny Ingress', description: 'Deny all ingress traffic by default. Egress is allowed.' },
-  { value: 'default-deny-all', label: 'Default Deny Ingress + Egress', description: 'Deny all ingress and egress traffic by default.' },
-  { value: 'allow-same-tenant', label: 'Allow Within Tenant', description: 'Allow traffic between namespaces in the same tenant. Deny external ingress.' },
-  { value: 'allow-from-namespaces', label: 'Allow From Selected Namespaces', description: 'Allow ingress from specific namespace selectors.' },
-  { value: 'custom', label: 'Custom', description: 'Define custom NetworkPolicy rules.' }
+  { value: 'none', label: 'None', description: 'No default policy — all traffic allowed.',
+    example: 'All pods can send and receive traffic from any source. Use only in trusted environments.' },
+  { value: 'default-deny-ingress', label: 'Default Deny Ingress (Recommended)', description: 'Deny all ingress traffic by default. Egress is allowed.',
+    example: 'Pods cannot receive traffic unless explicitly allowed by another policy. Outbound traffic (e.g. to databases, APIs) is unaffected.' },
+  { value: 'default-deny-all', label: 'Default Deny Ingress + Egress', description: 'Deny all ingress and egress traffic by default.',
+    example: 'Pods are fully isolated — no traffic in or out. You must add allow rules for every connection (e.g. allow port 443 egress to an API).' },
+  { value: 'allow-same-tenant', label: 'Allow Within Tenant', description: 'Allow traffic between namespaces in the same tenant. Deny external ingress.',
+    example: 'Pods in namespace "app-frontend" can reach pods in "app-backend" if both are in this tenant. Traffic from other tenants is blocked.' },
+  { value: 'allow-from-namespaces', label: 'Allow From Selected Namespaces', description: 'Allow ingress from specific namespace selectors.',
+    example: 'Only pods in namespaces with matching labels (e.g. env=production) can send traffic to this tenant\'s pods.' },
+  { value: 'custom', label: 'Custom', description: 'Define custom NetworkPolicy rules.',
+    example: 'Full control — define exactly which sources, destinations, and ports are allowed or denied.' }
 ];
 
 
 
 const MULTI_NETWORK_POLICY_TEMPLATES = [
-  { value: 'none', label: 'None', description: 'No policy on secondary networks — all traffic allowed.' },
-  { value: 'default-deny-ingress', label: 'Default Deny Ingress', description: 'Deny all ingress on the secondary network by default.' },
-  { value: 'default-deny-all', label: 'Default Deny All', description: 'Deny all ingress and egress on the secondary network.' },
-  { value: 'custom', label: 'Custom', description: 'Define custom MultiNetworkPolicy rules for secondary networks.' }
+  { value: 'none', label: 'None', description: 'No policy on secondary networks — all traffic allowed.',
+    example: 'Secondary network interfaces have no restrictions. Use when isolation is handled at the physical network level.' },
+  { value: 'default-deny-ingress', label: 'Default Deny Ingress', description: 'Deny all ingress on the secondary network by default.',
+    example: 'Blocks incoming traffic on the secondary NIC. Pods can still send traffic out. Add allow rules to open specific ports.' },
+  { value: 'default-deny-all', label: 'Default Deny All', description: 'Deny all ingress and egress on the secondary network.',
+    example: 'Fully isolates the secondary interface — no traffic in or out unless explicitly allowed by custom rules.' },
+  { value: 'custom', label: 'Custom', description: 'Define custom MultiNetworkPolicy rules for secondary networks.',
+    example: 'Full control over secondary network traffic — define sources, destinations, and ports.' }
 ];
 
 const IPAM_LIFECYCLE_OPTIONS = [
@@ -201,6 +214,7 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
   const secretTimersRef = useRef({});
   const [validationResults, setValidationResults] = useState(null);
   const [showConfirmDelete, setShowConfirmDelete] = useState(null);
+  const [addingPodLabel, setAddingPodLabel] = useState(null);
 
   const muted = mutedColor(isDark);
 
@@ -341,7 +355,16 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
     return (
       <Popover
         headerContent={entry.title}
-        bodyContent={<p>{entry.description}</p>}
+        bodyContent={
+          <>
+            <p>{entry.description}</p>
+            {entry.vmware && (
+              <p style={{ marginTop: '8px', fontSize: '13px', color: '#6a6e73', fontStyle: 'italic' }}>
+                VMware equivalent: {entry.vmware}
+              </p>
+            )}
+          </>
+        }
       >
         <Button variant="plain" aria-label={`Info: ${entry.title}`} style={{ padding: '2px 4px' }}>
           <InfoCircleIcon style={{ color: '#2b9af3' }} />
@@ -379,6 +402,320 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
       <Label color={colorMap[status] || 'grey'} isCompact style={{ marginLeft: '8px' }}>
         {status}
       </Label>
+    );
+  };
+
+  /* ── Custom policy rules renderer (shared by NP and MNP) ── */
+  const renderCustomRules = (rules, onUpdate, prefix) => {
+    const updateRules = (newRules) => onUpdate(newRules);
+    const updateRule = (ri, patch) => {
+      const updated = [...rules];
+      updated[ri] = { ...updated[ri], ...patch };
+      updateRules(updated);
+    };
+    const updatePeer = (ri, pi, patch) => {
+      const updated = [...rules];
+      const peers = [...(updated[ri].peers || [])];
+      peers[pi] = { ...peers[pi], ...patch };
+      updated[ri] = { ...updated[ri], peers };
+      updateRules(updated);
+    };
+    const updatePort = (ri, pi, patch) => {
+      const updated = [...rules];
+      const ports = [...(updated[ri].ports || [])];
+      ports[pi] = { ...ports[pi], ...patch };
+      updated[ri] = { ...updated[ri], ports };
+      updateRules(updated);
+    };
+    const removePeer = (ri, pi) => {
+      const updated = [...rules];
+      updated[ri] = { ...updated[ri], peers: (updated[ri].peers || []).filter((_, i) => i !== pi) };
+      updateRules(updated);
+    };
+    const removePort = (ri, pi) => {
+      const updated = [...rules];
+      updated[ri] = { ...updated[ri], ports: (updated[ri].ports || []).filter((_, i) => i !== pi) };
+      updateRules(updated);
+    };
+
+    const PEER_LABELS = {
+      ipBlock: 'IP Block (CIDR)',
+      clusterPods: 'Pods in Cluster (Namespace + Pod Selector)',
+      sameNamespace: 'Pods in Same Namespace',
+    };
+
+    const ruleSummary = (rule) => {
+      const peerCount = (rule.peers || []).length;
+      const portList = (rule.ports || []).filter(p => p.port).map(p =>
+        `${p.port}${p.endPort ? '-' + p.endPort : ''}/${p.protocol || 'TCP'}`
+      );
+      const dir = rule.direction === 'egress' ? 'Egress' : 'Ingress';
+      const sources = peerCount === 0 ? 'no sources defined' : `${peerCount} source${peerCount > 1 ? 's' : ''}`;
+      const ports = portList.length === 0 ? 'all ports' : portList.join(', ');
+      return `${dir}: ${sources}, ${ports}`;
+    };
+
+    return (
+      <>
+        {rules.length === 0 && (
+          <Alert variant="info" isInline isPlain title="No rules defined" style={{ marginBottom: '8px' }}>
+            Add at least one rule to define allowed traffic. Without rules, the policy has no effect.
+          </Alert>
+        )}
+        {rules.map((rule, ri) => (
+          <Card key={ri} style={{ marginBottom: '12px' }}>
+            <CardBody>
+              <Grid hasGutter>
+                <GridItem span={10}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <FormGroup label="Direction" style={{ marginBottom: 0 }}>
+                      <Radio id={`${prefix}-${ri}-ingress`} name={`${prefix}-dir-${ri}`} label="Ingress"
+                        isChecked={rule.direction === 'ingress'}
+                        onChange={() => updateRule(ri, { direction: 'ingress' })} style={{ marginRight: '16px', display: 'inline-flex' }} />
+                      <Radio id={`${prefix}-${ri}-egress`} name={`${prefix}-dir-${ri}`} label="Egress"
+                        isChecked={rule.direction === 'egress'}
+                        onChange={() => updateRule(ri, { direction: 'egress' })} style={{ display: 'inline-flex' }} />
+                    </FormGroup>
+                    <span style={{ color: muted, fontSize: '12px', fontStyle: 'italic' }}>{ruleSummary(rule)}</span>
+                  </div>
+                </GridItem>
+                <GridItem span={2} style={{ textAlign: 'right' }}>
+                  <Button variant="plain" isDanger aria-label="Remove rule"
+                    onClick={() => updateRules(rules.filter((_, i) => i !== ri))}>
+                    <TrashIcon />
+                  </Button>
+                </GridItem>
+
+                {/* ── Peers (sources/destinations) ── */}
+                <GridItem span={12}>
+                  <Title headingLevel="h6" size="sm" style={{ marginBottom: '6px' }}>
+                    {rule.direction === 'ingress' ? 'Allowed Sources' : 'Allowed Destinations'}
+                  </Title>
+                  {(rule.peers || []).length === 0 && (
+                    <Alert variant="warning" isInline isPlain title="No sources defined" style={{ marginBottom: '8px' }}>
+                      Without sources, this rule {rule.direction === 'ingress' ? 'allows traffic from nowhere' : 'allows traffic to nowhere'}.
+                    </Alert>
+                  )}
+                  {(rule.peers || []).length > 0 && (
+                    <p style={{ color: muted, fontSize: '12px', marginBottom: '8px' }}>
+                      Multiple sources are combined with OR — traffic matching any source is allowed.
+                    </p>
+                  )}
+                  {(rule.peers || []).map((peer, pi) => (
+                    <Card key={pi} style={{ marginBottom: '8px', background: isDark ? '#1f1f1f' : '#f5f5f5' }}>
+                      <CardBody style={{ padding: '12px' }}>
+                        <Grid hasGutter>
+                          <GridItem span={11}>
+                            <Label isCompact color={peer.type === 'ipBlock' ? 'blue' : peer.type === 'clusterPods' ? 'green' : 'purple'}>
+                              {PEER_LABELS[peer.type] || peer.type}
+                            </Label>
+                          </GridItem>
+                          <GridItem span={1} style={{ textAlign: 'right' }}>
+                            <Button variant="plain" isDanger aria-label="Remove peer" style={{ padding: '0' }}
+                              onClick={() => removePeer(ri, pi)}>
+                              <TrashIcon style={{ fontSize: '12px' }} />
+                            </Button>
+                          </GridItem>
+
+                          {peer.type === 'ipBlock' && (
+                            <>
+                              <GridItem span={6}>
+                                <FormGroup label="CIDR">
+                                  <TextInput value={peer.cidr || ''} placeholder="10.0.0.0/8"
+                                    onChange={(_, v) => updatePeer(ri, pi, { cidr: v })} />
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={6}>
+                                <FormGroup label="Exceptions (one CIDR per line)">
+                                  <TextArea value={(peer.except || []).join('\n')} placeholder="10.1.0.0/16" rows={2}
+                                    onChange={(_, v) => updatePeer(ri, pi, { except: v.split('\n').map(s => s.trim()).filter(Boolean) })} />
+                                </FormGroup>
+                              </GridItem>
+                            </>
+                          )}
+
+                          {peer.type === 'clusterPods' && (
+                            <>
+                              <GridItem span={6}>
+                                <FormGroup label="Namespace Selector"
+                                  helperText="Leave empty to match all namespaces.">
+                                  {Object.entries(peer.namespace_selector || {}).map(([lk, lv], li) => (
+                                    <div key={li} style={{ display: 'flex', gap: '4px', marginBottom: '4px' }}>
+                                      <TextInput value={lk} placeholder="key" style={{ flex: 1 }}
+                                        onChange={(_, nk) => {
+                                          const sel = { ...peer.namespace_selector };
+                                          delete sel[lk];
+                                          if (nk) sel[nk] = lv;
+                                          updatePeer(ri, pi, { namespace_selector: sel });
+                                        }} />
+                                      <TextInput value={lv} placeholder="value" style={{ flex: 1 }}
+                                        onChange={(_, nv) => {
+                                          updatePeer(ri, pi, { namespace_selector: { ...peer.namespace_selector, [lk]: nv } });
+                                        }} />
+                                      <Button variant="plain" isDanger style={{ padding: '4px' }}
+                                        onClick={() => {
+                                          const sel = { ...peer.namespace_selector };
+                                          delete sel[lk];
+                                          updatePeer(ri, pi, { namespace_selector: sel });
+                                        }}><TrashIcon style={{ fontSize: '12px' }} /></Button>
+                                    </div>
+                                  ))}
+                                  <Button variant="link" icon={<PlusCircleIcon />}
+                                    onClick={() => updatePeer(ri, pi, { namespace_selector: { ...peer.namespace_selector, '': '' } })}>
+                                    Add Label
+                                  </Button>
+                                </FormGroup>
+                              </GridItem>
+                              <GridItem span={6}>
+                                <FormGroup label="Pod Selector"
+                                  helperText="Leave empty to match all pods in selected namespaces.">
+                                  {Object.entries(peer.pod_selector || {}).map(([lk, lv], li) => (
+                                    <div key={li} style={{ display: 'flex', gap: '4px', marginBottom: '4px' }}>
+                                      <TextInput value={lk} placeholder="key" style={{ flex: 1 }}
+                                        onChange={(_, nk) => {
+                                          const sel = { ...peer.pod_selector };
+                                          delete sel[lk];
+                                          if (nk) sel[nk] = lv;
+                                          updatePeer(ri, pi, { pod_selector: sel });
+                                        }} />
+                                      <TextInput value={lv} placeholder="value" style={{ flex: 1 }}
+                                        onChange={(_, nv) => {
+                                          updatePeer(ri, pi, { pod_selector: { ...peer.pod_selector, [lk]: nv } });
+                                        }} />
+                                      <Button variant="plain" isDanger style={{ padding: '4px' }}
+                                        onClick={() => {
+                                          const sel = { ...peer.pod_selector };
+                                          delete sel[lk];
+                                          updatePeer(ri, pi, { pod_selector: sel });
+                                        }}><TrashIcon style={{ fontSize: '12px' }} /></Button>
+                                    </div>
+                                  ))}
+                                  <Button variant="link" icon={<PlusCircleIcon />}
+                                    onClick={() => updatePeer(ri, pi, { pod_selector: { ...peer.pod_selector, '': '' } })}>
+                                    Add Label
+                                  </Button>
+                                </FormGroup>
+                              </GridItem>
+                            </>
+                          )}
+
+                          {peer.type === 'sameNamespace' && (
+                            <GridItem span={6}>
+                              <FormGroup label="Pod Selector"
+                                helperText="Leave empty to match all pods in the same namespace.">
+                                {Object.entries(peer.pod_selector || {}).map(([lk, lv], li) => (
+                                  <div key={li} style={{ display: 'flex', gap: '4px', marginBottom: '4px' }}>
+                                    <TextInput value={lk} placeholder="key" style={{ flex: 1 }}
+                                      onChange={(_, nk) => {
+                                        const sel = { ...peer.pod_selector };
+                                        delete sel[lk];
+                                        if (nk) sel[nk] = lv;
+                                        updatePeer(ri, pi, { pod_selector: sel });
+                                      }} />
+                                    <TextInput value={lv} placeholder="value" style={{ flex: 1 }}
+                                      onChange={(_, nv) => {
+                                        updatePeer(ri, pi, { pod_selector: { ...peer.pod_selector, [lk]: nv } });
+                                      }} />
+                                    <Button variant="plain" isDanger style={{ padding: '4px' }}
+                                      onClick={() => {
+                                        const sel = { ...peer.pod_selector };
+                                        delete sel[lk];
+                                        updatePeer(ri, pi, { pod_selector: sel });
+                                      }}><TrashIcon style={{ fontSize: '12px' }} /></Button>
+                                  </div>
+                                ))}
+                                <Button variant="link" icon={<PlusCircleIcon />}
+                                  onClick={() => updatePeer(ri, pi, { pod_selector: { ...peer.pod_selector, '': '' } })}>
+                                  Add Label
+                                </Button>
+                              </FormGroup>
+                            </GridItem>
+                          )}
+                        </Grid>
+                      </CardBody>
+                    </Card>
+                  ))}
+                  <div style={{ display: 'flex', gap: '12px' }}>
+                    <Button variant="link" icon={<PlusCircleIcon />}
+                      onClick={() => {
+                        const updated = [...rules];
+                        updated[ri] = { ...updated[ri], peers: [...(updated[ri].peers || []), createPolicyPeer('ipBlock')] };
+                        updateRules(updated);
+                      }}>IP Block</Button>
+                    <Button variant="link" icon={<PlusCircleIcon />}
+                      onClick={() => {
+                        const updated = [...rules];
+                        updated[ri] = { ...updated[ri], peers: [...(updated[ri].peers || []), createPolicyPeer('clusterPods')] };
+                        updateRules(updated);
+                      }}>Cluster Pods</Button>
+                    <Button variant="link" icon={<PlusCircleIcon />}
+                      onClick={() => {
+                        const updated = [...rules];
+                        updated[ri] = { ...updated[ri], peers: [...(updated[ri].peers || []), createPolicyPeer('sameNamespace')] };
+                        updateRules(updated);
+                      }}>Same Namespace</Button>
+                  </div>
+                </GridItem>
+
+                {/* ── Ports ── */}
+                <GridItem span={12}>
+                  <Title headingLevel="h6" size="sm" style={{ marginBottom: '6px', marginTop: '8px' }}>Ports</Title>
+                  <p style={{ color: muted, fontSize: '12px', marginBottom: '8px' }}>
+                    If no ports are specified, traffic on all ports is allowed.
+                  </p>
+                  {(rule.ports || []).map((port, pi) => (
+                    <Grid hasGutter key={pi} style={{ marginBottom: '6px' }}>
+                      <GridItem span={3}>
+                        <FormGroup label={pi === 0 ? 'Protocol' : undefined}>
+                          <Radio id={`${prefix}-${ri}-port-${pi}-tcp`} name={`${prefix}-proto-${ri}-${pi}`} label="TCP"
+                            isChecked={(port.protocol || 'TCP') === 'TCP'}
+                            onChange={() => updatePort(ri, pi, { protocol: 'TCP' })} style={{ marginRight: '12px', display: 'inline-flex' }} />
+                          <Radio id={`${prefix}-${ri}-port-${pi}-udp`} name={`${prefix}-proto-${ri}-${pi}`} label="UDP"
+                            isChecked={port.protocol === 'UDP'}
+                            onChange={() => updatePort(ri, pi, { protocol: 'UDP' })} style={{ marginRight: '12px', display: 'inline-flex' }} />
+                          <Radio id={`${prefix}-${ri}-port-${pi}-sctp`} name={`${prefix}-proto-${ri}-${pi}`} label="SCTP"
+                            isChecked={port.protocol === 'SCTP'}
+                            onChange={() => updatePort(ri, pi, { protocol: 'SCTP' })} style={{ display: 'inline-flex' }} />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={3}>
+                        <FormGroup label={pi === 0 ? 'Port' : undefined}>
+                          <TextInput value={port.port || ''} placeholder="8080"
+                            onChange={(_, v) => updatePort(ri, pi, { port: v })} />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={3}>
+                        <FormGroup label={pi === 0 ? 'End Port (range)' : undefined}>
+                          <TextInput value={port.endPort || ''} placeholder="Optional"
+                            onChange={(_, v) => updatePort(ri, pi, { endPort: v })} />
+                        </FormGroup>
+                      </GridItem>
+                      <GridItem span={1}>
+                        <div style={pi === 0 ? { paddingTop: '28px' } : {}}>
+                          <Button variant="plain" isDanger aria-label="Remove port" style={{ padding: '2px' }}
+                            onClick={() => removePort(ri, pi)}>
+                            <TrashIcon style={{ fontSize: '12px' }} />
+                          </Button>
+                        </div>
+                      </GridItem>
+                    </Grid>
+                  ))}
+                  <Button variant="link" icon={<PlusCircleIcon />}
+                    onClick={() => {
+                      const updated = [...rules];
+                      updated[ri] = { ...updated[ri], ports: [...(updated[ri].ports || []), createPolicyPort()] };
+                      updateRules(updated);
+                    }}>Add Port</Button>
+                </GridItem>
+              </Grid>
+            </CardBody>
+          </Card>
+        ))}
+        <Button variant="link" icon={<PlusCircleIcon />}
+          onClick={() => updateRules([...rules, createNetworkPolicyRule()])}>
+          Add Rule
+        </Button>
+      </>
     );
   };
 
@@ -961,7 +1298,7 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
           </GridItem>
 
           <GridItem span={4}>
-            <FormGroup label="Role">
+            <FormGroup label="Role" isRequired>
               {validRoles.map(r => (
                 <Radio
                   key={r.value}
@@ -983,7 +1320,7 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
           </GridItem>
 
           <GridItem span={4}>
-            <FormGroup label="Topology">
+            <FormGroup label="Topology" isRequired>
               {validTopos.map(t => (
                 <Radio
                   key={t.value}
@@ -1014,7 +1351,7 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
               return (
                 <Grid hasGutter key={si} style={{ marginBottom: '8px' }}>
                   <GridItem span={5}>
-                    <FormGroup label={si === 0 ? 'IPv4/IPv6 CIDR' : ''}>
+                    <FormGroup label={si === 0 ? 'IPv4/IPv6 CIDR' : ''} isRequired={si === 0}>
                       <TextInput
                         value={sub.cidr || ''}
                         onChange={(_, v) => {
@@ -1183,7 +1520,12 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
               label="Enable NetworkPolicy"
               description="Apply namespace-level NetworkPolicy for this tenant's namespaces."
               isChecked={npol.enabled}
-              onChange={(_, v) => tSet('security.network_policy.enabled', v)}
+              onChange={(_, v) => {
+                tSet('security.network_policy.enabled', v);
+                if (v && (!npol.template || npol.template === 'none')) {
+                  tSet('security.network_policy.template', 'default-deny-ingress');
+                }
+              }}
               style={{ marginBottom: '12px' }}
             />
             {npol.enabled && (
@@ -1191,15 +1533,21 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
                 <GridItem span={6}>
                   <FormGroup label="Policy Template">
                     {NETWORK_POLICY_TEMPLATES.map(tmpl => (
-                      <Radio
-                        key={tmpl.value}
-                        id={`npol-tmpl-${tmpl.value}`}
-                        name="npol-template"
-                        label={tmpl.label}
-                        description={tmpl.description}
-                        isChecked={npol.template === tmpl.value}
-                        onChange={() => tSet('security.network_policy.template', tmpl.value)}
-                      />
+                      <div key={tmpl.value} style={{ marginBottom: '8px' }}>
+                        <Radio
+                          id={`npol-tmpl-${tmpl.value}`}
+                          name="npol-template"
+                          label={tmpl.label}
+                          description={tmpl.description}
+                          isChecked={npol.template === tmpl.value}
+                          onChange={() => tSet('security.network_policy.template', tmpl.value)}
+                        />
+                        {npol.template === tmpl.value && tmpl.example && (
+                          <p style={{ marginLeft: '24px', marginTop: '2px', fontSize: '12px', color: muted, fontStyle: 'italic' }}>
+                            {tmpl.example}
+                          </p>
+                        )}
+                      </div>
                     ))}
                   </FormGroup>
                 </GridItem>
@@ -1230,75 +1578,51 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
 
                 {npol.template === 'custom' && (
                   <GridItem span={12}>
-                    <Title headingLevel="h5" size="sm" style={{ marginBottom: '8px' }}>Custom NetworkPolicy Rules</Title>
-                    {(npol.custom_rules || []).map((rule, ri) => (
-                      <Card key={ri} style={{ marginBottom: '8px' }}>
-                        <CardBody>
-                          <Grid hasGutter>
-                            <GridItem span={3}>
-                              <FormGroup label="Direction">
-                                <Radio id={`rule-${ri}-ingress`} name={`rule-dir-${ri}`} label="Ingress"
-                                  isChecked={rule.direction === 'ingress'} onChange={() => {
-                                    const rules = [...(npol.custom_rules || [])];
-                                    rules[ri] = { ...rules[ri], direction: 'ingress' };
-                                    tSet('security.network_policy.custom_rules', rules);
-                                  }} />
-                                <Radio id={`rule-${ri}-egress`} name={`rule-dir-${ri}`} label="Egress"
-                                  isChecked={rule.direction === 'egress'} onChange={() => {
-                                    const rules = [...(npol.custom_rules || [])];
-                                    rules[ri] = { ...rules[ri], direction: 'egress' };
-                                    tSet('security.network_policy.custom_rules', rules);
-                                  }} />
-                              </FormGroup>
-                            </GridItem>
-                            <GridItem span={3}>
-                              <FormGroup label="Protocol">
-                                <TextInput value={rule.protocol || ''} placeholder="TCP"
-                                  onChange={(_, v) => {
-                                    const rules = [...(npol.custom_rules || [])];
-                                    rules[ri] = { ...rules[ri], protocol: v };
-                                    tSet('security.network_policy.custom_rules', rules);
-                                  }} />
-                              </FormGroup>
-                            </GridItem>
-                            <GridItem span={2}>
-                              <FormGroup label="Port">
-                                <TextInput value={rule.port || ''} placeholder="8080"
-                                  onChange={(_, v) => {
-                                    const rules = [...(npol.custom_rules || [])];
-                                    rules[ri] = { ...rules[ri], port: v };
-                                    tSet('security.network_policy.custom_rules', rules);
-                                  }} />
-                              </FormGroup>
-                            </GridItem>
-                            <GridItem span={3}>
-                              <FormGroup label="CIDR / Namespace Selector">
-                                <TextInput value={rule.cidr || ''} placeholder="10.0.0.0/8 or ns-selector"
-                                  onChange={(_, v) => {
-                                    const rules = [...(npol.custom_rules || [])];
-                                    rules[ri] = { ...rules[ri], cidr: v };
-                                    tSet('security.network_policy.custom_rules', rules);
-                                  }} />
-                              </FormGroup>
-                            </GridItem>
-                            <GridItem span={1}>
-                              <div style={{ paddingTop: '28px' }}>
-                                <Button variant="plain" isDanger aria-label="Remove rule"
-                                  onClick={() => tSet('security.network_policy.custom_rules',
-                                    (npol.custom_rules || []).filter((_, i) => i !== ri))}>
-                                  <TrashIcon />
-                                </Button>
-                              </div>
-                            </GridItem>
-                          </Grid>
-                        </CardBody>
-                      </Card>
-                    ))}
-                    <Button variant="link" icon={<PlusCircleIcon />}
-                      onClick={() => tSet('security.network_policy.custom_rules',
-                        [...(npol.custom_rules || []), createNetworkPolicyRule()])}>
-                      Add Rule
-                    </Button>
+                    <FormGroup label="Apply policy to" helperText="Leave empty to apply to all pods in the namespace. Add labels to target specific pods.">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        {Object.keys(npol.pod_selector || {}).length === 0 && addingPodLabel !== 'np' && (
+                          <Label color="blue">All pods in namespace</Label>
+                        )}
+                        {Object.entries(npol.pod_selector || {}).map(([lk, lv], li) => (
+                          <Label key={li} color="blue" onClose={() => {
+                            const sel = { ...npol.pod_selector };
+                            delete sel[lk];
+                            tSet('security.network_policy.pod_selector', sel);
+                          }}>{lk}={lv}</Label>
+                        ))}
+                        {addingPodLabel === 'np' ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <TextInput id="np-new-label-key" placeholder="key" style={{ width: '120px' }}
+                              autoFocus />
+                            <span>=</span>
+                            <TextInput id="np-new-label-val" placeholder="value" style={{ width: '120px' }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  const k = document.getElementById('np-new-label-key')?.value?.trim();
+                                  const v = document.getElementById('np-new-label-val')?.value?.trim() || '';
+                                  if (k) tSet('security.network_policy.pod_selector', { ...(npol.pod_selector || {}), [k]: v });
+                                  setAddingPodLabel(null);
+                                }
+                              }} />
+                            <Button variant="plain" style={{ padding: '4px' }}
+                              onClick={() => {
+                                const k = document.getElementById('np-new-label-key')?.value?.trim();
+                                const v = document.getElementById('np-new-label-val')?.value?.trim() || '';
+                                if (k) tSet('security.network_policy.pod_selector', { ...(npol.pod_selector || {}), [k]: v });
+                                setAddingPodLabel(null);
+                              }}><CheckCircleIcon style={{ color: successColor }} /></Button>
+                            <Button variant="plain" style={{ padding: '4px' }}
+                              onClick={() => setAddingPodLabel(null)}><TrashIcon style={{ fontSize: '12px' }} /></Button>
+                          </div>
+                        ) : (
+                          <Button variant="link" icon={<PlusCircleIcon />} style={{ padding: 0 }}
+                            onClick={() => setAddingPodLabel('np')}>
+                            Add Label
+                          </Button>
+                        )}
+                      </div>
+                    </FormGroup>
+                    {renderCustomRules(npol.custom_rules || [], v => tSet('security.network_policy.custom_rules', v), 'np')}
                   </GridItem>
                 )}
               </Grid>
@@ -1320,7 +1644,7 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
                   description="Apply network policy to secondary/additional networks."
                   isChecked={sec.multi_network_policy?.enabled || false}
                   onChange={(_, v) => tSet('security.multi_network_policy', v
-                    ? { enabled: true, template: sec.multi_network_policy?.template || 'none', custom_rules: sec.multi_network_policy?.custom_rules || [] }
+                    ? { enabled: true, template: sec.multi_network_policy?.template || 'default-deny-ingress', custom_rules: sec.multi_network_policy?.custom_rules || [], pod_selector: sec.multi_network_policy?.pod_selector || {} }
                     : { enabled: false })}
                   style={{ marginBottom: '12px' }}
                 />
@@ -1329,90 +1653,72 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
                     <GridItem span={6}>
                       <FormGroup label="Policy Template">
                         {MULTI_NETWORK_POLICY_TEMPLATES.map(tmpl => (
-                          <Radio
-                            key={tmpl.value}
-                            id={`mnp-tmpl-${tmpl.value}`}
-                            name="mnp-template"
-                            label={tmpl.label}
-                            description={tmpl.description}
-                            isChecked={(sec.multi_network_policy?.template || 'none') === tmpl.value}
-                            onChange={() => tSet('security.multi_network_policy.template', tmpl.value)}
-                          />
+                          <div key={tmpl.value} style={{ marginBottom: '8px' }}>
+                            <Radio
+                              id={`mnp-tmpl-${tmpl.value}`}
+                              name="mnp-template"
+                              label={tmpl.label}
+                              description={tmpl.description}
+                              isChecked={(sec.multi_network_policy?.template || 'none') === tmpl.value}
+                              onChange={() => tSet('security.multi_network_policy.template', tmpl.value)}
+                            />
+                            {(sec.multi_network_policy?.template || 'none') === tmpl.value && tmpl.example && (
+                              <p style={{ marginLeft: '24px', marginTop: '2px', fontSize: '12px', color: muted, fontStyle: 'italic' }}>
+                                {tmpl.example}
+                              </p>
+                            )}
+                          </div>
                         ))}
                       </FormGroup>
                     </GridItem>
 
                     {sec.multi_network_policy?.template === 'custom' && (
                       <GridItem span={12}>
-                        <Title headingLevel="h5" size="sm" style={{ marginBottom: '8px' }}>Custom MultiNetworkPolicy Rules</Title>
-                        {(sec.multi_network_policy?.custom_rules || []).map((rule, ri) => (
-                          <Card key={ri} style={{ marginBottom: '8px' }}>
-                            <CardBody>
-                              <Grid hasGutter>
-                                <GridItem span={3}>
-                                  <FormGroup label="Direction">
-                                    <Radio id={`mnp-rule-${ri}-ingress`} name={`mnp-rule-dir-${ri}`} label="Ingress"
-                                      isChecked={rule.direction === 'ingress'} onChange={() => {
-                                        const rules = [...(sec.multi_network_policy?.custom_rules || [])];
-                                        rules[ri] = { ...rules[ri], direction: 'ingress' };
-                                        tSet('security.multi_network_policy.custom_rules', rules);
-                                      }} />
-                                    <Radio id={`mnp-rule-${ri}-egress`} name={`mnp-rule-dir-${ri}`} label="Egress"
-                                      isChecked={rule.direction === 'egress'} onChange={() => {
-                                        const rules = [...(sec.multi_network_policy?.custom_rules || [])];
-                                        rules[ri] = { ...rules[ri], direction: 'egress' };
-                                        tSet('security.multi_network_policy.custom_rules', rules);
-                                      }} />
-                                  </FormGroup>
-                                </GridItem>
-                                <GridItem span={3}>
-                                  <FormGroup label="Protocol">
-                                    <TextInput value={rule.protocol || ''} placeholder="TCP"
-                                      onChange={(_, v) => {
-                                        const rules = [...(sec.multi_network_policy?.custom_rules || [])];
-                                        rules[ri] = { ...rules[ri], protocol: v };
-                                        tSet('security.multi_network_policy.custom_rules', rules);
-                                      }} />
-                                  </FormGroup>
-                                </GridItem>
-                                <GridItem span={2}>
-                                  <FormGroup label="Port">
-                                    <TextInput value={rule.port || ''} placeholder="8080"
-                                      onChange={(_, v) => {
-                                        const rules = [...(sec.multi_network_policy?.custom_rules || [])];
-                                        rules[ri] = { ...rules[ri], port: v };
-                                        tSet('security.multi_network_policy.custom_rules', rules);
-                                      }} />
-                                  </FormGroup>
-                                </GridItem>
-                                <GridItem span={3}>
-                                  <FormGroup label="CIDR / Namespace Selector">
-                                    <TextInput value={rule.cidr || ''} placeholder="10.0.0.0/8 or ns-selector"
-                                      onChange={(_, v) => {
-                                        const rules = [...(sec.multi_network_policy?.custom_rules || [])];
-                                        rules[ri] = { ...rules[ri], cidr: v };
-                                        tSet('security.multi_network_policy.custom_rules', rules);
-                                      }} />
-                                  </FormGroup>
-                                </GridItem>
-                                <GridItem span={1}>
-                                  <div style={{ paddingTop: '28px' }}>
-                                    <Button variant="plain" isDanger aria-label="Remove rule"
-                                      onClick={() => tSet('security.multi_network_policy.custom_rules',
-                                        (sec.multi_network_policy?.custom_rules || []).filter((_, i) => i !== ri))}>
-                                      <TrashIcon />
-                                    </Button>
-                                  </div>
-                                </GridItem>
-                              </Grid>
-                            </CardBody>
-                          </Card>
-                        ))}
-                        <Button variant="link" icon={<PlusCircleIcon />}
-                          onClick={() => tSet('security.multi_network_policy.custom_rules',
-                            [...(sec.multi_network_policy?.custom_rules || []), createNetworkPolicyRule()])}>
-                          Add Rule
-                        </Button>
+                        <FormGroup label="Apply policy to" helperText="Leave empty to apply to all pods in the namespace. Add labels to target specific pods.">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            {Object.keys(sec.multi_network_policy?.pod_selector || {}).length === 0 && addingPodLabel !== 'mnp' && (
+                              <Label color="blue">All pods in namespace</Label>
+                            )}
+                            {Object.entries(sec.multi_network_policy?.pod_selector || {}).map(([lk, lv], li) => (
+                              <Label key={li} color="blue" onClose={() => {
+                                const sel = { ...sec.multi_network_policy.pod_selector };
+                                delete sel[lk];
+                                tSet('security.multi_network_policy.pod_selector', sel);
+                              }}>{lk}={lv}</Label>
+                            ))}
+                            {addingPodLabel === 'mnp' ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                <TextInput id="mnp-new-label-key" placeholder="key" style={{ width: '120px' }}
+                                  autoFocus />
+                                <span>=</span>
+                                <TextInput id="mnp-new-label-val" placeholder="value" style={{ width: '120px' }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      const k = document.getElementById('mnp-new-label-key')?.value?.trim();
+                                      const v = document.getElementById('mnp-new-label-val')?.value?.trim() || '';
+                                      if (k) tSet('security.multi_network_policy.pod_selector', { ...(sec.multi_network_policy?.pod_selector || {}), [k]: v });
+                                      setAddingPodLabel(null);
+                                    }
+                                  }} />
+                                <Button variant="plain" style={{ padding: '4px' }}
+                                  onClick={() => {
+                                    const k = document.getElementById('mnp-new-label-key')?.value?.trim();
+                                    const v = document.getElementById('mnp-new-label-val')?.value?.trim() || '';
+                                    if (k) tSet('security.multi_network_policy.pod_selector', { ...(sec.multi_network_policy?.pod_selector || {}), [k]: v });
+                                    setAddingPodLabel(null);
+                                  }}><CheckCircleIcon style={{ color: successColor }} /></Button>
+                                <Button variant="plain" style={{ padding: '4px' }}
+                                  onClick={() => setAddingPodLabel(null)}><TrashIcon style={{ fontSize: '12px' }} /></Button>
+                              </div>
+                            ) : (
+                              <Button variant="link" icon={<PlusCircleIcon />} style={{ padding: 0 }}
+                                onClick={() => setAddingPodLabel('mnp')}>
+                                Add Label
+                              </Button>
+                            )}
+                          </div>
+                        </FormGroup>
+                        {renderCustomRules(sec.multi_network_policy?.custom_rules || [], v => tSet('security.multi_network_policy.custom_rules', v), 'mnp')}
                       </GridItem>
                     )}
                   </Grid>
@@ -1444,65 +1750,109 @@ export default function NetworkingConfig({ data, set, setData, isDark }) {
                   One EgressFirewall resource per namespace. Rules are evaluated in order. Add Allow or Deny rules for CIDR or DNS destinations.
                 </Alert>
                 {(ef.rules || []).map((rule, ri) => (
-                  <Grid hasGutter key={ri} style={{ marginBottom: '8px' }}>
-                    <GridItem span={2}>
-                      <FormGroup label={ri === 0 ? 'Action' : ''}>
-                        <Radio id={`ef-${ri}-allow`} name={`ef-action-${ri}`} label="Allow"
-                          isChecked={rule.type === 'Allow'} onChange={() => {
-                            const rules = [...(ef.rules || [])];
-                            rules[ri] = { ...rules[ri], type: 'Allow' };
-                            tSet('security.egress_firewall.rules', rules);
-                          }} />
-                        <Radio id={`ef-${ri}-deny`} name={`ef-action-${ri}`} label="Deny"
-                          isChecked={rule.type === 'Deny'} onChange={() => {
-                            const rules = [...(ef.rules || [])];
-                            rules[ri] = { ...rules[ri], type: 'Deny' };
-                            tSet('security.egress_firewall.rules', rules);
-                          }} />
-                      </FormGroup>
-                    </GridItem>
-                    <GridItem span={3}>
-                      <FormGroup label={ri === 0 ? 'Destination Type' : ''}>
-                        <Radio id={`ef-${ri}-cidr`} name={`ef-dest-${ri}`} label="CIDR"
-                          isChecked={rule.to?.cidrSelector !== undefined}
-                          onChange={() => {
-                            const rules = [...(ef.rules || [])];
-                            rules[ri] = { ...rules[ri], to: { cidrSelector: rules[ri].to?.cidrSelector || '' } };
-                            tSet('security.egress_firewall.rules', rules);
-                          }} />
-                        <Radio id={`ef-${ri}-dns`} name={`ef-dest-${ri}`} label="DNS Name"
-                          isChecked={rule.to?.dnsName !== undefined}
-                          onChange={() => {
-                            const rules = [...(ef.rules || [])];
-                            rules[ri] = { ...rules[ri], to: { dnsName: rules[ri].to?.dnsName || '' } };
-                            tSet('security.egress_firewall.rules', rules);
-                          }} />
-                      </FormGroup>
-                    </GridItem>
-                    <GridItem span={5}>
-                      <FormGroup label={ri === 0 ? 'Destination' : ''}>
-                        <TextInput
-                          value={rule.to?.cidrSelector || rule.to?.dnsName || ''}
-                          placeholder={rule.to?.dnsName !== undefined ? 'example.com' : '0.0.0.0/0'}
-                          onChange={(_, v) => {
-                            const rules = [...(ef.rules || [])];
-                            const key = rules[ri].to?.dnsName !== undefined ? 'dnsName' : 'cidrSelector';
-                            rules[ri] = { ...rules[ri], to: { [key]: v } };
-                            tSet('security.egress_firewall.rules', rules);
-                          }}
-                        />
-                      </FormGroup>
-                    </GridItem>
-                    <GridItem span={2}>
-                      <div style={{ paddingTop: ri === 0 ? '28px' : '0' }}>
-                        <Button variant="plain" isDanger aria-label="Remove egress rule"
-                          onClick={() => tSet('security.egress_firewall.rules',
-                            (ef.rules || []).filter((_, i) => i !== ri))}>
-                          <TrashIcon />
-                        </Button>
-                      </div>
-                    </GridItem>
-                  </Grid>
+                  <Card key={ri} style={{ marginBottom: '10px' }}>
+                    <CardBody>
+                      <Grid hasGutter>
+                        <GridItem span={2}>
+                          <FormGroup label="Action">
+                            <Radio id={`ef-${ri}-allow`} name={`ef-action-${ri}`} label="Allow"
+                              isChecked={rule.type === 'Allow'} onChange={() => {
+                                const rules = [...(ef.rules || [])];
+                                rules[ri] = { ...rules[ri], type: 'Allow' };
+                                tSet('security.egress_firewall.rules', rules);
+                              }} />
+                            <Radio id={`ef-${ri}-deny`} name={`ef-action-${ri}`} label="Deny"
+                              isChecked={rule.type === 'Deny'} onChange={() => {
+                                const rules = [...(ef.rules || [])];
+                                rules[ri] = { ...rules[ri], type: 'Deny' };
+                                tSet('security.egress_firewall.rules', rules);
+                              }} />
+                          </FormGroup>
+                        </GridItem>
+                        <GridItem span={2}>
+                          <FormGroup label="Destination">
+                            <Radio id={`ef-${ri}-cidr`} name={`ef-dest-${ri}`} label="CIDR"
+                              isChecked={rule.to_type !== 'dns'}
+                              onChange={() => {
+                                const rules = [...(ef.rules || [])];
+                                rules[ri] = { ...rules[ri], to_type: 'cidr' };
+                                tSet('security.egress_firewall.rules', rules);
+                              }} />
+                            <Radio id={`ef-${ri}-dns`} name={`ef-dest-${ri}`} label="DNS"
+                              isChecked={rule.to_type === 'dns'}
+                              onChange={() => {
+                                const rules = [...(ef.rules || [])];
+                                rules[ri] = { ...rules[ri], to_type: 'dns' };
+                                tSet('security.egress_firewall.rules', rules);
+                              }} />
+                          </FormGroup>
+                        </GridItem>
+                        <GridItem span={4}>
+                          <FormGroup label={rule.to_type === 'dns' ? 'DNS Name' : 'CIDR'} isRequired>
+                            <TextInput
+                              value={rule.to_type === 'dns' ? (rule.dns_name || '') : (rule.cidr_selector || '')}
+                              placeholder={rule.to_type === 'dns' ? 'example.com' : '0.0.0.0/0'}
+                              onChange={(_, v) => {
+                                const rules = [...(ef.rules || [])];
+                                if (rule.to_type === 'dns') {
+                                  rules[ri] = { ...rules[ri], dns_name: v };
+                                } else {
+                                  rules[ri] = { ...rules[ri], cidr_selector: v };
+                                }
+                                tSet('security.egress_firewall.rules', rules);
+                              }}
+                            />
+                          </FormGroup>
+                        </GridItem>
+                        <GridItem span={3}>
+                          <FormGroup label="Ports">
+                            {(rule.ports || []).map((port, pi) => (
+                              <div key={pi} style={{ display: 'flex', gap: '4px', marginBottom: '4px' }}>
+                                <TextInput value={port.port || ''} placeholder="443" style={{ flex: 1 }}
+                                  onChange={(_, v) => {
+                                    const rules = [...(ef.rules || [])];
+                                    const ports = [...(rules[ri].ports || [])];
+                                    ports[pi] = { ...ports[pi], port: v };
+                                    rules[ri] = { ...rules[ri], ports };
+                                    tSet('security.egress_firewall.rules', rules);
+                                  }} />
+                                <TextInput value={port.protocol || 'TCP'} placeholder="TCP" style={{ width: '60px' }}
+                                  onChange={(_, v) => {
+                                    const rules = [...(ef.rules || [])];
+                                    const ports = [...(rules[ri].ports || [])];
+                                    ports[pi] = { ...ports[pi], protocol: v };
+                                    rules[ri] = { ...rules[ri], ports };
+                                    tSet('security.egress_firewall.rules', rules);
+                                  }} />
+                                <Button variant="plain" isDanger style={{ padding: '2px' }}
+                                  onClick={() => {
+                                    const rules = [...(ef.rules || [])];
+                                    rules[ri] = { ...rules[ri], ports: (rules[ri].ports || []).filter((_, i) => i !== pi) };
+                                    tSet('security.egress_firewall.rules', rules);
+                                  }}><TrashIcon style={{ fontSize: '12px' }} /></Button>
+                              </div>
+                            ))}
+                            <Button variant="link" icon={<PlusCircleIcon />}
+                              onClick={() => {
+                                const rules = [...(ef.rules || [])];
+                                rules[ri] = { ...rules[ri], ports: [...(rules[ri].ports || []), createEgressFirewallPort()] };
+                                tSet('security.egress_firewall.rules', rules);
+                              }}>Add Port</Button>
+                            {(rule.ports || []).length === 0 && (
+                              <p style={{ color: muted, fontSize: '11px', marginTop: '4px' }}>No ports — applies to all ports.</p>
+                            )}
+                          </FormGroup>
+                        </GridItem>
+                        <GridItem span={1} style={{ textAlign: 'right' }}>
+                          <Button variant="plain" isDanger aria-label="Remove egress rule"
+                            onClick={() => tSet('security.egress_firewall.rules',
+                              (ef.rules || []).filter((_, i) => i !== ri))}>
+                            <TrashIcon />
+                          </Button>
+                        </GridItem>
+                      </Grid>
+                    </CardBody>
+                  </Card>
                 ))}
                 <Button variant="link" icon={<PlusCircleIcon />}
                   onClick={() => tSet('security.egress_firewall.rules',

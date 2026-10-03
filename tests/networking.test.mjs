@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   NETWORKING_DEFAULTS,
   createTenant, createTenantNamespace, createTenantNetwork, createSubnet,
-  createPhysicalNetwork, createNetworkPolicyRule, createAdminNetworkPolicy,
+  createPhysicalNetwork, createNetworkPolicyRule, createPolicyPeer, createPolicyPort,
+  createAdminNetworkPolicy,
   createAdminNetworkPolicyRule, createEgressFirewallRule,
   createMetalLBAddressPool, createMetalLBBGPPeer,
   OCP_VERSION_OPTIONS, FEATURE_STATUS,
@@ -67,10 +68,13 @@ test('createPhysicalNetwork has NMState flag', () => {
   assert.equal(pn.interface_config.type, 'bridge');
 });
 
-test('createNetworkPolicyRule defaults to ingress TCP', () => {
+test('createNetworkPolicyRule defaults to ingress with empty peers/ports', () => {
   const r = createNetworkPolicyRule();
   assert.equal(r.direction, 'ingress');
-  assert.equal(r.protocol, 'TCP');
+  assert.ok(Array.isArray(r.peers));
+  assert.ok(Array.isArray(r.ports));
+  assert.equal(r.peers.length, 0);
+  assert.equal(r.ports.length, 0);
 });
 
 test('createAdminNetworkPolicy has required fields', () => {

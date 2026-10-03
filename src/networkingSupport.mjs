@@ -79,9 +79,10 @@ export function createTenant(name = '') {
       network_policy: {
         enabled: false,
         template: 'none',
+        pod_selector: {},
         custom_rules: [],
       },
-      multi_network_policy: { enabled: false, template: 'none', custom_rules: [] },
+      multi_network_policy: { enabled: false, template: 'none', pod_selector: {}, custom_rules: [] },
       egress_firewall: { enabled: false, rules: [] },
     },
     connectivity: {
@@ -144,15 +145,20 @@ export function createPhysicalNetwork(name = '') {
 export function createNetworkPolicyRule() {
   return {
     direction: 'ingress',
-    peer_type: 'namespace',
-    namespace_selector: {},
-    pod_selector: {},
-    cidr: '',
-    except: [],
-    protocol: 'TCP',
-    port: '',
-    end_port: '',
+    peers: [],
+    ports: [],
   };
+}
+
+export function createPolicyPeer(type = 'ipBlock') {
+  if (type === 'ipBlock') return { type: 'ipBlock', cidr: '', except: [] };
+  if (type === 'clusterPods') return { type: 'clusterPods', namespace_selector: {}, pod_selector: {} };
+  if (type === 'sameNamespace') return { type: 'sameNamespace', pod_selector: {} };
+  return { type: 'ipBlock', cidr: '', except: [] };
+}
+
+export function createPolicyPort() {
+  return { protocol: 'TCP', port: '', endPort: '' };
 }
 
 /** Create an AdminNetworkPolicy skeleton. */
@@ -187,7 +193,12 @@ export function createEgressFirewallRule() {
     to_type: 'cidr',
     cidr_selector: '',
     dns_name: '',
+    ports: [],
   };
+}
+
+export function createEgressFirewallPort() {
+  return { protocol: 'TCP', port: '' };
 }
 
 /** Create a MetalLB IPAddressPool config. */
@@ -224,6 +235,7 @@ export const INFO_POPOVER_MAP = {
       'A logical grouping of namespaces that share network segments, security policies, ' +
       'and connectivity. Each tenant can own one or more namespaces and define networks ' +
       'scoped to those namespaces or across the cluster.',
+    vmware: 'Similar to a vSphere resource pool or NSX project — a boundary for organizing network resources.',
   },
   segment: {
     title: 'Network Segment',
@@ -231,6 +243,7 @@ export const INFO_POPOVER_MAP = {
       'A network segment is an isolated network domain created as a UserDefinedNetwork ' +
       '(namespace-scoped) or ClusterUserDefinedNetwork (cluster-scoped). Pods attached ' +
       'to the same segment can communicate at Layer 2 or Layer 3, depending on topology.',
+    vmware: 'Similar to an NSX segment or vSphere port group — an isolated network that workloads connect to.',
   },
   overlay: {
     title: 'Overlay Network (Layer 2 / Layer 3)',
@@ -238,6 +251,7 @@ export const INFO_POPOVER_MAP = {
       'Overlay networks use GENEVE tunnels to extend a virtual network across cluster nodes. ' +
       'Layer 2 provides a flat broadcast domain; Layer 3 provides routed subnets with ' +
       'per-node host subnets for scalable IP management.',
+    vmware: 'Like NSX overlay segments — virtual networks decoupled from the physical fabric using tunnel encapsulation.',
   },
   localnet: {
     title: 'Localnet (VLAN-Backed)',
@@ -245,6 +259,7 @@ export const INFO_POPOVER_MAP = {
       'Localnet maps an OVN logical network directly to a physical bridge and VLAN on each ' +
       'node. Use it when pods or VMs need direct connectivity to an external physical network. ' +
       'Requires NMState and a NodeNetworkConfigurationPolicy for bridge setup.',
+    vmware: 'Like a vSphere VLAN-backed port group — maps directly to a physical VLAN for external connectivity.',
   },
   firewall: {
     title: 'Network Security Policy',
@@ -253,6 +268,7 @@ export const INFO_POPOVER_MAP = {
       '(cluster-admin, highest priority), namespace-level NetworkPolicy, and ' +
       'BaselineAdminNetworkPolicy (cluster-level fallback). Together they control ' +
       'east-west traffic between pods.',
+    vmware: 'Like NSX Distributed Firewall rules — microsegmentation policies that control traffic between workloads.',
   },
   egress_firewall: {
     title: 'EgressFirewall',
@@ -260,6 +276,7 @@ export const INFO_POPOVER_MAP = {
       'EgressFirewall controls outbound traffic from pods in a namespace. Rules can allow ' +
       'or deny traffic to specific external CIDRs or DNS names, giving administrators ' +
       'control over what external endpoints workloads can reach.',
+    vmware: 'Like NSX Gateway Firewall egress rules — controls what external destinations workloads can reach.',
   },
   physical_network: {
     title: 'Physical Network',
@@ -267,6 +284,7 @@ export const INFO_POPOVER_MAP = {
       'A physical network represents the underlying VLAN and bridge infrastructure on cluster ' +
       'nodes. Managed through Kubernetes NMState and NodeNetworkConfigurationPolicy, physical ' +
       'networks can be shared by multiple tenant Localnet segments.',
+    vmware: 'Like vSphere vSwitch/dvSwitch uplink configuration — the physical network plumbing underneath.',
   },
   north_south: {
     title: 'North/South Connectivity',
@@ -274,6 +292,7 @@ export const INFO_POPOVER_MAP = {
       'North/south traffic flows between the cluster and external networks. OpenShift handles ' +
       'this through IngressControllers and Routes (inbound), EgressIP (deterministic source ' +
       'NAT for outbound), and MetalLB (bare-metal LoadBalancer services).',
+    vmware: 'Like NSX Tier-0/Tier-1 gateway routing — handles traffic entering and leaving the cluster.',
   },
 };
 
@@ -1044,6 +1063,11 @@ export function generateNetworkResources(config) {
           const spec = { type: rule.type };
           if (rule.to_type === 'cidr') spec.to = { cidrSelector: rule.cidr_selector };
           if (rule.to_type === 'dns')  spec.to = { dnsName: rule.dns_name };
+          const ports = (rule.ports || []).filter(p => p.port).map(p => {
+            const entry = { protocol: p.protocol || 'TCP', port: isNaN(p.port) ? p.port : Number(p.port) };
+            return entry;
+          });
+          if (ports.length > 0) spec.ports = ports;
           return spec;
         });
         if (fwRules.length > 0) {
@@ -1330,6 +1354,49 @@ function buildNAD(net, namespace, config, source) {
   };
 }
 
+function buildPeerList(peers) {
+  const result = [];
+  for (const peer of (peers || [])) {
+    if (peer.type === 'ipBlock' && peer.cidr) {
+      const entry = { ipBlock: { cidr: peer.cidr } };
+      if (peer.except?.length > 0) entry.ipBlock.except = peer.except;
+      result.push(entry);
+    } else if (peer.type === 'clusterPods') {
+      const entry = {};
+      if (peer.namespace_selector && Object.keys(peer.namespace_selector).length > 0) {
+        entry.namespaceSelector = { matchLabels: peer.namespace_selector };
+      } else {
+        entry.namespaceSelector = {};
+      }
+      if (peer.pod_selector && Object.keys(peer.pod_selector).length > 0) {
+        entry.podSelector = { matchLabels: peer.pod_selector };
+      }
+      result.push(entry);
+    } else if (peer.type === 'sameNamespace') {
+      const entry = {};
+      if (peer.pod_selector && Object.keys(peer.pod_selector).length > 0) {
+        entry.podSelector = { matchLabels: peer.pod_selector };
+      } else {
+        entry.podSelector = {};
+      }
+      result.push(entry);
+    }
+  }
+  return result;
+}
+
+function buildPortList(ports) {
+  const result = [];
+  for (const p of (ports || [])) {
+    if (p.port) {
+      const portEntry = { protocol: p.protocol || 'TCP', port: isNaN(p.port) ? p.port : Number(p.port) };
+      if (p.endPort) portEntry.endPort = Number(p.endPort);
+      result.push(portEntry);
+    }
+  }
+  return result;
+}
+
 function buildNetworkPolicies(template, tenant, namespace, _config) {
   const tenantLabel = tenant.tenant_name || 'unknown';
   const policies = [];
@@ -1406,33 +1473,22 @@ function buildNetworkPolicies(template, tenant, namespace, _config) {
 
   if (template === 'custom') {
     const customRules = tenant.security?.network_policy?.custom_rules || [];
+    const podSelector = tenant.security?.network_policy?.pod_selector || {};
     if (customRules.length > 0) {
       const ingress = [];
       const egress = [];
       for (const rule of customRules) {
-        const peer = {};
-        if (rule.peer_type === 'namespace') {
-          peer.namespaceSelector = { matchLabels: rule.namespace_selector || {} };
-        } else if (rule.peer_type === 'pod') {
-          peer.podSelector = { matchLabels: rule.pod_selector || {} };
-        } else if (rule.peer_type === 'cidr') {
-          peer.ipBlock = { cidr: rule.cidr };
-          if (rule.except?.length > 0) peer.ipBlock.except = rule.except;
-        }
-
-        const ports = [];
-        if (rule.port) {
-          const portEntry = { protocol: rule.protocol || 'TCP', port: isNaN(rule.port) ? rule.port : Number(rule.port) };
-          if (rule.end_port) portEntry.endPort = Number(rule.end_port);
-          ports.push(portEntry);
-        }
+        const from_to = buildPeerList(rule.peers);
+        const ports = buildPortList(rule.ports);
 
         if (rule.direction === 'ingress') {
-          const r = { from: [peer] };
+          const r = {};
+          if (from_to.length > 0) r.from = from_to;
           if (ports.length > 0) r.ports = ports;
           ingress.push(r);
         } else {
-          const r = { to: [peer] };
+          const r = {};
+          if (from_to.length > 0) r.to = from_to;
           if (ports.length > 0) r.ports = ports;
           egress.push(r);
         }
@@ -1447,7 +1503,7 @@ function buildNetworkPolicies(template, tenant, namespace, _config) {
         kind: 'NetworkPolicy',
         metadata: { name: `${tenantLabel}-custom`, namespace },
         spec: {
-          podSelector: {},
+          podSelector: Object.keys(podSelector).length > 0 ? { matchLabels: podSelector } : {},
           policyTypes,
           ...(ingress.length > 0 ? { ingress } : {}),
           ...(egress.length > 0 ? { egress } : {}),
@@ -1495,24 +1551,22 @@ function buildMultiNetworkPolicies(template, tenant, namespace, networkName) {
 
   if (template === 'custom') {
     const customRules = tenant.security?.multi_network_policy?.custom_rules || [];
+    const podSelector = tenant.security?.multi_network_policy?.pod_selector || {};
     if (customRules.length > 0) {
       const ingress = [];
       const egress = [];
       for (const rule of customRules) {
-        const peer = {};
-        if (rule.cidr) {
-          peer.ipBlock = { cidr: rule.cidr };
-        }
-        const ports = [];
-        if (rule.port) {
-          ports.push({ protocol: rule.protocol || 'TCP', port: isNaN(rule.port) ? rule.port : Number(rule.port) });
-        }
+        const from_to = buildPeerList(rule.peers);
+        const ports = buildPortList(rule.ports);
+
         if (rule.direction === 'ingress') {
-          const r = { from: [peer] };
+          const r = {};
+          if (from_to.length > 0) r.from = from_to;
           if (ports.length > 0) r.ports = ports;
           ingress.push(r);
         } else {
-          const r = { to: [peer] };
+          const r = {};
+          if (from_to.length > 0) r.to = from_to;
           if (ports.length > 0) r.ports = ports;
           egress.push(r);
         }
@@ -1527,7 +1581,7 @@ function buildMultiNetworkPolicies(template, tenant, namespace, networkName) {
         kind: 'MultiNetworkPolicy',
         metadata: { name: `${tenantLabel}-mnp-custom`, namespace, annotations },
         spec: {
-          podSelector: {},
+          podSelector: Object.keys(podSelector).length > 0 ? { matchLabels: podSelector } : {},
           policyTypes,
           ...(ingress.length > 0 ? { ingress } : {}),
           ...(egress.length > 0 ? { egress } : {}),
@@ -1887,19 +1941,39 @@ export function normalizeNetworkingConfig(raw) {
     }
     const sec = t.security;
     if (!sec.network_policy || typeof sec.network_policy !== 'object') {
-      sec.network_policy = { enabled: false, template: 'none', custom_rules: [] };
+      sec.network_policy = { enabled: false, template: 'none', pod_selector: {}, custom_rules: [] };
     }
     sec.network_policy.enabled = sec.network_policy.enabled === true;
+    if (!sec.network_policy.pod_selector || typeof sec.network_policy.pod_selector !== 'object') {
+      sec.network_policy.pod_selector = {};
+    }
     if (!Array.isArray(sec.network_policy.custom_rules)) sec.network_policy.custom_rules = [];
+    sec.network_policy.custom_rules = sec.network_policy.custom_rules.map(r => ({
+      direction: r.direction || 'ingress',
+      peers: Array.isArray(r.peers) ? r.peers : [],
+      ports: Array.isArray(r.ports) ? r.ports : [],
+    }));
     if (!sec.multi_network_policy || typeof sec.multi_network_policy !== 'object') {
-      sec.multi_network_policy = { enabled: false, template: 'none', custom_rules: [] };
+      sec.multi_network_policy = { enabled: false, template: 'none', pod_selector: {}, custom_rules: [] };
     }
     if (!sec.multi_network_policy.template) sec.multi_network_policy.template = 'none';
+    if (!sec.multi_network_policy.pod_selector || typeof sec.multi_network_policy.pod_selector !== 'object') {
+      sec.multi_network_policy.pod_selector = {};
+    }
     if (!Array.isArray(sec.multi_network_policy.custom_rules)) sec.multi_network_policy.custom_rules = [];
+    sec.multi_network_policy.custom_rules = sec.multi_network_policy.custom_rules.map(r => ({
+      direction: r.direction || 'ingress',
+      peers: Array.isArray(r.peers) ? r.peers : [],
+      ports: Array.isArray(r.ports) ? r.ports : [],
+    }));
     if (!sec.egress_firewall || typeof sec.egress_firewall !== 'object') {
       sec.egress_firewall = { enabled: false, rules: [] };
     }
     if (!Array.isArray(sec.egress_firewall.rules)) sec.egress_firewall.rules = [];
+    sec.egress_firewall.rules = sec.egress_firewall.rules.map(r => ({
+      ...r,
+      ports: Array.isArray(r.ports) ? r.ports : [],
+    }));
 
     // Connectivity
     if (!t.connectivity || typeof t.connectivity !== 'object') {
