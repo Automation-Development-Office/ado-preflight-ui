@@ -4,7 +4,14 @@ import '@patternfly/react-core/dist/styles/base.css';
 import PodTerminal from './PodTerminal.jsx';
 import BootstrapProfiles from './BootstrapProfiles.jsx';
 import AdoAssistant from './AdoAssistant.jsx';
-import { selectProfileApps } from './profileSelection.mjs';
+import ControllerWorkflowPreview from './ControllerWorkflowPreview.jsx';
+import {
+  selectProfileApps,
+  componentIsSelected,
+  platformInstallMode,
+  visiblePlatformOptions,
+  syncPlatformInstallOptions
+} from './profileSelection.mjs';
 import { explainLocalPlaybookCommand } from './playbookExplain.mjs';
 import {
   Page,
@@ -1676,6 +1683,7 @@ const PREFLIGHT_HUB_COLLECTION_OPTIONS = [
   'redhat.rhel_idm',
   'redhat.rhel_system_roles',
   'community.general',
+  'community.crypto',
   'community.grafana',
   'amazon.aws',
   'community.hashi_vault',
@@ -1714,9 +1722,77 @@ const syncHubEeSourceImage = aap => {
   return aap;
 };
 
+function foldHostnameIntoHostList(config) {
+  if (!config || typeof config !== 'object') return config;
+  const primary = String(config.hostname || '').trim();
+  const raw = config.hosts;
+  const hosts = Array.isArray(raw)
+    ? raw.map(item => String(item || '').trim()).filter(Boolean)
+    : String(raw || '').split(/[\n,]/).map(item => item.trim()).filter(Boolean);
+  if (primary && !hosts.includes(primary)) hosts.unshift(primary);
+  config.hosts = hosts;
+  config.hostname = '';
+  return config;
+}
+
+function disablePublicGalaxyCredential(aap) {
+  if (!aap || !Array.isArray(aap.galaxy_credentials)) return aap;
+  aap.galaxy_credentials = aap.galaxy_credentials.map(credential => {
+    if (!credential) return credential;
+    if (credential.id === 'galaxy' || credential.name === 'Ansible Galaxy') {
+      return { ...credential, enabled: false, attach_to_org: false };
+    }
+    return credential;
+  });
+  return aap;
+}
+
+function galaxySetupTokenError(aap) {
+  if (!aap || aap.galaxy_setup_enabled !== true) return '';
+  if (String(aap.galaxy_hub_token || '').trim()) return '';
+  const enabled = (Array.isArray(aap.galaxy_credentials) ? aap.galaxy_credentials : [])
+    .filter(credential => credential && credential.enabled !== false);
+  const missing = enabled.filter(credential => !String(credential.token || '').trim());
+  if (enabled.length > 0 && missing.length === 0) return '';
+  return 'Galaxy setup needs an API token. Set General → Hub / Galaxy API token, or put a token on each enabled Galaxy credential. One of those is enough.';
+}
+
+function wizardRequirements(source) {
+  const aap = source?.aap || {};
+  const core = [];
+  if (!String(source?.environment || '').trim()) core.push('Environment Type');
+  if (!String(source?.domain || '').trim()) core.push('Base Infrastructure Domain');
+  if (!Array.isArray(source?.components) || source.components.length === 0) {
+    core.push('at least one profile or component');
+  }
+  const git = [];
+  if (!String(aap.git_url || '').trim()) git.push('Git URL');
+  const platform = [];
+  if (!String(aap.vault_password || '').trim()) platform.push('Vault password');
+  if (aap.enabled !== false) {
+    if (!String(aap.hostname || '').trim()) platform.push('AAP Hostname URL');
+    if (!String(aap.organization || '').trim()) platform.push('Organization Name');
+    if (!String(aap.admin_password || '').trim() && !String(aap.oauth_token || '').trim()) {
+      platform.push('Admin password or OAuth token');
+    }
+    if (aap.galaxy_setup_enabled === true && galaxySetupTokenError(aap)) {
+      platform.push('Galaxy API token');
+    }
+  }
+  return { core, components: [], git, aap: platform };
+}
+
+function wizardIsComplete(source) {
+  return Object.values(wizardRequirements(source)).every(items => items.length === 0);
+}
+
+const WIZARD_EXPANDED_NONE = { core: true, components: false, git: false, aap: false };
+const WIZARD_EXPANDED_ALL = { core: true, components: true, git: true, aap: true };
+
 const defaults = {
   scm_tool: 'gitlab',
   environment: 'prod',
+  deployment_mode: 'disconnected',
   // Extra survey-only environment names. Primary Environment Type is always
   // included; prod is selected by default for Contoller JT surveys.
   additional_environments: ['prod'],
@@ -2124,6 +2200,7 @@ const defaults = {
       hostname: '',
       storage: '',
       replicas: 1,
+      root_password: 'redhat123',
       database_provision: true,
       postgres_storage: '',
       postgres_storage_size: '10Gi',
@@ -2592,6 +2669,15 @@ function App() {
   const [documentationType, setDocumentationType] = useState('ui');
   const [collectionsToolsOpen, setCollectionsToolsOpen] = useState(false);
   const [aapOpen, setAapOpen] = useState(true);
+  // 1 Core, 2 Component Configuration, 3 Git, 4 AAP. Later steps stay collapsed
+  // until the previous step is filled in.
+  const [openWizardStep, setOpenWizardStep] = useState('core');
+  const [expandedSteps, setExpandedSteps] = useState(WIZARD_EXPANDED_NONE);
+  const [wizardUnlocked, setWizardUnlocked] = useState(1);
+  const formWasCompleteRef = useRef(false);
+  const prevWizardMissingRef = useRef(wizardRequirements(defaults));
+  const coreWasReadyRef = useRef(false);
+  const componentOptionMemoryRef = useRef({});
   const [openshiftOpen, setOpenshiftOpen] = useState(false);
   const [rhelOpen, setRhelOpen] = useState(false);
   const [patchingOpen, setPatchingOpen] = useState(false);
@@ -2694,6 +2780,7 @@ function App() {
   const [runFinished, setRunFinished] = useState(false);
   const [bootstrapStatus, setBootstrapStatus] = useState('idle');
   const [bootstrapRuntime, setBootstrapRuntime] = useState('');
+  const [workflowPreviewOpen, setWorkflowPreviewOpen] = useState(false);
   const [deployStatus, setDeployStatus] = useState('idle');
   const [deployRuntime, setDeployRuntime] = useState('');
   const [showRawOutput, setShowRawOutput] = useState(false);
@@ -2749,16 +2836,80 @@ function App() {
     fontSize: '14px'
   };
 
+  const openWizard = (stepNumber, stepId) => {
+    setWizardUnlocked(prev => Math.max(prev, stepNumber));
+    setOpenWizardStep(stepId);
+    setExpandedSteps(prev => {
+      if (formWasCompleteRef.current) return { ...prev, [stepId]: true };
+      return { core: false, components: false, git: false, aap: false, [stepId]: true };
+    });
+  };
+
   const goToGitConfiguration = () => {
     setFocusSection('git');
     setActiveMainTab('core');
+    openWizard(3, 'git');
   };
 
   const goToAapConfiguration = () => {
     setFocusSection('aap');
     setActiveMainTab('core');
     setAapOpen(true);
+    openWizard(4, 'aap');
   };
+
+  const coreStepReady = Boolean(
+    String(data.environment || '').trim()
+    && String(data.domain || '').trim()
+    && Array.isArray(data.components)
+    && data.components.length > 0
+  );
+
+  useEffect(() => {
+    if (formWasCompleteRef.current) {
+      coreWasReadyRef.current = coreStepReady;
+      return;
+    }
+    if (coreStepReady && !coreWasReadyRef.current) {
+      setWizardUnlocked(prev => Math.max(prev, 2));
+      setOpenWizardStep('components');
+      setExpandedSteps({ core: false, components: true, git: false, aap: false });
+      window.setTimeout(() => {
+        document.getElementById('assistant-component-config')?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start'
+        });
+      }, 50);
+    }
+    if (!coreStepReady && coreWasReadyRef.current) {
+      setWizardUnlocked(1);
+      setOpenWizardStep('core');
+      setExpandedSteps(WIZARD_EXPANDED_NONE);
+    }
+    coreWasReadyRef.current = coreStepReady;
+  }, [coreStepReady]);
+
+  useEffect(() => {
+    const missing = wizardRequirements(data);
+    const complete = wizardIsComplete(data);
+    if (complete) {
+      formWasCompleteRef.current = true;
+      setWizardUnlocked(4);
+      setExpandedSteps(prev => (
+        prev.core && prev.components && prev.git && prev.aap ? prev : { ...WIZARD_EXPANDED_ALL }
+      ));
+    } else if (formWasCompleteRef.current) {
+      const previous = prevWizardMissingRef.current || missing;
+      setExpandedSteps(prev => {
+        const next = { ...prev };
+        ['core', 'components', 'git', 'aap'].forEach(key => {
+          if ((previous[key] || []).length === 0 && missing[key].length > 0) next[key] = false;
+        });
+        return next;
+      });
+    }
+    prevWizardMissingRef.current = missing;
+  }, [data]);
 
   useEffect(() => {
     if (activeMainTab !== 'core' || !focusSection) return undefined;
@@ -4178,6 +4329,11 @@ function App() {
       merged.aap.hub_publish_preflight_collection_names = merged.aap.hub_publish_preflight_collections
         ? [...PREFLIGHT_HUB_COLLECTION_OPTIONS]
         : [];
+    } else if (
+      merged.aap.hub_publish_preflight_collection_names.length > 0
+      && !merged.aap.hub_publish_preflight_collection_names.includes('community.crypto')
+    ) {
+      merged.aap.hub_publish_preflight_collection_names.push('community.crypto');
     }
     merged.aap.hub_mark_ado_validated = merged.aap.hub_publish_ado_collection === true;
     if (merged.aap.hub_update_collection_only === undefined) merged.aap.hub_update_collection_only = false;
@@ -4198,6 +4354,12 @@ function App() {
       }
       if (Array.isArray(merged.hub.publish_preflight_collection_names)) {
         merged.aap.hub_publish_preflight_collection_names = merged.hub.publish_preflight_collection_names;
+        if (
+          merged.aap.hub_publish_preflight_collection_names.length > 0
+          && !merged.aap.hub_publish_preflight_collection_names.includes('community.crypto')
+        ) {
+          merged.aap.hub_publish_preflight_collection_names.push('community.crypto');
+        }
       }
       if (merged.hub.force_ado_collection_update !== undefined) {
         merged.aap.hub_force_ado_collection_update = merged.hub.force_ado_collection_update === true;
@@ -4373,6 +4535,24 @@ function App() {
     applyDerivedAppsDomain(merged);
     applyDerivedRouteHostnames(merged);
 
+    if (!merged.component_config) merged.component_config = {};
+    foldHostnameIntoHostList(merged.component_config.patching);
+    if (merged.deployment_mode !== 'connected') {
+      merged.deployment_mode = 'disconnected';
+      disablePublicGalaxyCredential(merged.aap);
+    }
+    componentOptionMemoryRef.current = {};
+    Object.entries(merged.component_options || {}).forEach(([key, options]) => {
+      if (componentIsSelected(merged, key)) {
+        if (Array.isArray(options) && options.length > 0) {
+          componentOptionMemoryRef.current[key] = [...options];
+        }
+      } else if (key !== 'aap') {
+        merged.component_options[key] = [];
+      }
+    });
+    syncPlatformInstallOptions(merged);
+
     return merged;
   };
 
@@ -4384,6 +4564,29 @@ function App() {
     setActiveConfigPanel(nextPanel);
     setActiveConfigTab(nextPanel);
     setAapOpen(importedData.aap?.enabled !== false);
+    const missing = wizardRequirements(importedData);
+    const complete = wizardIsComplete(importedData);
+    formWasCompleteRef.current = complete;
+    prevWizardMissingRef.current = missing;
+    coreWasReadyRef.current = missing.core.length === 0;
+    if (complete) {
+      setWizardUnlocked(4);
+      setOpenWizardStep('core');
+      setExpandedSteps({ ...WIZARD_EXPANDED_ALL });
+    } else if (missing.core.length === 0) {
+      setWizardUnlocked(4);
+      setOpenWizardStep('components');
+      setExpandedSteps({
+        core: true,
+        components: true,
+        git: missing.git.length === 0,
+        aap: missing.git.length === 0 && missing.aap.length === 0
+      });
+    } else {
+      setWizardUnlocked(1);
+      setOpenWizardStep('core');
+      setExpandedSteps({ ...WIZARD_EXPANDED_NONE });
+    }
     setOpenshiftOpen(importedData.components.includes('all') || importedData.components.includes('openshift'));
     setRhelOpen(importedData.components.includes('all') || importedData.components.includes('rhel'));
     setPatchingOpen(importedData.components.includes('all') || importedData.components.includes('patching'));
@@ -4423,6 +4626,12 @@ function App() {
 
   const buildPreflightPayload = () => {
     const payload = hydrateSelectedComponentConfigs(pruneInactiveComponentApps(data));
+    syncPlatformInstallOptions(payload);
+    if (!payload.component_config) payload.component_config = {};
+    foldHostnameIntoHostList(payload.component_config.patching);
+    if (payload.deployment_mode !== 'connected') {
+      disablePublicGalaxyCredential(payload.aap);
+    }
     const selectedApps = selectedComponentAppsFrom(payload);
     const selectedGroups = Array.isArray(payload.components) ? payload.components : [];
     const allowedConfig = new Set([...selectedApps, ...selectedGroups]);
@@ -5030,7 +5239,10 @@ function App() {
 
   const setAapEnabled = value => {
     set('aap.enabled', value);
-    setAapOpen(value);
+    // Keep the AAP panel open when switching to Not using AAP so Credentials
+    // (Vault) stay reachable; vault is also shown inline under Not using AAP.
+    setAapOpen(true);
+    openWizard(4, 'aap');
   };
 
   /** Strip -e/--extra-vars state=… so Common extra vars owns state. */
@@ -5215,6 +5427,29 @@ function App() {
 
   const isStandaloneDisabled = () => false;
 
+  const releaseComponentOptions = (copy, key) => {
+    if (!copy.component_options) copy.component_options = {};
+    const current = copy.component_options[key];
+    if (Array.isArray(current)) {
+      componentOptionMemoryRef.current[key] = [...current];
+    }
+    copy.component_options[key] = [];
+  };
+
+  const reclaimComponentOptions = (copy, key) => {
+    if (!copy.component_options) copy.component_options = {};
+    const saved = componentOptionMemoryRef.current[key];
+    if (Array.isArray(saved)) {
+      copy.component_options[key] = [...saved];
+    }
+  };
+
+  const releaseOptionsForRemovedApps = (copy, apps) => {
+    (apps || []).forEach(app => {
+      if (!componentIsSelected(copy, app)) releaseComponentOptions(copy, app);
+    });
+  };
+
   const toggleComponent = component => {
     setData(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
@@ -5240,14 +5475,15 @@ function App() {
 
       if (!copy.component_options) copy.component_options = {};
 
-      if (!wasSelected) {
-        if (component === 'all') {
-          copy.component_options = Object.fromEntries(
-            Object.keys(componentOptionDefaults).map(key => [key, []])
-          );
-        } else if (componentOptionDefaults[component]) {
-          copy.component_options[component] = [];
-        }
+      if (wasSelected) {
+        const keys = component === 'all'
+          ? Object.keys(componentOptionDefaults)
+          : [component];
+        keys.forEach(key => {
+          if (!componentIsSelected(copy, key)) releaseComponentOptions(copy, key);
+        });
+      } else if (!Array.isArray(copy.component_options[component]) || copy.component_options[component].length === 0) {
+        reclaimComponentOptions(copy, component);
       }
 
       if (!copy.component_apps) copy.component_apps = {};
@@ -5292,6 +5528,7 @@ function App() {
       copy.jira.enabled = next.includes('all') || next.includes('jira');
 
       clearStandaloneWhenComponentsSelected(copy);
+      syncPlatformInstallOptions(copy);
 
       return copy;
     });
@@ -5394,12 +5631,14 @@ function App() {
         copy.component_options.aws = [...copy.component_apps[group]];
       }
 
-      if (!isSelected && componentOptionDefaults[app]) {
-        if (!copy.component_options) copy.component_options = {};
-        copy.component_options[app] = [];
+      if (isSelected && !componentIsSelected(copy, app)) {
+        releaseComponentOptions(copy, app);
+      } else if (!isSelected && !componentIsSelected(prev, app)) {
+        reclaimComponentOptions(copy, app);
       }
 
       clearStandaloneWhenComponentsSelected(copy);
+      syncPlatformInstallOptions(copy);
 
       if (!isSelected && app === 'dev_hub') {
         syncDevHubGitlabTokenFromGit(copy);
@@ -5425,16 +5664,33 @@ function App() {
       copy.component_apps[group] = [];
       copy.components = copy.components.filter(value => value !== group && !(removed.includes(value) && !Object.values(copy.component_apps).some(apps => apps.includes(value))));
       copy.component = copy.components[0] || '';
+      releaseOptionsForRemovedApps(copy, removed);
+    } else {
+      (copy.component_apps[group] || []).forEach(app => {
+        if (!componentIsSelected(data, app)) reclaimComponentOptions(copy, app);
+      });
     }
     clearStandaloneWhenComponentsSelected(copy);
+    syncPlatformInstallOptions(copy);
     setData(copy);
     if (!active) openConfigPanel(group);
   };
 
   const applyProfileApps = (group, apps, done, profileName) => {
     const catalogs = Object.fromEntries(groupComponents.map(target => [target, getGroupApps(target)]));
+    const previousApps = Object.values(data.component_apps || {}).flat();
     const copy = selectProfileApps(data, group, apps, groupComponents, catalogs, simpleComponents, profileName);
+    releaseOptionsForRemovedApps(copy, previousApps);
+    const previouslySelected = new Set(previousApps);
+    const namedSatelliteProfile = group === 'satellite' && profileName && profileName !== 'Custom';
+    (apps || []).forEach(app => {
+      if (namedSatelliteProfile && app === 'satellite') return;
+      if (!previouslySelected.has(app) && componentIsSelected(copy, app)) {
+        reclaimComponentOptions(copy, app);
+      }
+    });
     clearStandaloneWhenComponentsSelected(copy);
+    syncPlatformInstallOptions(copy);
     syncDevHubGitlabTokenFromGit(copy);
     applyRhbkTlsDefaultOnCertManagerToggle(copy);
     setData(copy);
@@ -6302,6 +6558,17 @@ function App() {
     // PatternFly passes a click event when used as an onClick handler.
     const runComponents = Array.isArray(selectedRun?.steps);
     if (!runComponents) {
+      const galaxyTokenError = galaxySetupTokenError(data?.aap);
+      if (galaxyTokenError) {
+        setImportStatus('Galaxy API token required');
+        setPreview(
+          `ERROR: ${galaxyTokenError}\n`
+          + 'The General tab token covers every Galaxy credential that does not have its own token.\n'
+        );
+        setActiveTab('logs');
+        setBootstrapStatus('failed');
+        return;
+      }
       const vaultPassword = String(data?.aap?.vault_password || '').trim();
       if (!vaultPassword) {
         setImportStatus('Bootstrap needs a Vault password');
@@ -7930,7 +8197,11 @@ echo $TOKEN
         {renderComponentOptions(
           'grafana',
           'Grafana Options',
-          'Install (OpenShift) and Standalone are mutually exclusive. Datasources, Folders, Dashboards, and Alerts can run alone against an existing Grafana (config-only), or after either install. Leave Install unchecked for content-only.'
+          platformInstallMode(data, 'grafana') === 'standalone'
+            ? 'Standalone / RHEL is selected, so Grafana installs on the RHEL VM. OpenShift install options stay hidden.'
+            : platformInstallMode(data, 'grafana') === 'openshift'
+              ? 'OpenShift is selected, so Grafana installs on OpenShift. The standalone VM install stays hidden.'
+              : 'Install (OpenShift) and Standalone are mutually exclusive. Datasources, Folders, Dashboards, and Alerts can run alone against an existing Grafana (config-only), or after either install. Leave Install unchecked for content-only.'
         )}
         <Tabs
           activeKey={activeGrafanaTab}
@@ -8181,7 +8452,11 @@ echo $TOKEN
 
     return (
     <>
-      {renderComponentOptions('rhbk', 'RHBK (Keycloak) Options', 'Select which RHBK (Keycloak) resources to configure. Choose Standalone for the RHEL VM zip install (ADO | Install RHBK Standalone) — that hides the OpenShift operator fields. Wire inventory host keycloak-ado / 192.168.0.64 and a machine credential.')}
+      {renderComponentOptions('rhbk', 'RHBK (Keycloak) Options', platformInstallMode(data, 'rhbk') === 'standalone'
+        ? 'Standalone / RHEL is selected, so RHBK uses the RHEL VM install. OpenShift operator fields stay hidden.'
+        : platformInstallMode(data, 'rhbk') === 'openshift'
+          ? 'OpenShift is selected, so RHBK uses the OpenShift install. The standalone VM option stays hidden.'
+          : 'Select which RHBK (Keycloak) resources to configure. Choose Standalone for the RHEL VM zip install (ADO | Install RHBK Standalone) — that hides the OpenShift operator fields. Wire inventory host keycloak-ado / 192.168.0.64 and a machine credential.')}
       {showOpenshiftInstall && (
         <Grid hasGutter>
           {renderDerivedRouteHostnameField('rhbk')}
@@ -8465,7 +8740,7 @@ echo $TOKEN
         <FormGroup
           label="Vault Password"
           isRequired
-          helperText="Used for Ansible Vault encrypt and written to .vault_pass in the bootstrap repo (same value as aap.vault_password in preflight JSON)."
+          helperText="Required for every bootstrap run. Used for Ansible Vault encrypt and written to .vault_pass in the bootstrap repo (same value as aap.vault_password in preflight JSON)."
         >
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <TextInput
@@ -8649,7 +8924,7 @@ echo $TOKEN
                 </GridItem>
 
                 <GridItem span={8}>
-                  <FormGroup label="Project Git Source URL">
+                  <FormGroup label="Project Git Source URL" isRequired>
                     <TextInput value={data.aap.git_url} onChange={(_, v) => set('aap.git_url', v)} />
                   </FormGroup>
 
@@ -8910,6 +9185,8 @@ echo $TOKEN
     reqDirs: 'Logical volumes to create for Satellite data. Each row needs mount_point, lv_name, and lv_size.',
     serviceAccountUsername: 'Satellite service account username for API and inventory operations. Example: svc_aap_satellite.',
     serviceAccountPassword: 'Password for the Satellite service account. Stored in generated vault files.',
+    clientApiUsername: 'Satellite API username used to generate the host registration command (admin or a service account with register permission). Example: admin.',
+    clientApiPassword: 'Password for the Satellite API username. Required for Client Satellite Registration when Satellite Server Install is not selected. Stored in generated vault files.',
     adminPassword: 'Optional Satellite admin password for bootstrap tasks that still require admin access. Stored in generated vault files.',
     dynamicInventory: 'Creates an AAP inventory source that reads hosts from Satellite 6 and attaches it to the organization RHEL inventory, such as ADO-RHEL-Inventory.',
     credentialName: 'AAP credential name for the Satellite service account. Example: ADO Satellite Service Account.',
@@ -9069,23 +9346,52 @@ echo $TOKEN
       ? activeSatelliteDetailTab
       : (satelliteTabs[0] || 'satellite_server_install');
 
-    const renderClientFields = () => (
-      <Grid hasGutter>
-        {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
-        {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
-        {renderTextField('Activation Key', 'component_config.satellite.activation_key', 'text', satelliteHelp.activationKey)}
-        <GridItem span={6}>
-          <FormGroup label={labelWithHelp('TLS Certificate Verification', satelliteHelp.skipTls)}>
-            <Checkbox
-              id="satellite-skip-tls-verify-client"
-              label="Skip TLS certificate verification for self-signed certificates"
-              isChecked={!sat.validate_certs}
-              onChange={(_, v) => set('component_config.satellite.validate_certs', !v)}
-            />
-          </FormGroup>
-        </GridItem>
-      </Grid>
-    );
+    const renderClientFields = () => {
+      // Client-only: collect API host/org/creds here. When Server Install is also
+      // selected, inherit hostname/org/API auth from that tab (and admin password).
+      const serverSelected = selected.includes('satellite_server_install');
+      return (
+        <Grid hasGutter>
+          {!serverSelected && (
+            <>
+              {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
+              {renderTextField('Organization', 'component_config.satellite.organization', 'text', satelliteHelp.organization)}
+              {renderTextField(
+                'API Username',
+                'component_config.satellite.service_account_username',
+                'text',
+                satelliteHelp.clientApiUsername
+              )}
+              {renderTextField(
+                'API Password',
+                'component_config.satellite.service_account_password',
+                showSatelliteSecrets ? 'text' : 'password',
+                satelliteHelp.clientApiPassword
+              )}
+            </>
+          )}
+          {serverSelected && (
+            <GridItem span={12}>
+              <p style={{ color: mutedTextColor, marginTop: 0 }}>
+                Hostname, organization, and API credentials are taken from the
+                {' '}<strong>Satellite Server Install</strong> tab (admin password is used when no service account is set).
+              </p>
+            </GridItem>
+          )}
+          {renderTextField('Activation Key', 'component_config.satellite.activation_key', 'text', satelliteHelp.activationKey)}
+          <GridItem span={6}>
+            <FormGroup label={labelWithHelp('TLS Certificate Verification', satelliteHelp.skipTls)}>
+              <Checkbox
+                id="satellite-skip-tls-verify-client"
+                label="Skip TLS certificate verification for self-signed certificates"
+                isChecked={!sat.validate_certs}
+                onChange={(_, v) => set('component_config.satellite.validate_certs', !v)}
+              />
+            </FormGroup>
+          </GridItem>
+        </Grid>
+      );
+    };
 
     const renderServerFields = ({ includeTls = true } = {}) => (
       <Grid hasGutter>
@@ -9585,12 +9891,19 @@ echo $TOKEN
           applyRhbkTlsDefaultOnCertManagerToggle(copy);
         }
       }
+      syncPlatformInstallOptions(copy);
       return copy;
     });
   };
 
   const renderComponentOptions = (component, title, description) => {
-    const options = componentOptionDefaults[component] || [];
+    const mode = platformInstallMode(data, component);
+    const options = visiblePlatformOptions(
+      component,
+      mode,
+      componentOptionDefaults[component] || []
+    );
+    if ((componentOptionDefaults[component] || []).length === 0) return null;
     if (options.length === 0) return null;
 
     const selected = data.component_options?.[component] || [];
@@ -9849,19 +10162,42 @@ echo $TOKEN
               )
             ) : (
               <>
-                {renderTextField('Hostname', 'component_config.patching.hostname', 'text', patchingHelp.hostname)}
                 <GridItem span={12}>
-                  <FormGroup label={labelWithHelp('Additional Hosts', patchingHelp.hosts)}>
+                  <FormGroup label={labelWithHelp('Hosts', patchingHelp.hosts)}>
                     <textarea
-                      value={hostsTextareaValue(patchingConfig.hosts)}
-                      onChange={e => hostsTextareaOnChange(
-                        'component_config.patching.hosts',
-                        e.target.value
-                      )}
-                      onBlur={e => hostsTextareaOnBlur(
-                        'component_config.patching.hosts',
-                        e.target.value
-                      )}
+                      value={hostsTextareaValue((() => {
+                        const listed = Array.isArray(patchingConfig.hosts) ? patchingConfig.hosts : [];
+                        const primary = String(patchingConfig.hostname || '').trim();
+                        if (primary && !listed.map(item => String(item || '').trim()).includes(primary)) {
+                          return [primary, ...listed];
+                        }
+                        return listed;
+                      })())}
+                      onChange={e => {
+                        const raw = e.target.value;
+                        setData(prev => {
+                          const copy = JSON.parse(JSON.stringify(prev));
+                          if (!copy.component_config) copy.component_config = {};
+                          if (!copy.component_config.patching) copy.component_config.patching = {};
+                          copy.component_config.patching.hosts = String(raw || '').split('\n');
+                          copy.component_config.patching.hostname = '';
+                          return copy;
+                        });
+                      }}
+                      onBlur={e => {
+                        const raw = e.target.value;
+                        setData(prev => {
+                          const copy = JSON.parse(JSON.stringify(prev));
+                          if (!copy.component_config) copy.component_config = {};
+                          if (!copy.component_config.patching) copy.component_config.patching = {};
+                          copy.component_config.patching.hosts = String(raw || '')
+                            .split('\n')
+                            .map(line => line.trim())
+                            .filter(Boolean);
+                          copy.component_config.patching.hostname = '';
+                          return copy;
+                        });
+                      }}
                       rows={4}
                       spellCheck="false"
                       placeholder={'rhel02.example.com\nrhel03.example.com'}
@@ -11637,7 +11973,13 @@ echo $TOKEN
     );
   };
 
-  const renderAcmConfig = () => (
+  const renderAcmConfig = () => {
+    const ocpApps = data.component_apps?.openshift || [];
+    const otherApps = ocpApps.filter((a) => a !== 'acm');
+    const policyOn = !!data.component_config?.acm?.policy_enabled;
+    const obsOn = !!data.component_config?.acm?.observability_enabled;
+    const adoResources = policyOn || obsOn || otherApps.length > 0;
+    return (
     <>
       <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
         Installs the ACM operator and MultiClusterHub into namespace{' '}
@@ -11645,6 +11987,29 @@ echo $TOKEN
         needs S3-compatible object storage (lab MinIO works). Fleet Virtualization
         Overview stays empty until Observability is enabled.
       </p>
+      {adoResources && (
+        <p
+          style={{
+            color: mutedTextColor,
+            marginBottom: '12px',
+            padding: '10px 12px',
+            border: `1px solid ${borderColor}`,
+            borderRadius: '4px',
+            background: fieldBg
+          }}
+        >
+          <strong>ADO ACM prep:</strong> Deploy ACM will detect leftover hub
+          state (stuck Uninstalling MultiClusterHub/MCE, stale validating
+          webhooks
+          {obsOn ? ', prior MultiClusterObservability' : ''}
+          ) and clean them before applying ADO ACM resources
+          {policyOn ? ' (policies)' : ''}
+          {obsOn ? ' (observability)' : ''}
+          {otherApps.length > 0
+            ? `. Stale ACM webhooks also block other selected OpenShift apps (${otherApps.slice(0, 6).join(', ')}${otherApps.length > 6 ? ', …' : ''}).`
+            : '.'}
+        </p>
+      )}
       <Grid hasGutter>
         {renderTextField(
           'Operator Channel',
@@ -11717,7 +12082,8 @@ echo $TOKEN
         </>}
       </Grid>
     </>
-  );
+    );
+  };
 
   const renderMtvConfig = () => (
     <>
@@ -12700,6 +13066,11 @@ echo $TOKEN
     if (String(step).startsWith('local-')) {
       setActiveMainTab('core');
       setAapOpen(true);
+      if (step === 'local-env') setOpenWizardStep('core');
+      if (step === 'local-components') openWizard(2, 'components');
+      if (step === 'local-bootstrap' || step === 'local-playbooks' || step === 'local-mode' || step === 'local-options') {
+        openWizard(4, 'aap');
+      }
       if (step === 'local-playbooks') setComponentRunnerOpen(true);
       window.setTimeout(() => {
         const map = {
@@ -12726,6 +13097,7 @@ echo $TOKEN
 
     setActiveMainTab('core');
     setAapOpen(true);
+    openWizard(4, 'aap');
     setActiveAapConfigTab('install');
     window.setTimeout(() => {
       const keys = { connection: 'assistant-aap-connection', namespace: 'component_config.aap.namespace', version: 'assistant-aap-version', storage: 'component_config.aap.storage-field' };
@@ -13708,11 +14080,21 @@ echo $TOKEN
       {renderComponentOptions(
         'gitlab',
         'GitLab Options',
-        'Choose Standalone for the RHEL Omnibus install (ADO | Install GitLab Standalone) — inventory host gitlab-ado / 192.168.0.65. Standalone hides OpenShift operator fields.'
+        platformInstallMode(data, 'gitlab') === 'standalone'
+          ? 'Standalone / RHEL is selected, so GitLab uses the RHEL Omnibus install. OpenShift operator fields stay hidden.'
+          : platformInstallMode(data, 'gitlab') === 'openshift'
+            ? 'OpenShift is selected, so GitLab uses the OpenShift install. The standalone VM option stays hidden.'
+            : 'Choose Standalone for the RHEL Omnibus install (ADO | Install GitLab Standalone) — inventory host gitlab-ado / 192.168.0.65. Standalone hides OpenShift operator fields.'
       )}
       {!showStandalone && (
       <Grid hasGutter>
         {renderDerivedRouteHostnameField('gitlab')}
+        {renderTextField(
+          'Root password',
+          'component_config.gitlab.root_password',
+          'password',
+          'Initial GitLab root (web UI) password written to the gitlab-root-password-secret and vault_gitlab.yml.'
+        )}
         {renderStorageClassField('Storage Class', 'component_config.gitlab.storage', defaultComponentHelp.storage)}
         {renderTextField('Replicas', 'component_config.gitlab.replicas', 'number')}
         <GridItem span={12}>
@@ -14191,15 +14573,109 @@ ${vaultYaml}
     return tab.charAt(0).toUpperCase() + tab.slice(1);
   };
 
+  const renderWizardRequired = stepId => {
+    const missing = new Set(wizardRequirements(data)[stepId] || []);
+    if (stepId === 'components') {
+      return (
+        <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '8px' }}>
+          Optional. A red asterisk marks a field that is required for an option you turned on.
+        </div>
+      );
+    }
+    const labels = stepId === 'core'
+      ? ['Environment Type', 'Base Infrastructure Domain', 'at least one profile or component']
+      : stepId === 'git'
+        ? ['Git URL']
+        : (data.aap?.enabled === false
+          ? ['Vault password']
+          : ['Vault password', 'AAP Hostname URL', 'Organization Name', 'Admin password or OAuth token', 'Galaxy API token']);
+    return (
+      <div style={{ fontSize: '13px', marginTop: '8px' }}>
+        <strong>Required: </strong>
+        {labels.map(label => {
+          const need = missing.has(label);
+          if (label === 'Galaxy API token' && !need && data.aap?.galaxy_setup_enabled !== true) return null;
+          return (
+            <span key={label} style={{ color: need ? '#c9190b' : mutedTextColor, marginRight: '12px' }}>
+              {label}{need ? ' (missing)' : ''}
+            </span>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderWizardToggle = (stepNumber, title, stepId, summary) => {
+    const unlocked = stepNumber === 1 || wizardUnlocked >= stepNumber;
+    const open = Boolean(expandedSteps[stepId]) && unlocked;
+    const missing = wizardRequirements(data)[stepId] || [];
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          if (!unlocked) return;
+          setOpenWizardStep(open ? '' : stepId);
+          setExpandedSteps(prev => {
+            if (formWasCompleteRef.current) return { ...prev, [stepId]: !open };
+            if (open) return { core: false, components: false, git: false, aap: false };
+            return { core: false, components: false, git: false, aap: false, [stepId]: true };
+          });
+        }}
+        aria-expanded={open}
+        style={{
+          border: 'none',
+          background: 'transparent',
+          padding: 0,
+          fontWeight: 700,
+          cursor: unlocked ? 'pointer' : 'default',
+          fontSize: '20px',
+          color: unlocked ? textColor : mutedTextColor,
+          textAlign: 'left'
+        }}
+      >
+        {open ? '−' : '+'}
+        {' '}
+        Step {stepNumber}. {title}
+        {!unlocked && (
+          <span style={{ fontWeight: 400, fontSize: '14px', color: mutedTextColor }}>
+            {' '}
+            — finish step {stepNumber - 1} first
+          </span>
+        )}
+        {unlocked && !open && missing.length > 0 && (
+          <span style={{ fontWeight: 600, fontSize: '14px', color: '#c9190b' }}>
+            {' '}
+            — Needs {missing.join(', ')}
+          </span>
+        )}
+        {unlocked && !open && missing.length === 0 && summary && (
+          <span style={{ fontWeight: 400, fontSize: '14px', color: mutedTextColor }}>
+            {' '}
+            — {summary}
+          </span>
+        )}
+      </button>
+    );
+  };
+
   const renderActiveConfigPanel = () => {
     const visibleTabs = getVisibleConfigTabs();
     const selectedTab = visibleTabs.includes(activeConfigTab) ? activeConfigTab : (visibleTabs[0] || 'all');
+    const componentOpen = Boolean(expandedSteps.components) && wizardUnlocked >= 2;
 
     return (
       <>
         <Card style={cardStyle} id="assistant-component-config">
           <CardBody>
-            <Title headingLevel="h2">Component Configuration</Title>
+            {renderWizardToggle(
+              2,
+              'Component Configuration',
+              'components',
+              visibleTabs.length ? `${visibleTabs.length} component tab${visibleTabs.length === 1 ? '' : 's'}` : 'Choose components in step 1'
+            )}
+            {componentOpen && (
+            <>
+            {renderWizardRequired('components')}
             <p style={{ color: mutedTextColor, marginTop: '8px' }}>
               Select a tab to configure available options for that component or group.
             </p>
@@ -14230,6 +14706,13 @@ ${vaultYaml}
             <div style={{ marginTop: '16px' }}>
               {renderConfigForm(selectedTab)}
             </div>
+            <div style={{ marginTop: '16px' }}>
+              <Button variant="primary" onClick={() => openWizard(3, 'git')}>
+                Continue to Git Configuration
+              </Button>
+            </div>
+            </>
+            )}
           </CardBody>
         </Card>
         <br />
@@ -14749,7 +15232,7 @@ ${vaultYaml}
                     Automation Development Office
                   </div>
                   <div style={{ color: '#d2d2d2', fontSize: '13px' }}>
-                    Ansible Automation Pre-Flight
+                    Ansible Automation Pre-Flight INIT
                   </div>
                 </div>
               </div>
@@ -14929,7 +15412,7 @@ ${vaultYaml}
 
       <PageSection style={{ ...sectionStyle, paddingTop: '20px', paddingBottom: '20px' }}>
         <div style={contentShellStyle}>
-          <Title headingLevel="h1">Ansible Automation Pre-Flight Questionnaire</Title>
+          <Title headingLevel="h1">Ansible Automation Pre-Flight INIT</Title>
           <p style={{ marginTop: '8px', color: mutedTextColor }}>
             Generate and run component-based bootstrap automation inside a local Podman container.
           </p>
@@ -14954,7 +15437,14 @@ ${vaultYaml}
                 <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
                 <div id="assistant-core-environment">
-                  <Title headingLevel="h2">Core Environment Information</Title>
+                  {renderWizardToggle(
+                    1,
+                    'Core Environment',
+                    'core',
+                    coreStepReady
+                      ? `${data.environment} · ${data.domain} · ${data.components.length} selected`
+                      : 'Environment, domain, and at least one component'
+                  )}
                   {importStatus && (
                     <div style={{ color: importStatus.startsWith('Import failed') ? '#c9190b' : mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
                       {importStatus}
@@ -14975,6 +15465,9 @@ ${vaultYaml}
                 </div>
               </div>
 
+              {expandedSteps.core && (
+              <>
+              {renderWizardRequired('core')}
               <Grid hasGutter>
                 <GridItem span={6}>
                   <FormGroup label="Environment Type" isRequired>
@@ -15099,6 +15592,16 @@ ${vaultYaml}
                       getApps={getGroupApps}
                       onTarget={toggleProfileTarget}
                       onApps={applyProfileApps}
+                      onMode={mode => {
+                        setData(prev => {
+                          const copy = JSON.parse(JSON.stringify(prev));
+                          copy.deployment_mode = mode === 'connected' ? 'connected' : 'disconnected';
+                          if (copy.deployment_mode === 'disconnected') {
+                            disablePublicGalaxyCredential(copy.aap);
+                          }
+                          return copy;
+                        });
+                      }}
                     />
                   </FormGroup>
                 </GridItem>
@@ -15116,6 +15619,8 @@ ${vaultYaml}
                     </div>
                 </GridItem>
               </Grid>
+              </>
+              )}
                 </>
               )}
 
@@ -15135,8 +15640,23 @@ ${vaultYaml}
 
           <Card style={cardStyle} id="git-configuration">
             <CardBody>
-              <Title headingLevel="h2">Git Configuration</Title>
-              {renderGitConfigurationContent()}
+              {renderWizardToggle(
+                3,
+                'Git Configuration',
+                'git',
+                String(data.aap?.git_url || '').trim() ? 'Project Git source set' : 'Project Git source'
+              )}
+              {expandedSteps.git && wizardUnlocked >= 3 && (
+                <>
+                  {renderWizardRequired('git')}
+                  {renderGitConfigurationContent()}
+                  <div style={{ marginTop: '16px' }}>
+                    <Button variant="primary" onClick={() => openWizard(4, 'aap')}>
+                      Continue to Ansible Automation Platform
+                    </Button>
+                  </div>
+                </>
+              )}
             </CardBody>
           </Card>
 
@@ -15144,10 +15664,15 @@ ${vaultYaml}
 
           <Card style={cardStyle} id="aap-configuration">
             <CardBody>
-              <button type="button" onClick={() => setAapOpen(!aapOpen)}
-                style={{ border: 'none', background: 'transparent', padding: 0, fontWeight: 700, cursor: 'pointer', fontSize: '20px', color: textColor }}>
-                {aapOpen ? '−' : '+'} Ansible Automation Platform Configuration
-              </button>
+              {renderWizardToggle(
+                4,
+                'Ansible Automation Platform Configuration',
+                'aap',
+                data.aap.enabled ? 'Using AAP' : 'Not using AAP'
+              )}
+              {expandedSteps.aap && wizardUnlocked >= 4 && (
+              <>
+              {renderWizardRequired('aap')}
 
               <br /><br />
 
@@ -15164,6 +15689,32 @@ ${vaultYaml}
                     no second survey. Preview commands appear in the black
                     window; live output uses the ADO Bootstrap Console ticker.
                   </div>
+                  <FormGroup
+                    label="Vault Password"
+                    isRequired
+                    helperText="Required for every bootstrap run (Using AAP or not). Written to .vault_pass and aap.vault_password in ado-preflight-<env>.json."
+                  >
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', maxWidth: '480px' }}>
+                      <TextInput
+                        type={showVaultPassword ? 'text' : 'password'}
+                        value={data.aap.vault_password}
+                        onChange={(_, v) => set('aap.vault_password', v)}
+                        placeholder="Required — no silent redhat123 default"
+                      />
+                      <Button
+                        variant="secondary"
+                        onClick={() => toggleSecretRevealed('vault', setShowVaultPassword, showVaultPassword)}
+                      >
+                        {showVaultPassword ? 'Hide' : 'Show'}
+                      </Button>
+                    </div>
+                    {!String(data.aap.vault_password || '').trim() && (
+                      <div style={{ color: '#c9190b', fontSize: '12px', marginTop: '4px' }}>
+                        Required even when Not using AAP — encrypts generated vault files.
+                      </div>
+                    )}
+                  </FormGroup>
+                  <br />
                   <Checkbox
                     id="open-playbook-runner-after-bootstrap"
                     label="After bootstrap succeeds, open the playbook runner automatically"
@@ -15759,7 +16310,7 @@ ${vaultYaml}
                 </>
               )}
 
-              {aapOpen && (
+              {expandedSteps.aap && wizardUnlocked >= 4 && (
                 <>
                   <br />
                   <Tabs activeKey={activeAapConfigTab} onSelect={(_, key) => setActiveAapConfigTab(key)}>
@@ -15851,12 +16402,12 @@ ${vaultYaml}
                   {activeAapConfigTab === 'general' && (
                     <Grid hasGutter>
                       <GridItem span={6}>
-                        <FormGroup label="AAP Hostname URL">
+                        <FormGroup label="AAP Hostname URL" isRequired>
                           <TextInput value={data.aap.hostname} onChange={(_, v) => setAapHostname(v)} />
                         </FormGroup>
                       </GridItem>
                       <GridItem span={6}><FormGroup label="AAP Version"><select value={data.aap.version} onChange={e => setAapVersion(e.target.value)} style={{ width: '100%', padding: '8px' }}>{AAP_VERSION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></FormGroup></GridItem>
-                      <GridItem span={6}><FormGroup label="Organization Name"><TextInput value={data.aap.organization} onChange={(_, v) => setAapOrganization(v)} /></FormGroup></GridItem>
+                      <GridItem span={6}><FormGroup label="Organization Name" isRequired><TextInput value={data.aap.organization} onChange={(_, v) => setAapOrganization(v)} /></FormGroup></GridItem>
                       <GridItem span={6}><FormGroup label="Inventory Name"><TextInput value={data.aap.inventory} onChange={(_, v) => set('aap.inventory', v)} /></FormGroup></GridItem>
                       <GridItem span={6}><FormGroup label="Project Name"><TextInput value={data.aap.project} onChange={(_, v) => set('aap.project', v)} /></FormGroup></GridItem>
                       <GridItem span={6}>
@@ -15887,7 +16438,11 @@ ${vaultYaml}
                         </FormGroup>
                       </GridItem>
                       <GridItem span={6}>
-                        <FormGroup label="OAuth Token">
+                        <FormGroup
+                          label="OAuth Token"
+                          isRequired={!String(data.aap.admin_password || '').trim()}
+                          helperText="Required when Admin password is empty. One of the two is enough."
+                        >
                           <div style={{ display: 'flex', gap: '8px' }}>
                             <TextInput type={showAapOauthToken ? 'text' : 'password'} value={data.aap.oauth_token} onChange={(_, v) => set('aap.oauth_token', v)} />
                             <Button variant="secondary" onClick={() => toggleSecretRevealed('aapOauth', setShowAapOauthToken, showAapOauthToken)}>{showAapOauthToken ? 'Hide' : 'Show'}</Button>
@@ -15897,7 +16452,8 @@ ${vaultYaml}
                       <GridItem span={6}>
                         <FormGroup
                           label="Hub / Galaxy API token"
-                          helperText="Optional Hub User Access token (Authorization: Token). Needed for Hub collection/namespace upload. Not required to create or attach Controller Galaxy credentials — use a per-credential token on the Galaxy tab when a source needs one."
+                          isRequired={data.aap.galaxy_setup_enabled === true && !String(data.aap.galaxy_hub_token || '').trim()}
+                          helperText="Required when Galaxy setup is on, unless each enabled Galaxy credential has its own token. One of those is enough."
                         >
                           <div style={{ display: 'flex', gap: '8px' }}>
                             <TextInput
@@ -15915,7 +16471,11 @@ ${vaultYaml}
 
                       <GridItem span={6}><FormGroup label="Admin Username"><TextInput value={data.aap.admin_username} onChange={(_, v) => set('aap.admin_username', v)} /></FormGroup></GridItem>
                       <GridItem span={6}>
-                        <FormGroup label="Admin Password">
+                        <FormGroup
+                          label="Admin Password"
+                          isRequired={!String(data.aap.oauth_token || '').trim()}
+                          helperText="Required when OAuth token is empty. One of the two is enough."
+                        >
                           <div style={{ display: 'flex', gap: '8px' }}>
                             <TextInput
                               type={showAapAdminPassword ? 'text' : 'password'}
@@ -16633,9 +17193,9 @@ ${vaultYaml}
                           )}
                           <GridItem span={12}>
                             <p style={{ color: mutedTextColor, margin: '0 0 8px', fontSize: '13px' }}>
-                              Shared Hub token on the <strong>General</strong> tab is optional for
-                              creating these credentials. Fill a per-credential token below only when
-                              that source needs one.
+                              A Galaxy API token is required before bootstrap can run. Set it once on
+                              General → Hub / Galaxy API token, or put a token on each enabled
+                              credential below. One of those is enough.
                             </p>
                           </GridItem>
                           <GridItem span={12}>
@@ -16699,6 +17259,10 @@ ${vaultYaml}
                                     const orderValue = credential.enabled === false
                                       ? ''
                                       : (enabledRank > 0 ? enabledRank : 1);
+                                    const publicGalaxy = credential.id === 'galaxy'
+                                      || credential.name === 'Ansible Galaxy';
+                                    const galaxyBlocked = publicGalaxy
+                                      && data.deployment_mode !== 'connected';
 
                                     return (
                                       <div
@@ -16716,8 +17280,15 @@ ${vaultYaml}
                                               <Checkbox
                                                 id={`aap-galaxy-cred-enabled-${index}`}
                                                 label={`Create/update ${credential.name || 'credential'}`}
-                                                isChecked={credential.enabled !== false}
-                                                onChange={(_, v) => set(`aap.galaxy_credentials.${index}.enabled`, v)}
+                                                isChecked={!galaxyBlocked && credential.enabled !== false}
+                                                isDisabled={galaxyBlocked}
+                                                description={galaxyBlocked
+                                                  ? 'Disconnected mode leaves Ansible Galaxy unchecked. Switch Deployment Mode to Connected to use galaxy.ansible.com.'
+                                                  : undefined}
+                                                onChange={(_, v) => {
+                                                  if (galaxyBlocked) return;
+                                                  set(`aap.galaxy_credentials.${index}.enabled`, v);
+                                                }}
                                               />
                                               <FormGroup
                                                 label="Order"
@@ -17584,6 +18155,8 @@ ${vaultYaml}
                   )}
                 </>
               )}
+              </>
+              )}
             </CardBody>
           </Card>
 
@@ -17607,6 +18180,15 @@ ${vaultYaml}
                     style={{ borderRadius: '18px', fontWeight: 600 }}
                   >
                     ⊕ Run Bootstrap
+                  </Button>
+
+                  <Button
+                    id="assistant-workflow-preview"
+                    variant="secondary"
+                    onClick={() => setWorkflowPreviewOpen(true)}
+                    style={{ borderRadius: '18px', fontWeight: 600 }}
+                  >
+                    Workflow preview
                   </Button>
 
                   <select
@@ -17886,6 +18468,23 @@ ${vaultYaml}
         </div>
       </PageSection>
     </Page>
+    <ControllerWorkflowPreview
+      isOpen={workflowPreviewOpen}
+      onClose={() => setWorkflowPreviewOpen(false)}
+      selectedComponents={Array.isArray(data.components) ? data.components : []}
+      usingAap={data.aap?.enabled !== false}
+      environment={data.environment || 'prod'}
+      gitAutoPush={data.git?.auto_push === true}
+      gitUrl={data.aap?.git_url || ''}
+      gitBranch={data.aap?.git_branch || 'main'}
+      aapProject={data.aap?.project || ''}
+      aapOrganization={data.aap?.organization || ''}
+      hubPublishAdo={data.aap?.hub_publish_ado_collection === true}
+      hubPublishPreflight={data.aap?.hub_publish_preflight_collections === true}
+      hubPushEe={data.aap?.hub_push_ee === true}
+      hubOnly={data.aap?.standalone_run === true || data.aap?.hub_update_collection_only === true}
+      varsOnly={data.git?.vars_only === true}
+    />
     </>
   );
 }

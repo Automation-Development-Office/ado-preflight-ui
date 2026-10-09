@@ -904,6 +904,25 @@ The modal shows:
 
 This helps confirm which UI image and collection set you are actually running.
 
+### Baking and installing dependency collections
+
+Drop offline tarballs under `collections/` (for example
+`community-crypto-*.tar.gz`, `infra-aap_configuration-4.9.0.tar.gz`,
+`ansible-eda-*.tar.gz`). Bootstrap installs the **newest** matching tarball for
+each prefix into `/workspace/collections`, including every `infra.ado`
+`galaxy.yml` dependency (crypto, posix, amazon.aws, grafana, freeipa, …) plus
+`ansible.eda` (required by newer `infra.aap_configuration`).
+
+| Goal | Command |
+|------|---------|
+| Rebuild image with baked tarballs | `./restart_pod.sh` |
+| Live-mount host `collections/` into the pod (no bake wait) | `ADO_MOUNT_COLLECTIONS=1 ./restart_pod.sh` |
+| Install the same set on the host for local CLI | `./scripts/install-collections-local.sh` |
+| Same, and rebuild the pod | `ADO_INSTALL_COLLECTIONS_LOCAL=1 ./restart_pod.sh` |
+
+`restart_pod.sh` hashes **all** `collections/*.tar.gz` into `ADO_COLLECTIONS_SHA`
+so replacing crypto / aap_configuration / eda tarballs busts the image layer.
+
 ## ❔ Field Help
 
 Most component form fields include a `?` marker. Click the marker to open an

@@ -41,9 +41,9 @@ const targets = {
 };
 const signature = (apps, options = []) => `${[...apps].sort().join(',')}|${[...options].sort().join(',')}`;
 
-export default function BootstrapProfiles({ data, getApps, onTarget, onApps, isDark, borderColor, mutedTextColor, fieldBg, fieldColor }) {
+export default function BootstrapProfiles({ data, getApps, onTarget, onApps, onMode, isDark, borderColor, mutedTextColor, fieldBg, fieldColor }) {
   const [chosen, setChosen] = useState({});
-  const [mode, setMode] = useState('disconnected');
+  const mode = data?.deployment_mode === 'connected' ? 'connected' : 'disconnected';
   const all = data.components.includes('all');
   const active = Object.keys(targets).filter(group => all || data.components.includes(group));
   const helpStyle = { color: mutedTextColor, fontSize: '13px', marginBottom: '10px' };
@@ -61,7 +61,7 @@ export default function BootstrapProfiles({ data, getApps, onTarget, onApps, isD
       <FormGroup label="Deployment Mode">
         <div style={helpStyle}>Choose your environment’s connectivity.</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px 24px' }}>
-          {['disconnected', 'connected'].map(value => <Checkbox key={value} id={`profile-mode-${value}`} label={value === 'connected' ? 'Connected' : 'Disconnected'} isChecked={mode === value} onChange={() => setMode(value)} />)}
+          {['disconnected', 'connected'].map(value => <Checkbox key={value} id={`profile-mode-${value}`} label={value === 'connected' ? 'Connected' : 'Disconnected'} isChecked={mode === value} onChange={() => onMode?.(value)} />)}
         </div>
       </FormGroup>
     </GridItem>

@@ -1821,6 +1821,7 @@ function defaultComponentConfig(component) {
   if (component === 'gitlab') {
     Object.assign(config, {
       hostname: '',
+      root_password: 'redhat123',
       database_provision: true,
       postgres_storage: '',
       postgres_storage_size: '10Gi',
@@ -2425,6 +2426,7 @@ function normalizePreflightPayload(input) {
         'redhat.rhel_idm',
         'redhat.rhel_system_roles',
         'community.general',
+        'community.crypto',
         'community.grafana',
         'amazon.aws',
         'community.hashi_vault',
@@ -2467,6 +2469,13 @@ function normalizePreflightPayload(input) {
     }
     if (Array.isArray(data.hub.publish_preflight_collection_names)) {
       data.aap.hub_publish_preflight_collection_names = data.hub.publish_preflight_collection_names;
+    }
+    if (
+      Array.isArray(data.aap.hub_publish_preflight_collection_names)
+      && data.aap.hub_publish_preflight_collection_names.length > 0
+      && !data.aap.hub_publish_preflight_collection_names.includes('community.crypto')
+    ) {
+      data.aap.hub_publish_preflight_collection_names.push('community.crypto');
     }
     if (data.hub.force_ado_collection_update !== undefined) {
       data.aap.hub_force_ado_collection_update = data.hub.force_ado_collection_update === true;
@@ -6735,6 +6744,28 @@ INSTALL_AAP="${installAapDuringBootstrap ? 'true' : 'false'}"
 rm -rf /workspace/collections
 mkdir -p /workspace/collections
 
+# Install the highest version matching PREFIX-*.tar.gz (e.g. infra-aap_configuration).
+# required=1 → exit 1 when missing; required=0 → skip with a note.
+install_latest_collection() {
+  local prefix="$1"
+  local required="\${2:-0}"
+  local label="\${3:-$prefix}"
+  local archive=""
+  archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name "\${prefix}-*.tar.gz" | sort -V | tail -n 1)"
+  echo ""
+  echo "=== Installing \${label} ==="
+  if [ -z "$archive" ]; then
+    if [ "$required" = "1" ]; then
+      echo "ERROR: No \${prefix}-*.tar.gz in $COLLECTION_DIR" >&2
+      exit 1
+    fi
+    echo "\${prefix}-*.tar.gz not found; skipping"
+    return 0
+  fi
+  echo "Installing $archive"
+  ansible-galaxy collection install "$archive" -p /workspace/collections --force --no-deps
+}
+
 echo ""
 echo "=== Available Collection Tarballs ==="
 ls -l "$COLLECTION_DIR" || true
@@ -6769,91 +6800,46 @@ else
   fi
 fi
 
-echo ""
-echo "=== Installing ansible.controller Collection ==="
-ansible-galaxy collection install "$COLLECTION_DIR"/ansible-controller-*.tar.gz -p /workspace/collections --force
-
-echo ""
-echo "=== Installing awx.awx Collection ==="
-if ls "$COLLECTION_DIR"/awx-awx-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install "$COLLECTION_DIR"/awx-awx-*.tar.gz -p /workspace/collections --force --no-deps
+# Contoller / Hub / platform (AAP apply path)
+install_latest_collection ansible-controller 1 "ansible.controller"
+install_latest_collection awx-awx 0 "awx.awx"
+install_latest_collection infra-controller_configuration 1 "infra.controller_configuration"
+install_latest_collection infra-aap_configuration 1 "infra.aap_configuration"
+if [ "$INSTALL_AAP" = "true" ]; then
+  install_latest_collection infra-aap_utilities 1 "infra.aap_utilities"
 else
-  echo "awx-awx tarball not found; skipping"
+  install_latest_collection infra-aap_utilities 0 "infra.aap_utilities"
 fi
-
-echo ""
-echo "=== Installing infra.controller_configuration Collection ==="
-ansible-galaxy collection install "$COLLECTION_DIR"/infra-controller_configuration-*.tar.gz -p /workspace/collections --force --no-deps
-
-echo ""
-echo "=== Installing infra.aap_configuration Collection ==="
-ansible-galaxy collection install "$COLLECTION_DIR"/infra-aap_configuration-*.tar.gz -p /workspace/collections --force --no-deps
-
-echo ""
-echo "=== Installing infra.aap_utilities Collection ==="
-if ls "$COLLECTION_DIR"/infra-aap_utilities-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install "$COLLECTION_DIR"/infra-aap_utilities-*.tar.gz -p /workspace/collections --force --no-deps
+if [ "$GATEWAY_AUTH" = "true" ]; then
+  install_latest_collection ansible-platform 1 "ansible.platform"
 else
-  if [ "$INSTALL_AAP" = "true" ]; then
-    echo "ERROR: infra-aap_utilities tarball required for Install AAP on OpenShift but not found in $COLLECTION_DIR." >&2
-    exit 1
-  fi
-  echo "infra-aap_utilities tarball not found; skipping"
+  install_latest_collection ansible-platform 0 "ansible.platform"
 fi
+install_latest_collection ansible-hub 0 "ansible.hub"
+install_latest_collection ansible-eda 1 "ansible.eda"
 
-echo ""
-echo "=== Installing ansible.platform Collection ==="
-if ls "$COLLECTION_DIR"/ansible-platform-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install "$COLLECTION_DIR"/ansible-platform-*.tar.gz -p /workspace/collections --force --no-deps
-else
-  if [ "$GATEWAY_AUTH" = "true" ]; then
-    echo "ERROR: ansible-platform tarball required for Add authentication but not found in $COLLECTION_DIR." >&2
-    exit 1
-  fi
-  echo "ansible-platform tarball not found; skipping"
-fi
+# OpenShift / k8s (always — bootstrap and app installs need these)
+install_latest_collection kubernetes-core 1 "kubernetes.core"
+install_latest_collection redhat-openshift 1 "redhat.openshift"
+install_latest_collection community-kubernetes 0 "community.kubernetes"
 
-echo ""
-echo "=== Installing ansible.hub Collection ==="
-if ls "$COLLECTION_DIR"/ansible-hub-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install "$COLLECTION_DIR"/ansible-hub-*.tar.gz -p /workspace/collections --force --no-deps
-else
-  echo "ansible-hub tarball not found; skipping"
-fi
+# infra.ado galaxy.yml dependencies (must be present for role imports)
+install_latest_collection community-crypto 1 "community.crypto"
+install_latest_collection community-general 0 "community.general"
+install_latest_collection community-grafana 0 "community.grafana"
+install_latest_collection ansible-posix 0 "ansible.posix"
+install_latest_collection ansible-utils 0 "ansible.utils"
+install_latest_collection amazon-aws 0 "amazon.aws"
+install_latest_collection freeipa-ansible_freeipa 0 "freeipa.ansible_freeipa"
+install_latest_collection infra-rhacs_configuration 0 "infra.rhacs_configuration"
+install_latest_collection community-hashi_vault 0 "community.hashi_vault"
+install_latest_collection containers-podman 0 "containers.podman"
 
-echo ""
-echo "=== Installing kubernetes.core Collection ==="
-if ls "$COLLECTION_DIR"/kubernetes-core-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install "$COLLECTION_DIR"/kubernetes-core-*.tar.gz -p /workspace/collections --force --no-deps
-else
-  echo "kubernetes-core tarball not found in $COLLECTION_DIR (required for Install AAP / OpenShift)" >&2
-  exit 1
-fi
-
-echo ""
-echo "=== Installing redhat.openshift Collection ==="
-if ls "$COLLECTION_DIR"/redhat-openshift-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install "$COLLECTION_DIR"/redhat-openshift-*.tar.gz -p /workspace/collections --force --no-deps
-else
-  echo "redhat-openshift tarball not found in $COLLECTION_DIR (required for Install AAP / OpenShift)" >&2
-  exit 1
-fi
-
-echo ""
-echo "=== Installing community.general Collection ==="
-if ls "$COLLECTION_DIR"/community-general-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install "$COLLECTION_DIR"/community-general-*.tar.gz -p /workspace/collections --force --no-deps
-else
-  echo "community-general tarball not found; skipping"
-fi
-
-echo ""
-echo "=== Installing containers.podman Collection ==="
-if ls "$COLLECTION_DIR"/containers-podman-*.tar.gz >/dev/null 2>&1; then
-  ansible-galaxy collection install "$COLLECTION_DIR"/containers-podman-*.tar.gz -p /workspace/collections --force --no-deps
-else
-  echo "containers-podman tarball not found; skipping"
-fi
+# Optional Red Hat / partner content when baked (Satellite, IdM, system roles, Grafana)
+install_latest_collection redhat-satellite 0 "redhat.satellite"
+install_latest_collection redhat-rhel_idm 0 "redhat.rhel_idm"
+install_latest_collection redhat-rhel_system_roles 0 "redhat.rhel_system_roles"
+install_latest_collection grafana-grafana 0 "grafana.grafana"
 
 echo ""
 echo "=== Overlay disconnected Hub EE push tasks (baked docker-archive) ==="
@@ -7214,6 +7200,7 @@ ansible-playbook \\
   -e bootstrap_controller_apply_aap_configs=${configureAap && !varsOnly ? 'true' : 'false'} \\
   -e generate_env_vars_use_aap=${configureAap ? 'true' : 'false'} \\
   -e generate_playbook_repo_pause_for_push=false \\
+  -e bootstrap_generate_playbook_repo_pause_after_generate=false \\
   -e generate_playbook_repo_git_push=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_commit=${autoGitPush ? 'true' : 'false'} \\
   -e generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\

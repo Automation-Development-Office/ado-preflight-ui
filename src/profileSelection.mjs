@@ -47,15 +47,97 @@ export function selectProfileApps(source, group, apps, groups, catalogs, simpleC
       copy.component_options.satellite = [...satelliteProfileOptions[profileName]];
     }
   }
-  // Use the existing standalone option for RHEL-only app deployments.
-  for (const app of ['grafana', 'rhbk', 'gitlab']) {
-    if (!apps.includes(app)) continue;
-    const options = copy.component_options[app] || [];
-    if (group === 'rhel' && !(copy.component_apps.openshift || []).includes(app)) {
-      copy.component_options[app] = [...new Set([...options, 'standalone'])];
-    } else if (group === 'openshift' && !(copy.component_apps.rhel || []).includes(app)) {
-      copy.component_options[app] = options.filter(option => option !== 'standalone');
-    }
+  return syncPlatformInstallOptions(copy);
+}
+
+const PLATFORM_INSTALL_APPS = ['grafana', 'rhbk', 'gitlab'];
+
+export function componentIsSelected(source, key) {
+  const components = source?.components || [];
+  if (components.includes('all') || components.includes(key)) return true;
+  return Object.values(source?.component_apps || {}).some(
+    apps => Array.isArray(apps) && apps.includes(key)
+  );
+}
+
+/** standalone when the app is only on RHEL, openshift when it is only on OpenShift. */
+export function platformInstallMode(source, app) {
+  const components = source?.components || [];
+  const all = components.includes('all');
+  const openshiftOn = all || components.includes('openshift');
+  const rhelOn = all || components.includes('rhel');
+  const inOpenShift = (source?.component_apps?.openshift || []).includes(app);
+  const inRhel = (source?.component_apps?.rhel || []).includes(app);
+  if (inRhel && !inOpenShift) return 'standalone';
+  if (inOpenShift && !inRhel) return 'openshift';
+  if (rhelOn && !openshiftOn) return 'standalone';
+  if (openshiftOn && !rhelOn) return 'openshift';
+  return 'both';
+}
+
+export function visiblePlatformOptions(component, mode, options) {
+  if (mode === 'both') return options;
+  const hide = new Set();
+  if (component === 'grafana') {
+    hide.add('install');
+    hide.add('standalone');
+    if (mode === 'standalone') hide.add('alternate_route');
+  } else if (component === 'gitlab' || component === 'rhbk') {
+    hide.add('standalone');
   }
+  return options.filter(option => !hide.has(option));
+}
+
+/** Force the install that matches the selected platform and drop the other platform's options. */
+export function syncPlatformInstallOptions(copy) {
+  copy.component_options ||= {};
+  PLATFORM_INSTALL_APPS.forEach(app => {
+    if (!componentIsSelected(copy, app)) return;
+    const mode = platformInstallMode(copy, app);
+    let options = [...(copy.component_options[app] || [])];
+    if (mode === 'standalone') {
+      options = options.filter(option => option !== 'install' && option !== 'alternate_route');
+      if (!options.includes('standalone')) options.push('standalone');
+    } else if (mode === 'openshift') {
+      options = options.filter(option => option !== 'standalone');
+      if (app === 'grafana' && !options.includes('install')) options.push('install');
+    }
+    copy.component_options[app] = options;
+  });
   return copy;
+}
+
+function foldHostnameIntoHostList(config) {
+  if (!config || typeof config !== 'object') return config;
+  const primary = String(config.hostname || '').trim();
+  const raw = config.hosts;
+  const hosts = Array.isArray(raw)
+    ? raw.map(item => String(item || '').trim()).filter(Boolean)
+    : String(raw || '').split(/[\n,]/).map(item => item.trim()).filter(Boolean);
+  if (primary && !hosts.includes(primary)) hosts.unshift(primary);
+  config.hosts = hosts;
+  config.hostname = '';
+  return config;
+}
+
+function disablePublicGalaxyCredential(aap) {
+  if (!aap || !Array.isArray(aap.galaxy_credentials)) return aap;
+  aap.galaxy_credentials = aap.galaxy_credentials.map(credential => {
+    if (!credential) return credential;
+    if (credential.id === 'galaxy' || credential.name === 'Ansible Galaxy') {
+      return { ...credential, enabled: false, attach_to_org: false };
+    }
+    return credential;
+  });
+  return aap;
+}
+
+function galaxySetupTokenError(aap) {
+  if (!aap || aap.galaxy_setup_enabled !== true) return '';
+  if (String(aap.galaxy_hub_token || '').trim()) return '';
+  const enabled = (Array.isArray(aap.galaxy_credentials) ? aap.galaxy_credentials : [])
+    .filter(credential => credential && credential.enabled !== false);
+  const missing = enabled.filter(credential => !String(credential.token || '').trim());
+  if (enabled.length > 0 && missing.length === 0) return '';
+  return 'Galaxy setup needs an API token. Set General → Hub / Galaxy API token, or put a token on each enabled Galaxy credential. One of those is enough.';
 }
