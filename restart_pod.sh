@@ -41,7 +41,34 @@ free_port
 
 # Fedora SELinux: rootless podman needs label=disable or RUN fails with
 # "cannot apply additional memory protection after relocation"
-podman build --security-opt label=disable --network=host -t "${NAME}:latest" -f Containerfile .
+# Hash *all* baked collection tarballs so crypto / aap_configuration / eda swaps
+# bust the image layer (not only infra-ado-*.tar.gz).
+ADO_COLLECTIONS_SHA="$(
+  find collections -maxdepth 1 -type f -name '*.tar.gz' \
+    -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | awk '{print $1}'
+)"
+if [[ -z "${ADO_COLLECTIONS_SHA}" ]]; then
+  ADO_COLLECTIONS_SHA="missing-$(date +%s)"
+fi
+ADO_UI_SHA="$(
+  find src -type f \( -name '*.jsx' -o -name '*.js' -o -name '*.css' -o -name '*.tsx' -o -name '*.ts' \) \
+    -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | awk '{print $1}'
+)"
+if [[ -z "${ADO_UI_SHA}" ]]; then
+  ADO_UI_SHA="missing-$(date +%s)"
+fi
+echo "ADO_COLLECTIONS_SHA=${ADO_COLLECTIONS_SHA}"
+echo "ADO_UI_SHA=${ADO_UI_SHA}"
+
+if [[ "${ADO_INSTALL_COLLECTIONS_LOCAL:-0}" == "1" ]]; then
+  echo "ADO_INSTALL_COLLECTIONS_LOCAL=1 → installing collections into ~/.ansible/collections"
+  bash ./scripts/install-collections-local.sh
+fi
+
+podman build --security-opt label=disable --network=host \
+  --build-arg "ADO_COLLECTIONS_SHA=${ADO_COLLECTIONS_SHA}" \
+  --build-arg "ADO_UI_SHA=${ADO_UI_SHA}" \
+  -t "${NAME}:latest" -f Containerfile .
 
 free_port
 
@@ -55,6 +82,14 @@ if [[ -f "${HOME}/.kube/config" ]]; then
   KUBE_MOUNT=(-v "${HOME}/.kube/config:/tmp/kube/config:ro" -e "KUBECONFIG=/tmp/kube/config")
 fi
 
+# Live-mount host collections/ over the baked /opt/ado-collections (no image rebuild
+# for tarball drops). Default off — bake remains the disconnected source of truth.
+COLLECTIONS_MOUNT=()
+if [[ "${ADO_MOUNT_COLLECTIONS:-0}" == "1" ]]; then
+  echo "ADO_MOUNT_COLLECTIONS=1 → mounting ./collections → /opt/ado-collections"
+  COLLECTIONS_MOUNT=(-v "$(pwd)/collections:/opt/ado-collections:ro")
+fi
+
 podman run --rm -d \
   --name "${NAME}" \
   --security-opt label=disable \
@@ -63,9 +98,12 @@ podman run --rm -d \
   -e ADO_PREFLIGHT_DEPLOY_OPENSHIFT_ENABLED="${ADO_PREFLIGHT_DEPLOY_OPENSHIFT_ENABLED:-true}" \
   "${PODMAN_MOUNT[@]}" \
   "${KUBE_MOUNT[@]}" \
+  "${COLLECTIONS_MOUNT[@]}" \
   -p "${PORT}:8080" \
   "localhost/${NAME}:latest"
 
 echo "Preflight UI: http://127.0.0.1:${PORT}"
 echo "Airgap companion: ${AIRGAP_ARCHITECT_URL:-http://host.containers.internal:8081} (host :8081)"
 echo "Hub EE: baked at /opt/ado-ee/ado-ee.docker.tar — Push EE uses skopeo inside the pod (AAP admin password from the form)."
+echo "Collections: drop tarballs in ./collections/ then either rebuild, or ADO_MOUNT_COLLECTIONS=1 ./restart_pod.sh"
+echo "Local CLI: ADO_INSTALL_COLLECTIONS_LOCAL=1 ./restart_pod.sh  OR  ./scripts/install-collections-local.sh"
