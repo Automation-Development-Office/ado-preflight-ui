@@ -43,13 +43,13 @@ test('Satellite full profile uses the existing satellite option set', () => {
   const result = apply({ components: ['satellite'] }, 'satellite', ['satellite'], 'Full Satellite');
   assert.deepEqual(result.component_options.satellite, satelliteProfileOptions['Full Satellite']);
 });
-test('OpenShift-only Grafana uses the OpenShift install and hides the VM install', () => {
+test('OpenShift-only Grafana leaves Install Grafana optional and hides the VM install', () => {
   const result = apply({ components: ['openshift'] }, 'openshift', ['openshift', 'grafana']);
-  assert.ok(result.component_options.grafana.includes('install'));
-  assert.ok(!result.component_options.grafana.includes('standalone'));
+  assert.ok(!result.component_options.grafana?.includes('install'));
+  assert.ok(!result.component_options.grafana?.includes('standalone'));
   assert.deepEqual(
     visiblePlatformOptions('grafana', 'openshift', ['install', 'standalone', 'datasources', 'alternate_route']),
-    ['datasources', 'alternate_route']
+    ['install', 'datasources', 'alternate_route']
   );
 });
 test('Standalone Grafana drops OpenShift install options', () => {

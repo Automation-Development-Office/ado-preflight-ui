@@ -727,6 +727,31 @@ function resolveGrafanaRhbkClientId(source) {
   return 'grafana-client';
 }
 
+const GRAFANA_BUILTIN_DASHBOARDS = [
+  { id: 'devspaces-inventory', folder: 'Applications', title: 'devspaces-inventory', note: 'Needs the Dev Workspace status exporter and Dev Spaces metrics in Prometheus.' },
+  { id: 'devspaces-overview', folder: 'Applications', title: 'devspaces-overview', note: 'Needs the Dev Workspace status exporter and Dev Spaces metrics in Prometheus. Panels stay empty until that exporter is running.' },
+  { id: 'devspaces-workspace-detail', folder: 'Applications', title: 'devspaces-workspace-detail', note: 'Needs the Dev Workspace status exporter and Dev Spaces metrics in Prometheus.' },
+  { id: 'keycloak-metrics', folder: 'Applications', title: 'keycloak-metrics', note: 'Needs Keycloak or RHBK metrics in Prometheus, including keycloak_user_events_total and the login-failure exporter.' },
+  { id: 'rhacs-cve-report', folder: 'Security', title: 'rhacs-cve-report', note: 'This is the lab RHACS CVE report dashboard. The CVE Analyzer job is what fills live report data. This checkbox only copies the dashboard file.' },
+  { id: 'acm-clusters-overview', folder: 'Infrastucture', title: 'acm-clusters-overview', note: 'Needs ACM Observability metrics. Panels stay empty until ACM observability is installed and scraped.' },
+  { id: 'acm-resource-optimization-cluster', folder: 'Infrastucture', title: 'acm-resource-optimization-cluster', note: 'Needs ACM Observability metrics.' },
+  { id: 'acm-right-sizing-namespace', folder: 'Infrastucture', title: 'acm-right-sizing-namespace', note: 'Needs ACM Observability metrics.' },
+  { id: 'alert-analysis', folder: 'Infrastucture', title: 'alert-analysis' },
+  { id: 'cert-manager-expiry', folder: 'Infrastucture', title: 'cert-manager-expiry', note: 'Needs cert-manager metrics in Prometheus. Panels stay empty until cert-manager is installed and those metrics are scraped.' },
+  { id: 'kubernetes-compute-resources-cluster', folder: 'Infrastucture', title: 'kubernetes-compute-resources-cluster' },
+  { id: 'kubernetes-compute-resources-namespace-pods', folder: 'Infrastucture', title: 'kubernetes-compute-resources-namespace-pods' },
+  { id: 'kubernetes-compute-resources-node-pods', folder: 'Infrastucture', title: 'kubernetes-compute-resources-node-pods' },
+  { id: 'kubernetes-etcd-cluster', folder: 'Infrastucture', title: 'kubernetes-etcd-cluster' },
+  { id: 'openshift-api-monitoring', folder: 'Infrastucture', title: 'openshift-api-monitoring' },
+  { id: 'openshift-cluster-details', folder: 'Infrastucture', title: 'openshift-cluster-details' },
+  { id: 'openshift-cluster-health', folder: 'Infrastucture', title: 'openshift_cluster_health', note: 'Cluster panels use OpenShift Prometheus. The LDAP OAuth and Synology CSI panels stay empty unless those are installed.' },
+  { id: 'openshift-cluster-metrics', folder: 'Infrastucture', title: 'openshift-cluster-metrics' },
+  { id: 'openshift-cluster-resource-overview', folder: 'Infrastucture', title: 'openshift-cluster-resource-overview' },
+  { id: 'openshift-k8s-dashboard', folder: 'Infrastucture', title: 'openshift-k8s-dashboard' },
+  { id: 'openshift-node-full-exporter', folder: 'Infrastucture', title: 'openshift-node-full-exporter', note: 'Uses node_exporter metrics. Panels stay empty if node exporter is not scraped by the Prometheus datasource.' },
+  { id: 'openshift-projects', folder: 'Infrastucture', title: 'openshift-projects' }
+];
+
 /** When RHBK + Grafana are selected, fill OIDC client/issuer from RHBK; secret fetched at deploy. */
 function syncGrafanaOidcFromRhbk(source, { force = false } = {}) {
   const copy = source;
@@ -752,8 +777,13 @@ function syncGrafanaOidcFromRhbk(source, { force = false } = {}) {
   if (force || !String(oidc.client_id || '').trim()) {
     oidc.client_id = clientId;
   }
-  if (force || !String(oidc.issuer || '').trim()) {
-    if (issuer) oidc.issuer = issuer;
+  if (!oidc.issuer_manual && issuer) {
+    const currentIssuer = String(oidc.issuer || '').trim();
+    const previousDerived = String(oidc.issuer_derived || '').trim();
+    if (force || !currentIssuer || currentIssuer === previousDerived) {
+      oidc.issuer = issuer;
+    }
+    oidc.issuer_derived = issuer;
   }
   if (!oidc.client_secret_manual) {
     oidc.client_secret = '';
@@ -1368,7 +1398,8 @@ const componentOptionLabels = {
   custom: 'Custom cert',
   oidc: 'OIDC Auth',
   saml: 'SAML SSO',
-  install: 'Install Grafana (OpenShift)',
+  install: 'Install Grafana',
+  connection: 'Grafana',
   datasources: 'Datasources',
   folders: 'Folders',
   dashboards: 'Dashboards',
@@ -1857,7 +1888,7 @@ const defaults = {
       admin_user: 'admin',
       admin_password: '',
       api_key: '',
-      // Shared Openshift folder with K8S Prod/Dev dropdown (in addition to OpenshiftProd/OpenshiftDev).
+      // Keeps a folder named Openshift when that row is present.
       group_cluster_dashboards: true,
       datasources: [
         {
@@ -1875,36 +1906,36 @@ const defaults = {
       datasource_sources: [],
       folders: [
         {
-          name: 'OpenshiftProd',
+          name: 'Applications',
           source_type: 'path',
-          source: 'templates/Openshift',
-          dashboards_path: 'dashboards',
-          alerts_path: 'alerts',
-          datasource_mode: 'pin',
-          datasource: 'Openshift-Prod',
-          uid_suffix: 'prod',
-          title_cluster: 'Prod'
-        },
-        {
-          name: 'OpenshiftDev',
-          source_type: 'path',
-          source: 'templates/Openshift',
-          dashboards_path: 'dashboards',
-          alerts_path: 'alerts',
-          datasource_mode: 'pin',
-          datasource: 'Openshift-Dev',
-          uid_suffix: 'dev',
-          title_cluster: 'Dev'
-        },
-        {
-          name: 'Openshift',
-          source_type: 'path',
-          source: 'templates/Openshift',
-          dashboards_path: 'dashboards',
-          alerts_path: 'alerts',
+          source: '.',
+          dashboards_path: 'dashboards/Applications',
           datasource_mode: 'multi'
         },
-        { name: 'RHACS', source_type: 'path', source: 'templates/RHACS', dashboards_path: 'dashboards', datasource_mode: 'none' }
+        {
+          name: 'Security',
+          source_type: 'path',
+          source: '.',
+          dashboards_path: 'dashboards/Security',
+          datasource_mode: 'none'
+        },
+        {
+          name: 'Infrastucture',
+          source_type: 'path',
+          source: '.',
+          dashboards_path: 'dashboards/Infrastucture',
+          datasource_mode: 'multi'
+        }
+      ],
+      include_builtin_dashboards: true,
+      extra_dashboards: [],
+      alert_folders: [
+        {
+          name: 'Alerts',
+          source_type: 'path',
+          source: '.',
+          alerts_path: 'alerts/Alerts'
+        }
       ],
       email: {
         enabled: false,
@@ -2749,6 +2780,7 @@ function App() {
   const [ansibleExtraArgsOpen, setAnsibleExtraArgsOpen] = useState(false);
   const [profileImportKey, setProfileImportKey] = useState(0);
   const [additionalProfilesOpen, setAdditionalProfilesOpen] = useState(false);
+  const [builtinDashboardsOpen, setBuiltinDashboardsOpen] = useState(false);
   const [additionalEnvOtherEnabled, setAdditionalEnvOtherEnabled] = useState(false);
   const [additionalEnvOtherDraft, setAdditionalEnvOtherDraft] = useState('');
   const [storageClassDriverTab, setStorageClassDriverTab] = useState('nfs');
@@ -2762,6 +2794,7 @@ function App() {
     error: '',
     classes: null
   });
+  const [grafanaPrometheusLookup, setGrafanaPrometheusLookup] = useState({});
   const [catalogOperatorLookup, setCatalogOperatorLookup] = useState({
     loading: false,
     error: '',
@@ -2770,7 +2803,7 @@ function App() {
   });
   const [activeAapCredentialTab, setActiveAapCredentialTab] = useState('');
   const [activeRhbkDetailTab, setActiveRhbkDetailTab] = useState('client');
-  const [activeGrafanaDetailTab, setActiveGrafanaDetailTab] = useState('install');
+  const [activeGrafanaDetailTab, setActiveGrafanaDetailTab] = useState('connection');
   const [activeSatelliteDetailTab, setActiveSatelliteDetailTab] = useState('satellite_server_install');
   const [rhbkAddClientOpen, setRhbkAddClientOpen] = useState(false);
   const [activePreInstallTab, setActivePreInstallTab] = useState('aap_license');
@@ -7093,6 +7126,82 @@ function App() {
     && String(data.openshift?.token || '').trim()
   );
 
+  const lookupGrafanaPrometheus = async (index) => {
+    const apiHost = String(data.openshift?.api_host || '').trim();
+    const token = String(data.openshift?.token || '').trim();
+    const datasources = data.component_config?.grafana?.datasources || [];
+    const row = datasources[index] || {};
+    if (!apiHost || !token) {
+      setGrafanaPrometheusLookup(prev => ({
+        ...prev,
+        [index]: {
+          loading: false,
+          error: 'Enter OpenShift API host and token first (OpenShift tab).',
+          message: ''
+        }
+      }));
+      return;
+    }
+    setGrafanaPrometheusLookup(prev => ({
+      ...prev,
+      [index]: { loading: true, error: '', message: '' }
+    }));
+    try {
+      const response = await fetch('/api/openshift/grafana-prometheus', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_host: apiHost,
+          token,
+          skip_tls_verify: data.openshift?.skip_tls_verify !== false,
+          route_name: String(row.prometheus_route_name || 'thanos-querier').trim() || 'thanos-querier',
+          route_namespace: 'openshift-monitoring'
+        })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body.error || `HTTP ${response.status}`);
+      }
+      const prometheusUrl = String(body.prometheusUrl || '').trim();
+      const bearerToken = String(body.bearerToken || '').trim();
+      const hadUrl = Boolean(String(row.prometheus_url || '').trim());
+      const hadToken = Boolean(String(row.bearer_token || '').trim());
+      const filledUrl = !hadUrl && Boolean(prometheusUrl);
+      const filledToken = !hadToken && Boolean(bearerToken);
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        const target = copy.component_config?.grafana?.datasources?.[index];
+        if (!target) return prev;
+        if (filledUrl) target.prometheus_url = prometheusUrl;
+        if (filledToken) target.bearer_token = bearerToken;
+        return copy;
+      });
+      const notes = [];
+      if (filledUrl) notes.push('Filled the Thanos URL from the route.');
+      if (filledToken) notes.push('Filled the bearer token.');
+      if (hadUrl) notes.push('Left the Prometheus URL as entered.');
+      if (hadToken) notes.push('Left the bearer token as entered.');
+      if (!filledToken && !hadToken && body.tokenNote) notes.push(body.tokenNote);
+      setGrafanaPrometheusLookup(prev => ({
+        ...prev,
+        [index]: {
+          loading: false,
+          error: '',
+          message: notes.join(' ')
+        }
+      }));
+    } catch (err) {
+      setGrafanaPrometheusLookup(prev => ({
+        ...prev,
+        [index]: {
+          loading: false,
+          error: err.message || 'Failed to look up Thanos',
+          message: ''
+        }
+      }));
+    }
+  };
+
   const lookupStorageClasses = async (path = '') => {
     const apiHost = String(data.openshift?.api_host || '').trim();
     const token = String(data.openshift?.token || '').trim();
@@ -7633,17 +7742,17 @@ echo $TOKEN
     const hasInstall = grafanaOpts.includes('install');
     const hasStandalone = grafanaOpts.includes('standalone');
     const contentTabs = [
-      ['install', hasInstall || (!hasStandalone && grafanaOpts.length === 0)],
+      ['connection', true],
       ['standalone', hasStandalone],
       ['datasources', grafanaOpts.includes('datasources')],
-      ['folders', grafanaOpts.includes('folders') || grafanaOpts.includes('dashboards') || grafanaOpts.includes('alerts')],
+      ['folders', grafanaOpts.includes('folders') || grafanaOpts.includes('dashboards')],
       ['dashboards', grafanaOpts.includes('dashboards')],
       ['alerts', grafanaOpts.includes('alerts')],
       ['email', grafanaOpts.includes('email')],
       ['oidc', grafanaOpts.includes('oidc')],
       ['alternate_route', grafanaOpts.includes('alternate_route')]
     ].filter(([, show]) => show).map(([id]) => id);
-    const grafanaTabs = contentTabs.length > 0 ? contentTabs : ['install'];
+    const grafanaTabs = contentTabs.length > 0 ? contentTabs : ['connection'];
     const activeGrafanaTab = grafanaTabs.includes(activeGrafanaDetailTab)
       ? activeGrafanaDetailTab
       : grafanaTabs[0];
@@ -7652,13 +7761,25 @@ echo $TOKEN
       setData(prev => {
         const copy = JSON.parse(JSON.stringify(prev));
         if (!copy.component_config.grafana.folders) copy.component_config.grafana.folders = [];
-        copy.component_config.grafana.folders[index] = {
-          ...(copy.component_config.grafana.folders[index] || {}),
-          [key]: value
-        };
+        const current = copy.component_config.grafana.folders[index] || {};
+        const next = { ...current, [key]: value };
         if (key === 'use_general_folder' && value) {
-          copy.component_config.grafana.folders[index].name = 'General';
+          next.name = 'General';
         }
+        if (key === 'name' && !current.dashboards_path_manual) {
+          const previousName = String(current.name || '').trim();
+          const previousDefault = previousName ? `dashboards/${previousName}` : '';
+          const currentPath = String(current.dashboards_path || '').trim();
+          const followsName = !currentPath || currentPath === 'dashboards' || currentPath === previousDefault;
+          if (followsName) {
+            const trimmed = String(value || '').trim();
+            next.dashboards_path = trimmed ? `dashboards/${trimmed}` : '';
+          }
+        }
+        if (key === 'dashboards_path') {
+          next.dashboards_path_manual = true;
+        }
+        copy.component_config.grafana.folders[index] = next;
         return copy;
       });
     };
@@ -7667,6 +7788,29 @@ echo $TOKEN
         const copy = JSON.parse(JSON.stringify(prev));
         if (!copy.component_config?.grafana?.folders) return copy;
         copy.component_config.grafana.folders = copy.component_config.grafana.folders.filter((_, i) => i !== index);
+        return copy;
+      });
+    };
+    const folderNames = folders
+      .map(folder => String(folder.name || '').trim())
+      .filter(Boolean);
+    const defaultDashboardFolder = folderNames[0] || '';
+    const updateExtraDashboard = (index, key, value) => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config.grafana.extra_dashboards) copy.component_config.grafana.extra_dashboards = [];
+        copy.component_config.grafana.extra_dashboards[index] = {
+          ...(copy.component_config.grafana.extra_dashboards[index] || {}),
+          [key]: value
+        };
+        return copy;
+      });
+    };
+    const removeExtraDashboard = index => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        const rows = copy.component_config?.grafana?.extra_dashboards || [];
+        copy.component_config.grafana.extra_dashboards = rows.filter((_, i) => i !== index);
         return copy;
       });
     };
@@ -7714,24 +7858,24 @@ echo $TOKEN
         <GridItem span={12}>
           <Title headingLevel="h3">Grafana API auth</Title>
           <p style={{ color: mutedTextColor, fontSize: '13px' }}>
-            Required for datasources / folders / dashboards / alerts when Grafana is already installed.
-            Prefer admin password or a Grafana service-account API token (not the Prometheus bearer).
+            Used for datasources, folders, dashboards, and alerts. Enter it once here.
+            Use the admin password or a Grafana service-account API token.
           </p>
         </GridItem>
         {renderTextField('Admin user', 'component_config.grafana.admin_user', 'text')}
         {renderTextField('Admin password', 'component_config.grafana.admin_password', 'password')}
-        {renderTextField('Grafana API token (optional)', 'component_config.grafana.api_key', 'password', 'Bearer token for Grafana HTTP API. Overrides admin password when set.')}
+        {renderTextField('Grafana API token (optional)', 'component_config.grafana.api_key', 'password', 'Grafana service-account token. Used instead of the admin password when set. This is not the Prometheus token on the Datasources tab.')}
       </Grid>
     );
 
-    const renderFoldersPanel = () => (
+    const renderFoldersPanel = ({ showAlerts = false } = {}) => (
       <Grid hasGutter>
         <GridItem span={12}>
-          <Title headingLevel="h3">Dashboard / Alert Folders</Title>
+          <Title headingLevel="h3">Dashboard folders</Title>
           <p style={{ color: mutedTextColor }}>
-            Each row can point at a git repo or path. Leave folder name empty / General / Main / Root
-            to upload into Grafana&apos;s General (root) folder. Use separate rows for different git URLs
-            (dashboards vs alerts paths).
+            Each row is a Grafana folder. Source `.` is this project. The dashboards path
+            starts as dashboards/&lt;folder name&gt; and stays editable. Alerts are configured
+            on the Alerts option, not on these rows.
           </p>
         </GridItem>
         <GridItem span={12}>
@@ -7782,21 +7926,31 @@ echo $TOKEN
                     </select>
                   </FormGroup>
                 </GridItem>
-                <GridItem span={4}>
+                <GridItem span={showAlerts ? 3 : 4}>
                   <FormGroup label="Source (git URL or path)">
                     <TextInput value={folder.source || ''} onChange={(_, v) => updateFolder(index, 'source', v)} />
                   </FormGroup>
                 </GridItem>
-                <GridItem span={2}>
+                <GridItem span={showAlerts ? 2 : 3}>
                   <FormGroup label="Dashboards path">
-                    <TextInput value={folder.dashboards_path || 'dashboards'} onChange={(_, v) => updateFolder(index, 'dashboards_path', v)} />
+                    <TextInput
+                      value={folder.dashboards_path || ''}
+                      placeholder="dashboards/<folder name>"
+                      onChange={(_, v) => updateFolder(index, 'dashboards_path', v)}
+                    />
                   </FormGroup>
                 </GridItem>
-                <GridItem span={1}>
-                  <FormGroup label="Alerts path">
-                    <TextInput value={folder.alerts_path || 'alerts'} onChange={(_, v) => updateFolder(index, 'alerts_path', v)} />
-                  </FormGroup>
-                </GridItem>
+                {showAlerts && (
+                  <GridItem span={2}>
+                    <FormGroup label="Alerts path">
+                      <TextInput
+                        value={folder.alerts_path || ''}
+                        placeholder="alerts"
+                        onChange={(_, v) => updateFolder(index, 'alerts_path', v)}
+                      />
+                    </FormGroup>
+                  </GridItem>
+                )}
               </Grid>
             </div>
           </GridItem>
@@ -7807,10 +7961,9 @@ echo $TOKEN
             if (!copy.component_config.grafana.folders) copy.component_config.grafana.folders = [];
             copy.component_config.grafana.folders.push({
               name: '',
-              source_type: 'git',
-              source: '',
-              dashboards_path: 'dashboards',
-              alerts_path: 'alerts',
+              source_type: 'path',
+              source: '.',
+              dashboards_path: '',
               use_general_folder: false
             });
             return copy;
@@ -7819,15 +7972,258 @@ echo $TOKEN
       </Grid>
     );
 
+    const renderDashboardsPanel = () => {
+      const extraDashboards = data.component_config?.grafana?.extra_dashboards || [];
+      return (
+        <Grid hasGutter>
+          <GridItem span={12}>
+            <Title headingLevel="h3">Dashboards</Title>
+            <p style={{ color: mutedTextColor }}>
+              Dashboards upload into the folders from the Folders tab
+              {folderNames.length > 0 ? `: ${folderNames.join(', ')}.` : '. Add folders there first.'}
+            </p>
+          </GridItem>
+          <GridItem span={12}>
+            <ExpandableSection
+              toggleText="Pre-canned dashboards"
+              isExpanded={builtinDashboardsOpen}
+              onToggle={(_, value) => setBuiltinDashboardsOpen(value)}
+            >
+              <p style={{ color: mutedTextColor, fontSize: '13px' }}>
+                Checked dashboards are the lab boards copied into dashboards/&lt;folder name&gt;.
+                A ? marks a board that stays empty until something else is installed or a job has run.
+              </p>
+              {GRAFANA_BUILTIN_DASHBOARDS.map(dash => {
+                const selected = data.component_config?.grafana?.builtin_dashboards;
+                const checked = !Array.isArray(selected) || selected.includes(dash.id);
+                return (
+                  <div key={dash.id} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Checkbox
+                      id={`grafana-builtin-${dash.id}`}
+                      label=""
+                      isChecked={checked}
+                      onChange={(_, value) => setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        if (!copy.component_config.grafana) copy.component_config.grafana = {};
+                        const current = Array.isArray(copy.component_config.grafana.builtin_dashboards)
+                          ? copy.component_config.grafana.builtin_dashboards
+                          : GRAFANA_BUILTIN_DASHBOARDS.map(item => item.id);
+                        const next = value
+                          ? Array.from(new Set([...current, dash.id]))
+                          : current.filter(id => id !== dash.id);
+                        copy.component_config.grafana.builtin_dashboards = next;
+                        copy.component_config.grafana.include_builtin_dashboards = next.length > 0;
+                        return copy;
+                      })}
+                    />
+                    {labelWithHelp(`${dash.folder}/${dash.title}`, dash.note)}
+                  </div>
+                );
+              })}
+            </ExpandableSection>
+          </GridItem>
+          {extraDashboards.map((row, index) => {
+            const selectedFolder = folderNames.includes(row.folder) ? row.folder : defaultDashboardFolder;
+            return (
+              <GridItem span={12} key={`grafana-extra-dashboard-${index}`}>
+                <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <Tooltip content="Remove dashboard">
+                      <Button
+                        variant="plain"
+                        onClick={() => removeExtraDashboard(index)}
+                        aria-label={`Remove dashboard ${index + 1}`}
+                      >
+                        X
+                      </Button>
+                    </Tooltip>
+                  </div>
+                  <Grid hasGutter>
+                    <GridItem span={3}>
+                      <FormGroup label="Folder">
+                        <select
+                          value={selectedFolder}
+                          onChange={e => updateExtraDashboard(index, 'folder', e.target.value)}
+                          style={{ width: '100%', height: '36px' }}
+                        >
+                          {folderNames.length === 0 && <option value="">Add a folder first</option>}
+                          {folderNames.map(name => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                        </select>
+                      </FormGroup>
+                    </GridItem>
+                    <GridItem span={2}>
+                      <FormGroup label="Source type">
+                        <select
+                          value={row.source_type || 'path'}
+                          onChange={e => updateExtraDashboard(index, 'source_type', e.target.value)}
+                          style={{ width: '100%', height: '36px' }}
+                        >
+                          <option value="path">path</option>
+                          <option value="git">git</option>
+                        </select>
+                      </FormGroup>
+                    </GridItem>
+                    <GridItem span={4}>
+                      <FormGroup label="Source (git URL or path)">
+                        <TextInput value={row.source || ''} onChange={(_, v) => updateExtraDashboard(index, 'source', v)} />
+                      </FormGroup>
+                    </GridItem>
+                    <GridItem span={3}>
+                      <FormGroup label="Dashboards path">
+                        <TextInput
+                          value={row.dashboards_path || ''}
+                          placeholder="dashboards/<folder name>"
+                          onChange={(_, v) => updateExtraDashboard(index, 'dashboards_path', v)}
+                        />
+                      </FormGroup>
+                    </GridItem>
+                  </Grid>
+                </div>
+              </GridItem>
+            );
+          })}
+          <GridItem span={12}>
+            <Button variant="secondary" onClick={() => setData(prev => {
+              const copy = JSON.parse(JSON.stringify(prev));
+              if (!copy.component_config.grafana.extra_dashboards) copy.component_config.grafana.extra_dashboards = [];
+              const names = (copy.component_config.grafana.folders || [])
+                .map(folder => String(folder.name || '').trim())
+                .filter(Boolean);
+              copy.component_config.grafana.extra_dashboards.push({
+                folder: names[0] || '',
+                source_type: 'path',
+                source: '.',
+                dashboards_path: ''
+              });
+              return copy;
+            })}>Add dashboard</Button>
+          </GridItem>
+        </Grid>
+      );
+    };
+
+    const updateAlertFolder = (index, key, value) => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_config.grafana.alert_folders) copy.component_config.grafana.alert_folders = [];
+        const current = copy.component_config.grafana.alert_folders[index] || {};
+        const next = { ...current, [key]: value };
+        if (key === 'name' && !current.alerts_path_manual) {
+          const previousName = String(current.name || '').trim();
+          const previousDefault = previousName ? `alerts/${previousName}` : '';
+          const currentPath = String(current.alerts_path || '').trim();
+          const followsName = !currentPath || currentPath === 'alerts' || currentPath === previousDefault;
+          if (followsName) {
+            const trimmed = String(value || '').trim();
+            next.alerts_path = trimmed ? `alerts/${trimmed}` : '';
+          }
+        }
+        if (key === 'alerts_path') {
+          next.alerts_path_manual = true;
+        }
+        copy.component_config.grafana.alert_folders[index] = next;
+        return copy;
+      });
+    };
+
+    const renderAlertsPanel = () => {
+      const alertFolders = data.component_config?.grafana?.alert_folders || [];
+      return (
+        <Grid hasGutter>
+          <GridItem span={12}>
+            <Checkbox
+              id="grafana-alerts-enabled"
+              label="Enable alerts upload"
+              isChecked={data.component_config.grafana.alerts_enabled !== false}
+              onChange={(_, v) => set('component_config.grafana.alerts_enabled', v)}
+            />
+            <p style={{ color: mutedTextColor, fontSize: '13px' }}>
+              Alerts use their own folder. This starts as Alerts, with path alerts/Alerts.
+              The path stays editable.
+            </p>
+          </GridItem>
+          {alertFolders.map((folder, index) => (
+            <GridItem span={12} key={`grafana-alert-folder-${index}`}>
+              <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <Tooltip content="Remove folder">
+                    <Button
+                      variant="plain"
+                      onClick={() => setData(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev));
+                        const rows = copy.component_config?.grafana?.alert_folders || [];
+                        copy.component_config.grafana.alert_folders = rows.filter((_, i) => i !== index);
+                        return copy;
+                      })}
+                      aria-label={`Remove alert folder ${folder.name || index + 1}`}
+                    >
+                      X
+                    </Button>
+                  </Tooltip>
+                </div>
+                <Grid hasGutter>
+                  <GridItem span={3}>
+                    <FormGroup label="Folder name">
+                      <TextInput value={folder.name || ''} onChange={(_, v) => updateAlertFolder(index, 'name', v)} />
+                    </FormGroup>
+                  </GridItem>
+                  <GridItem span={2}>
+                    <FormGroup label="Source type">
+                      <select
+                        value={folder.source_type || 'path'}
+                        onChange={e => updateAlertFolder(index, 'source_type', e.target.value)}
+                        style={{ width: '100%', height: '36px' }}
+                      >
+                        <option value="path">path</option>
+                        <option value="git">git</option>
+                      </select>
+                    </FormGroup>
+                  </GridItem>
+                  <GridItem span={4}>
+                    <FormGroup label="Source (git URL or path)">
+                      <TextInput value={folder.source || ''} onChange={(_, v) => updateAlertFolder(index, 'source', v)} />
+                    </FormGroup>
+                  </GridItem>
+                  <GridItem span={3}>
+                    <FormGroup label="Alerts path">
+                      <TextInput
+                        value={folder.alerts_path || ''}
+                        placeholder="alerts/<folder name>"
+                        onChange={(_, v) => updateAlertFolder(index, 'alerts_path', v)}
+                      />
+                    </FormGroup>
+                  </GridItem>
+                </Grid>
+              </div>
+            </GridItem>
+          ))}
+          <GridItem span={12}>
+            <Button variant="secondary" onClick={() => setData(prev => {
+              const copy = JSON.parse(JSON.stringify(prev));
+              if (!copy.component_config.grafana.alert_folders) copy.component_config.grafana.alert_folders = [];
+              copy.component_config.grafana.alert_folders.push({
+                name: '',
+                source_type: 'path',
+                source: '.',
+                alerts_path: ''
+              });
+              return copy;
+            })}>Add folder</Button>
+          </GridItem>
+        </Grid>
+      );
+    };
+
     const renderDatasourcesPanel = () => (
       <Grid hasGutter>
-        {renderAuthFields()}
         <GridItem span={12}>
           <Title headingLevel="h3">Prometheus datasources (structured)</Title>
           <p style={{ color: mutedTextColor, fontSize: '13px' }}>
-            Local OpenShift can discover thanos-querier via Route + SA token when prometheus URL / bearer
-            are empty. Remote / standalone: set Prometheus URL and bearer token (or leave token empty and
-            use a K8s secret name in group_vars).
+            Look up uses the OpenShift API host and token. It fills an empty Prometheus URL from the
+            thanos-querier route and an empty bearer token from the monitoring service account.
+            Leave the bearer empty to let the datasource job create grafana-prometheus-sa-token.
           </p>
         </GridItem>
         {datasources.map((ds, index) => (
@@ -7860,6 +8256,30 @@ echo $TOKEN
                       (_, v) => updateDatasource(index, 'bearer_token', v)
                     )}
                   </FormGroup>
+                </GridItem>
+                <GridItem span={12}>
+                  <Button
+                    variant="secondary"
+                    isDisabled={grafanaPrometheusLookup[index]?.loading}
+                    onClick={() => lookupGrafanaPrometheus(index)}
+                  >
+                    {grafanaPrometheusLookup[index]?.loading ? 'Looking up…' : 'Look up'}
+                  </Button>
+                  {!openshiftLookupReady && (
+                    <div style={{ color: mutedTextColor, fontSize: '12px', marginTop: '6px' }}>
+                      Enter OpenShift API host and token to look up the Thanos URL and bearer token.
+                    </div>
+                  )}
+                  {grafanaPrometheusLookup[index]?.error && (
+                    <div style={{ color: '#c9190b', fontSize: '12px', marginTop: '6px' }}>
+                      {grafanaPrometheusLookup[index].error}
+                    </div>
+                  )}
+                  {grafanaPrometheusLookup[index]?.message && (
+                    <div style={{ color: mutedTextColor, fontSize: '12px', marginTop: '6px' }}>
+                      {grafanaPrometheusLookup[index].message}
+                    </div>
+                  )}
                 </GridItem>
               </Grid>
             </div>
@@ -7937,16 +8357,19 @@ echo $TOKEN
 
     const renderTabBody = () => {
       switch (activeGrafanaTab) {
-        case 'install':
+        case 'connection':
           return (
             <Grid hasGutter>
               <GridItem span={12}>
                 <p style={{ color: mutedTextColor }}>
-                  OpenShift operator install. Leave unchecked (and do not select Standalone) for
-                  content-only runs against an existing Grafana.
+                  Hostname, admin user, and a password or token are used for every Grafana option.
+                  Storage, replicas, and the database appear when Install Grafana is selected.
                 </p>
               </GridItem>
-              {renderDerivedRouteHostnameField('grafana')}
+              {!(hasStandalone && !hasInstall) && renderDerivedRouteHostnameField('grafana')}
+              {renderAuthFields()}
+              {hasInstall && (
+                <>
               {renderStorageClassField('Storage Class', 'component_config.grafana.storage', grafanaHelp.storage)}
               {renderTextField('Replicas', 'component_config.grafana.replicas', 'number')}
               <GridItem span={12}>
@@ -8031,7 +8454,8 @@ echo $TOKEN
                   )}
                 </>
               )}
-              {renderAuthFields()}
+                </>
+              )}
             </Grid>
           );
         case 'standalone':
@@ -8052,50 +8476,16 @@ echo $TOKEN
               {renderTextField('Airgap RPM path (Contoller)', 'component_config.grafana.standalone_rpm_path', 'text')}
               {renderTextField('Airgap RPM URL', 'component_config.grafana.standalone_rpm_url', 'text')}
               {renderStandaloneTlsAndRhn('grafana', { showTls: false })}
-              {renderAuthFields()}
             </Grid>
           );
         case 'datasources':
           return renderDatasourcesPanel();
         case 'folders':
-          return (
-            <>
-              {renderAuthFields()}
-              {renderFoldersPanel()}
-            </>
-          );
+          return renderFoldersPanel();
         case 'dashboards':
-          return (
-            <Grid hasGutter>
-              {renderAuthFields()}
-              <GridItem span={12}>
-                <p style={{ color: mutedTextColor }}>
-                  Dashboards upload from the folder rows (git/path + dashboards_path). Configure folders
-                  under the Folders tab; this option only enables the Contoller JT.
-                </p>
-              </GridItem>
-              {renderFoldersPanel()}
-            </Grid>
-          );
+          return renderDashboardsPanel();
         case 'alerts':
-          return (
-            <Grid hasGutter>
-              {renderAuthFields()}
-              <GridItem span={12}>
-                <Checkbox
-                  id="grafana-alerts-enabled"
-                  label="Enable alerts upload from folder alerts_path"
-                  isChecked={data.component_config.grafana.alerts_enabled !== false}
-                  onChange={(_, v) => set('component_config.grafana.alerts_enabled', v)}
-                />
-                <p style={{ color: mutedTextColor, fontSize: '13px' }}>
-                  Alert JSON is read from each folder row&apos;s alerts_path (same git/path as dashboards,
-                  or a dedicated row pointing at an alerts repo).
-                </p>
-              </GridItem>
-              {renderFoldersPanel()}
-            </Grid>
-          );
+          return renderAlertsPanel();
         case 'email':
           return (
             <Grid hasGutter>
@@ -8117,6 +8507,14 @@ echo $TOKEN
         case 'oidc':
           return (
             <Grid hasGutter>
+              <GridItem span={12}>
+                <p style={{ color: mutedTextColor, fontSize: '13px' }}>
+                  If Keycloak is not selected, or its hostname and realm are empty, this only
+                  configures OIDC on the Grafana side. When Keycloak is selected and those
+                  fields are filled in, the OIDC issuer URL is set to
+                  https://&lt;keycloak host&gt;/realms/&lt;realm&gt;.
+                </p>
+              </GridItem>
               <GridItem span={12}>
                 <Checkbox id="grafana-oidc-enabled" label="Enable Grafana OIDC" isChecked={!!oidc.enabled} onChange={(_, v) => set('component_config.grafana.oidc.enabled', v)} />
               </GridItem>
@@ -8166,12 +8564,28 @@ echo $TOKEN
                       />
                     </GridItem>
                   )}
-                  {renderTextField(
-                    'OIDC Issuer URL',
-                    'component_config.grafana.oidc.issuer',
-                    'text',
-                    isRhbkSelected(data) ? 'https://<keycloak-host>/realms/<realm> from RHBK hostname + realm.' : undefined
-                  )}
+                  <GridItem span={6}>
+                    <FormGroup label={labelWithHelp(
+                      'OIDC Issuer URL',
+                      isRhbkSelected(data) ? 'Filled from the Keycloak hostname and realm. Edit it to keep your own URL.' : 'Grafana OIDC issuer. Filled from Keycloak when Keycloak is selected and populated.'
+                    )}>
+                      <TextInput
+                        id="component_config.grafana.oidc.issuer"
+                        value={oidc.issuer || ''}
+                        onChange={(_, v) => setData(prev => {
+                          const copy = JSON.parse(JSON.stringify(prev));
+                          if (!copy.component_config.grafana.oidc) copy.component_config.grafana.oidc = {};
+                          const derived = buildRhbkIssuerUrl(copy);
+                          copy.component_config.grafana.oidc.issuer = v;
+                          copy.component_config.grafana.oidc.issuer_manual = String(v || '').trim() !== String(derived || '').trim();
+                          if (!copy.component_config.grafana.oidc.issuer_manual) {
+                            copy.component_config.grafana.oidc.issuer_derived = derived;
+                          }
+                          return copy;
+                        })}
+                      />
+                    </FormGroup>
+                  </GridItem>
                 </>
               )}
             </Grid>
@@ -8200,8 +8614,8 @@ echo $TOKEN
           platformInstallMode(data, 'grafana') === 'standalone'
             ? 'Standalone / RHEL is selected, so Grafana installs on the RHEL VM. OpenShift install options stay hidden.'
             : platformInstallMode(data, 'grafana') === 'openshift'
-              ? 'OpenShift is selected, so Grafana installs on OpenShift. The standalone VM install stays hidden.'
-              : 'Install (OpenShift) and Standalone are mutually exclusive. Datasources, Folders, Dashboards, and Alerts can run alone against an existing Grafana (config-only), or after either install. Leave Install unchecked for content-only.'
+              ? 'OpenShift is selected, so the standalone VM install stays hidden. Check Install Grafana to install it. Leave that unchecked to configure an existing Grafana.'
+              : 'Install Grafana and Standalone are mutually exclusive. Datasources, Folders, Dashboards, and Alerts can run alone against an existing Grafana.'
         )}
         <Tabs
           activeKey={activeGrafanaTab}

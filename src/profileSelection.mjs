@@ -79,9 +79,12 @@ export function visiblePlatformOptions(component, mode, options) {
   if (mode === 'both') return options;
   const hide = new Set();
   if (component === 'grafana') {
-    hide.add('install');
-    hide.add('standalone');
-    if (mode === 'standalone') hide.add('alternate_route');
+    if (mode === 'openshift') hide.add('standalone');
+    if (mode === 'standalone') {
+      hide.add('install');
+      hide.add('standalone');
+      hide.add('alternate_route');
+    }
   } else if (component === 'gitlab' || component === 'rhbk') {
     hide.add('standalone');
   }
@@ -100,7 +103,6 @@ export function syncPlatformInstallOptions(copy) {
       if (!options.includes('standalone')) options.push('standalone');
     } else if (mode === 'openshift') {
       options = options.filter(option => option !== 'standalone');
-      if (app === 'grafana' && !options.includes('install')) options.push('install');
     }
     copy.component_options[app] = options;
   });

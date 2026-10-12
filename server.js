@@ -506,6 +506,31 @@ function parseOpenShiftPackageManifests(body) {
   return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
+function isKubernetesName(value) {
+  return /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(String(value || ''))
+    && String(value).length <= 253;
+}
+
+function decodeSecretData(data, key) {
+  const raw = data && data[key];
+  if (!raw || typeof raw !== 'string') return '';
+  return Buffer.from(raw, 'base64').toString('utf8').replace(/^Bearer\s+/i, '').trim();
+}
+
+function prometheusUrlFromRoute(route) {
+  const host = String(route?.spec?.host || '').trim();
+  if (!host) return '';
+  return `https://${host}`;
+}
+
+/** True when a TokenRequest is usable in generated vault vars, not a short-lived mint. */
+function tokenIsLongLived(expirationTimestamp) {
+  if (!expirationTimestamp) return true;
+  const expires = Date.parse(expirationTimestamp);
+  if (!Number.isFinite(expires)) return true;
+  return expires - Date.now() > 30 * 24 * 60 * 60 * 1000;
+}
+
 function openshiftApiGetJson(apiHost, token, apiPath, skipTls, options = {}) {
   const base = normalizeOpenShiftApiHost(apiHost);
   if (!base) {
@@ -565,6 +590,132 @@ function openshiftApiGetJson(apiHost, token, apiPath, skipTls, options = {}) {
     req.end();
   });
 }
+
+function openshiftApiSendJson(apiHost, token, apiPath, skipTls, options = {}) {
+  const base = normalizeOpenShiftApiHost(apiHost);
+  if (!base) {
+    return Promise.reject(new Error('OpenShift API host is required'));
+  }
+  const method = options.method || 'GET';
+  const payload = options.body == null ? null : JSON.stringify(options.body);
+  const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 2000000;
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 15000;
+  const url = new URL(apiPath, `${base}/`);
+  return new Promise((resolve, reject) => {
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json'
+    };
+    if (payload) {
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = Buffer.byteLength(payload);
+    }
+    const req = https.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'http:' ? 80 : 443),
+        path: `${url.pathname}${url.search}`,
+        method,
+        headers,
+        rejectUnauthorized: !skipTls,
+        timeout: timeoutMs
+      },
+      res => {
+        let raw = '';
+        res.on('data', chunk => {
+          raw += chunk;
+          if (raw.length > maxBytes) {
+            req.destroy();
+            reject(new Error('OpenShift response too large'));
+          }
+        });
+        res.on('end', () => {
+          let body = null;
+          if (raw) {
+            try {
+              body = JSON.parse(raw);
+            } catch {
+              body = null;
+            }
+          }
+          resolve({ statusCode: res.statusCode, body });
+        });
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('OpenShift API timed out'));
+    });
+    req.on('error', err => {
+      reject(new Error(`OpenShift API request failed: ${err.message}`));
+    });
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function lookupPrometheusBearerToken(apiHost, token, skipTls, namespace) {
+  const secretPath = `/api/v1/namespaces/${namespace}/secrets/grafana-prometheus-sa-token`;
+  const existing = await openshiftApiSendJson(apiHost, token, secretPath, skipTls);
+  if (existing.statusCode === 401 || existing.statusCode === 403) {
+    throw new Error('OpenShift token was rejected. Check the token and RBAC.');
+  }
+  if (existing.statusCode >= 200 && existing.statusCode < 300) {
+    const decoded = decodeSecretData(existing.body?.data, 'token');
+    if (decoded) {
+      return {
+        bearerToken: decoded,
+        bearerSource: 'grafana-prometheus-sa-token',
+        tokenNote: ''
+      };
+    }
+  }
+
+  const candidates = ['grafana-prometheus-sa', 'prometheus-k8s'];
+  for (const serviceAccount of candidates) {
+    const minted = await openshiftApiSendJson(
+      apiHost,
+      token,
+      `/api/v1/namespaces/${namespace}/serviceaccounts/${serviceAccount}/token`,
+      skipTls,
+      {
+        method: 'POST',
+        body: {
+          apiVersion: 'authentication.k8s.io/v1',
+          kind: 'TokenRequest',
+          spec: { expirationSeconds: 31536000 }
+        }
+      }
+    );
+    if (minted.statusCode === 401 || minted.statusCode === 403) {
+      throw new Error('OpenShift token was rejected. Check the token and RBAC.');
+    }
+    if (minted.statusCode === 404 || minted.statusCode === 400) continue;
+    if (minted.statusCode < 200 || minted.statusCode >= 300) continue;
+    const mintedToken = String(minted.body?.status?.token || '').trim();
+    if (!mintedToken) continue;
+    if (!tokenIsLongLived(minted.body?.status?.expirationTimestamp)) {
+      return {
+        bearerToken: '',
+        bearerSource: '',
+        tokenNote: `Cluster issued a short-lived token for ${serviceAccount}. Leave Bearer token empty so the datasource job creates grafana-prometheus-sa-token.`
+      };
+    }
+    return {
+      bearerToken: mintedToken,
+      bearerSource: serviceAccount,
+      tokenNote: ''
+    };
+  }
+
+  return {
+    bearerToken: '',
+    bearerSource: '',
+    tokenNote: `No Prometheus bearer token found in ${namespace}. Leave Bearer token empty so the datasource job creates grafana-prometheus-sa-token.`
+  };
+}
+
 const openshiftOptionApps = {
   admin_htpasswd: 'admin_htpasswd',
   console_banner: 'console',
@@ -1592,8 +1743,8 @@ function selectedComponentAppsFrom(data) {
     for (const option of grafanaOpts) {
       if (grafanaOptionApps[option]) out.push(grafanaOptionApps[option]);
     }
-    // Satellite-style: drop bare grafana (OCP install JT) unless install selected or no options.
-    const wantInstall = grafanaOpts.length === 0 || grafanaOpts.includes('install');
+    // OpenShift install runs only when Install Grafana is selected.
+    const wantInstall = grafanaOpts.includes('install');
     const wantStandalone = grafanaOpts.includes('standalone');
     if (!wantInstall || wantStandalone) {
       for (let i = out.length - 1; i >= 0; i -= 1) {
@@ -1786,7 +1937,14 @@ function defaultComponentConfig(component) {
       postgres_password: '',
       postgres_host: '',
       folders: [
-        { name: 'Openshift', source_type: 'path', source: '', dashboards_path: 'dashboards', alerts_path: 'alerts' }
+        { name: 'Applications', source_type: 'path', source: '.', dashboards_path: 'dashboards/Applications', datasource_mode: 'multi' },
+        { name: 'Security', source_type: 'path', source: '.', dashboards_path: 'dashboards/Security', datasource_mode: 'none' },
+        { name: 'Infrastucture', source_type: 'path', source: '.', dashboards_path: 'dashboards/Infrastucture', datasource_mode: 'multi' }
+      ],
+      include_builtin_dashboards: true,
+      extra_dashboards: [],
+      alert_folders: [
+        { name: 'Alerts', source_type: 'path', source: '.', alerts_path: 'alerts/Alerts' }
       ],
       email: {
         enabled: false,
@@ -5973,6 +6131,62 @@ app.post('/api/openshift/storageclasses', async (req, res) => {
   } catch (err) {
     event(`Failed listing OpenShift storage classes: ${err.message}`);
     res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/api/openshift/grafana-prometheus', async (req, res) => {
+  const apiHost = String(req.body?.api_host || req.body?.host || '').trim();
+  const token = String(req.body?.token || req.body?.api_key || '').trim();
+  const skipTls = req.body?.skip_tls_verify !== false;
+  const routeName = String(req.body?.route_name || 'thanos-querier').trim() || 'thanos-querier';
+  const routeNamespace = String(req.body?.route_namespace || 'openshift-monitoring').trim()
+    || 'openshift-monitoring';
+  if (!apiHost || !token) {
+    res.status(400).json({
+      error: 'OpenShift API host and token are required to look up Thanos.'
+    });
+    return;
+  }
+  if (!isKubernetesName(routeName) || !isKubernetesName(routeNamespace)) {
+    res.status(400).json({ error: 'Route name and namespace must be Kubernetes names.' });
+    return;
+  }
+
+  try {
+    const route = await openshiftApiGetJson(
+      apiHost,
+      token,
+      `/apis/route.openshift.io/v1/namespaces/${routeNamespace}/routes/${routeName}`,
+      skipTls
+    );
+    const prometheusUrl = prometheusUrlFromRoute(route);
+    if (!prometheusUrl) {
+      res.status(502).json({
+        error: `Route ${routeName} in ${routeNamespace} has no host.`
+      });
+      return;
+    }
+    let bearer = { bearerToken: '', bearerSource: '', tokenNote: '' };
+    try {
+      bearer = await lookupPrometheusBearerToken(apiHost, token, skipTls, routeNamespace);
+    } catch (tokenErr) {
+      bearer.tokenNote = tokenErr.message;
+    }
+    event(`Looked up Grafana Prometheus route ${routeName} in ${routeNamespace}`);
+    res.json({
+      prometheusUrl,
+      bearerToken: bearer.bearerToken,
+      bearerSource: bearer.bearerSource,
+      routeName,
+      routeNamespace,
+      tokenNote: bearer.tokenNote
+    });
+  } catch (err) {
+    const message = /HTTP 404/.test(err.message)
+      ? `Route ${routeName} was not found in ${routeNamespace}.`
+      : err.message;
+    event(`Failed looking up Grafana Prometheus route: ${message}`);
+    res.status(502).json({ error: message });
   }
 });
 
