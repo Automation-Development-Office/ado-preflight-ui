@@ -396,8 +396,10 @@ options are omitted from the generated preflight payload so the CLI/bootstrap
 path does not create those settings by default.
 
 The OpenShift skip TLS option defaults to enabled for self-signed environments.
-Cert-manager can be configured for a custom certificate, IdM ACME, or AWS PCA
-when the `cert_manager` app is selected.
+Selecting the `cert_manager` OpenShift app shows a **Cert Manager** tab (IdM ACME,
+AWS PCA, or custom PEMs for per-app issuers). Checking **Default Ingress Cert**
+under OpenShift Options shows a tab for the router wildcard
+(`update_default_ingress`, PEMs, optional cluster-wide CA trust).
 
 #### Agent Installer Config
 
@@ -962,6 +964,7 @@ Use the question mark menu in the top-right of the UI to open:
 
 - **ADO Collection Documentation**
 - **ADO Preflight UI Documentation**
+- **Show known bugs** (`known-bugs.md` — lab workarounds such as Hub large-collection publish timeouts)
 
 The ADO Collection Documentation page renders the collection `README.md`. Role
 README links in the role documentation table can be clicked in the UI. For

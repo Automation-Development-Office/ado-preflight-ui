@@ -1,9 +1,11 @@
 FROM registry.access.redhat.com/ubi9/nodejs-20 AS build
 WORKDIR /opt/app-root/src
-COPY package.json index.html README.md ./
+COPY package.json index.html README.md known-bugs.md ./
 COPY ado-logo-redhat.png ./
 COPY src ./src
-RUN npm install && npm run build
+# npm 10.8.2 in this image crashes on peer resolution (edgesOut). npm 11 does not.
+# hash -r drops the shell's cached /usr/bin/npm from the line above.
+RUN npm install -g npm@11 && hash -r && npm install && npm run build
 
 # Runtime image: skopeo pushes a *baked-in* ADO EE archive to Hub (no host podman, no runtime internet).
 # Contoller bootstrap logic lives in the infra-ado collection tarball — do not overlay
@@ -20,8 +22,8 @@ RUN dnf install -y git python3 python3-pip skopeo gcc-c++ make python3-devel tar
 
 WORKDIR /opt/app-root/src
 
-COPY package.json README.md ./
-RUN npm install --omit=dev
+COPY package.json README.md known-bugs.md ./
+RUN npm install -g npm@11 && hash -r && npm install --omit=dev
 
 COPY server.js ./
 COPY deploy ./deploy
