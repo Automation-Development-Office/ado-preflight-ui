@@ -74,6 +74,52 @@ const awsApps = ['ec2_ami_copy'];
 const provisionApps = ['aws_instance','openshift_virt'];
 const satelliteApps = ['satellite'];
 
+const PLATFORM_DETAILS = {
+  openshift: {
+    title: 'OpenShift',
+    description: 'Operators and applications installed on an OpenShift cluster. Bootstrap writes cluster auth, routes, and the OpenShift playbooks.'
+  },
+  rhel: {
+    title: 'Standalone / RHEL',
+    description: 'Services installed on RHEL hosts. Use this when the component runs on a virtual machine instead of as an OpenShift operator.'
+  },
+  satellite: {
+    title: 'Satellite',
+    description: 'Red Hat Satellite server, content views, capsules, client registration, and dynamic inventory.'
+  },
+  patching: {
+    title: 'Patching',
+    description: 'Host patching that uses Satellite and IdM to register systems and apply content.'
+  },
+  aws: {
+    title: 'AWS',
+    description: 'Amazon Web Services tasks, including copying an EC2 AMI.'
+  },
+  provision: {
+    title: 'Provisioning',
+    description: 'Create new hosts as an AWS instance or an OpenShift Virtualization virtual machine.'
+  }
+};
+
+const platformCatalogs = {
+  openshift: openshiftApps,
+  rhel: rhelApps,
+  patching: patchingApps,
+  aws: awsApps,
+  provision: provisionApps,
+  satellite: satelliteApps
+};
+
+const componentPlatformIds = component => (component === 'elastic' ? ['elastic', 'eck'] : [component]);
+
+function platformsOffering(component) {
+  const ids = componentPlatformIds(component);
+  const matches = Object.keys(PLATFORM_DETAILS).filter(platform =>
+    (platformCatalogs[platform] || []).some(app => ids.includes(app))
+  );
+  return matches.length ? matches : Object.keys(PLATFORM_DETAILS);
+}
+
 const AAP_VERSION_OPTIONS = [
   { value: '24', label: '2.4' },
   { value: '25', label: '2.5' },
@@ -1474,6 +1520,61 @@ const formatMacAddress = value => {
   return raw;
 };
 
+const AGENT_NODE_MIRROR_FIELDS = [
+  'role',
+  'macAddress',
+  'interfaceName',
+  'bondEnabled',
+  'bondName',
+  'bondMode',
+  'secondaryMacAddress',
+  'secondaryInterfaceName',
+  'networkMode',
+  'prefixLength',
+  'gateway',
+  'dnsServers',
+  'diskDevice',
+  'labels',
+  'taints'
+];
+
+const bumpedIpv4 = (ip, offset) => {
+  const parts = String(ip || '').trim().split('.');
+  if (parts.length !== 4 || parts.some(part => !/^\d+$/.test(part))) return '';
+  const nums = parts.map(Number);
+  if (nums.some(num => num > 255)) return '';
+  const host = nums[3] + offset;
+  if (host < 0 || host > 255) return '';
+  return `${nums[0]}.${nums[1]}.${nums[2]}.${host}`;
+};
+
+const applyMirroredNodeFields = (target, source, ipOffset = 1) => {
+  const changed = [];
+  AGENT_NODE_MIRROR_FIELDS.forEach(field => {
+    const value = source[field];
+    if (typeof value === 'boolean' || (typeof value === 'number' && !Number.isNaN(value))) {
+      if (target[field] !== value) {
+        target[field] = value;
+        changed.push(field);
+      }
+      return;
+    }
+    if (value === undefined || value === null || String(value).trim() === '') return;
+    if (target[field] !== value) {
+      target[field] = value;
+      changed.push(field);
+    }
+  });
+  if (source.networkMode === 'static' && String(source.ipAddress || '').trim()) {
+    const nextIp = bumpedIpv4(source.ipAddress, ipOffset);
+    if (nextIp && !String(target.ipAddress || '').trim()) {
+      target.ipAddress = nextIp;
+      changed.push('ipAddress');
+    }
+  }
+  return changed;
+};
+
 const defaultAgentInstallerNode = index => ({
   // Stable id so editing hostname does not remount the row and steal focus.
   id: `node-${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${index}`,
@@ -1502,7 +1603,7 @@ const agentInstallerDefaults = {
   topology: 'ha',
   cluster_name: 'ocp-dev',
   base_domain: 'dev.rhlab',
-  openshift_version: '4.16',
+  openshift_version: '4.18',
   platform: 'baremetal',
   publish: 'External',
   network_type: 'OVNKubernetes',
@@ -1788,6 +1889,20 @@ function galaxySetupTokenError(aap) {
   return 'Galaxy setup needs an API token. Set General → Hub / Galaxy API token, or put a token on each enabled Galaxy credential. One of those is enough.';
 }
 
+function missingComponentPlatforms(source) {
+  const components = source?.components || [];
+  if (components.includes('all')) return [];
+  const groups = Object.keys(PLATFORM_DETAILS);
+  return simpleComponents.filter(component => {
+    if (groups.includes(component) || !components.includes(component)) return false;
+    const ids = componentPlatformIds(component);
+    const chosen = groups.filter(group =>
+      (source?.component_apps?.[group] || []).some(app => ids.includes(app))
+    );
+    return chosen.length !== 1;
+  });
+}
+
 function wizardRequirements(source) {
   const aap = source?.aap || {};
   const core = [];
@@ -1797,6 +1912,9 @@ function wizardRequirements(source) {
   if ((!Array.isArray(source?.components) || source.components.length === 0) && !installAap) {
     core.push('at least one profile or component');
   }
+  missingComponentPlatforms(source).forEach(component => {
+    core.push(`Platform for ${componentOptionLabels[component] || component}`);
+  });
   const git = [];
   if (!String(aap.git_url || '').trim()) git.push('Git URL');
   const platform = [];
@@ -1828,6 +1946,7 @@ const defaults = {
   // Extra survey-only environment names. Primary Environment Type is always
   // included; prod is selected by default for Contoller JT surveys.
   additional_environments: ['prod'],
+  additional_environments_create_group_vars: false,
   domain: 'prod.rhlab',
 
   ansible: {
@@ -2840,6 +2959,8 @@ function App() {
   const [agentInstallerPreviewTab, setAgentInstallerPreviewTab] = useState('install');
   const [agentInstallerProfiles, setAgentInstallerProfiles] = useState([]);
   const [agentNodeEditorIndex, setAgentNodeEditorIndex] = useState(null);
+  const [agentNodeMirrorNote, setAgentNodeMirrorNote] = useState('');
+  const [agentActionsOpen, setAgentActionsOpen] = useState(false);
   const outputRef = useRef(null);
   const importFileRef = useRef(null);
   const agentProfileFileRef = useRef(null);
@@ -2935,6 +3056,7 @@ function App() {
     String(data.environment || '').trim()
     && String(data.domain || '').trim()
     && coreHasSelection
+    && missingComponentPlatforms(data).length === 0
   );
 
   useEffect(() => {
@@ -4615,6 +4737,7 @@ function App() {
     if (merged.git.username === undefined) merged.git.username = '';
     if (merged.additional_environments === undefined) merged.additional_environments = ['prod'];
     merged.additional_environments = parseAdditionalEnvironmentsList(merged.additional_environments);
+    merged.additional_environments_create_group_vars = merged.additional_environments_create_group_vars === true;
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
     if (merged.ansible.extra_args === undefined) merged.ansible.extra_args = '';
     if (merged.ansible.state !== 'absent') merged.ansible.state = 'present';
@@ -5657,6 +5780,13 @@ function App() {
         }
       }
 
+      if (wasSelected && component !== 'all' && !groupComponents.includes(component)) {
+        const ids = componentPlatformIds(component);
+        Object.keys(copy.component_apps).forEach(group => {
+          copy.component_apps[group] = (copy.component_apps[group] || []).filter(app => !ids.includes(app));
+        });
+      }
+
       if (!copy.jira) copy.jira = {};
       copy.jira.enabled = next.includes('all') || next.includes('jira');
 
@@ -5670,6 +5800,35 @@ function App() {
   const toggleComponentAndOpen = component => {
     toggleComponent(component);
     openConfigPanel(component);
+  };
+
+  const assignAdditionalComponentPlatform = (component, platformId) => {
+    if (!platformId || !PLATFORM_DETAILS[platformId]) return;
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.component_apps) copy.component_apps = {};
+      const ids = componentPlatformIds(component);
+      Object.keys(copy.component_apps).forEach(group => {
+        copy.component_apps[group] = (copy.component_apps[group] || []).filter(app => !ids.includes(app));
+      });
+      const current = copy.component_apps[platformId] || [];
+      copy.component_apps[platformId] = [...current, ...ids.filter(id => !current.includes(id))];
+      const next = [...(copy.components || [])].filter(value => value !== 'all');
+      if (!next.includes(component)) next.push(component);
+      if (!next.includes(platformId)) next.push(platformId);
+      copy.components = next;
+      copy.component = next[0] || '';
+      clearStandaloneWhenComponentsSelected(copy);
+      syncPlatformInstallOptions(copy);
+      return copy;
+    });
+  };
+
+  const additionalComponentPlatforms = component => {
+    const ids = componentPlatformIds(component);
+    return groupComponents.filter(group =>
+      (data.component_apps?.[group] || []).some(app => ids.includes(app))
+    );
   };
 
 
@@ -5898,9 +6057,28 @@ function App() {
       if (!Array.isArray(copy.openshift.agent_installer.nodes)) {
         copy.openshift.agent_installer.nodes = [];
       }
-      copy.openshift.agent_installer.nodes.push(defaultAgentInstallerNode(copy.openshift.agent_installer.nodes.length));
+      const nodes = copy.openshift.agent_installer.nodes;
+      const next = defaultAgentInstallerNode(nodes.length);
+      const previous = nodes[nodes.length - 1];
+      if (previous) applyMirroredNodeFields(next, previous, 1);
+      nodes.push(next);
       return copy;
     });
+  };
+
+  const mirrorAgentNodeFromPrevious = index => {
+    const nodes = data.openshift?.agent_installer?.nodes;
+    if (index < 1 || !Array.isArray(nodes) || !nodes[index] || !nodes[index - 1]) {
+      setAgentNodeMirrorNote('Could not read that node row.');
+      return;
+    }
+    const next = { ...nodes[index] };
+    const changed = applyMirroredNodeFields(next, nodes[index - 1], 1);
+    const nextNodes = nodes.map((node, nodeIndex) => (nodeIndex === index ? next : node));
+    setAgentInstaller('nodes', nextNodes);
+    setAgentNodeMirrorNote(changed.length
+      ? `Filled node ${index + 1} from node ${index}: ${changed.join(', ')}. Hostname stayed on this row. Give this host its own MAC if you copied one.`
+      : `Node ${index + 1} already had the filled-in values from node ${index}. Type a MAC, interface, or static IP on the row above, then mirror again.`);
   };
 
   const removeAgentNode = index => {
@@ -6110,11 +6288,43 @@ function App() {
     }
   };
 
-  const validateAgentInstaller = () => callAgentInstallerApi('validate');
-
-  const generateAgentInstaller = () => callAgentInstallerApi('generate');
-
   const downloadAgentInstallerZip = () => callAgentInstallerApi('download', true);
+
+  const exportInstallationBundle = async () => {
+    setAgentActionsOpen(false);
+    setAgentInstallerBusy(true);
+    try {
+      const response = await fetch('/api/openshift-agent/export-bundle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...agentInstallerConfig(),
+          registry_mode: 'existing'
+        })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.valid === false) {
+        setAgentInstallerResult({
+          valid: false,
+          errors: body.errors || [body.error || 'Bundle export failed.'],
+          warnings: body.warnings || []
+        });
+        return;
+      }
+      setAgentInstallerResult({
+        valid: true,
+        errors: [],
+        warnings: [
+          `Installation bundle: ${body.bundle_dir}`,
+          body.command
+        ]
+      });
+    } catch (err) {
+      setAgentInstallerResult({ valid: false, errors: [err.message], warnings: [] });
+    } finally {
+      setAgentInstallerBusy(false);
+    }
+  };
 
   const downloadSanitizedAgentInstallerZip = () => callAgentInstallerApi(
     'download-sanitized',
@@ -6122,63 +6332,66 @@ function App() {
     `${agentInstallerConfig().cluster_name || 'openshift-agent'}-agent-configs-sanitized.zip`
   );
 
-  const mapToAirgapArchitect = async ({ download = false } = {}) => {
+  const showAgentYaml = async (tab) => {
+    setAgentActionsOpen(false);
+    const result = await callAgentInstallerApi('generate');
+    if (result?.valid) setAgentInstallerPreviewTab(tab);
+  };
+
+  const runAgentInstall = async (action) => {
+    setAgentActionsOpen(false);
+    if (bootstrapStatus === 'running') {
+      setAgentInstallerResult({
+        valid: false,
+        errors: ['The bootstrap console is already running a job.'],
+        warnings: []
+      });
+      return;
+    }
+
     setAgentInstallerBusy(true);
+    setBootstrapStatus('running');
+    setActiveTab('logs');
+    setPreview('Starting OpenShift agent install...\n');
+    requestAnimationFrame(() => {
+      document.querySelector('.ado-console-toolbar')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+
     try {
-      const response = await fetch('/api/airgap-architect/map', {
+      const response = await fetch('/api/openshift-agent/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(agentInstallerConfig())
+        body: JSON.stringify({ action, ...agentInstallerConfig() })
       });
-      const result = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(
-          (result && (result.errors || []).join('; '))
-          || `Airgap Architect map failed (${response.status})`
-        );
+      const body = await response.json().catch(() => ({}));
+      if (response.status === 400) {
+        setAgentInstallerResult({
+          valid: false,
+          errors: body.errors || [body.error || 'Agent config is not valid.'],
+          warnings: body.warnings || []
+        });
+        setBootstrapStatus('failed');
+        return;
       }
-      setAgentInstallerResult({
-        valid: result.valid !== false,
-        errors: result.errors || [],
-        warnings: [
-          ...(result.warnings || []),
-          result.mode === 'remote'
-            ? `Airgap companion filled installer pieces via ${result.architectUrl}`
-            : 'Local installer pieces (set AIRGAP_ARCHITECT_URL for companion enrich).'
-        ],
-        installConfig: result.installConfig,
-        agentConfig: result.agentConfig,
-        imagesetConfigYaml: result.imagesetConfigYaml || '',
-        fieldManual: result.fieldManual || '',
-        installerPieces: result.installerPieces || null,
-        airgapArchitect: result
-      });
-      if (download) {
-        const handoff = {
-          kind: 'ado-airgap-installer-pieces',
-          version: 1,
-          exported_at: new Date().toISOString(),
-          mode: result.mode,
-          role: result.role,
-          architectState: result.architectState,
-          installConfig: result.installConfig,
-          agentConfig: result.agentConfig,
-          imagesetConfigYaml: result.imagesetConfigYaml,
-          fieldManual: result.fieldManual,
-          installerPieces: result.installerPieces,
-          imagesetHint: result.imagesetHint,
-          remoteDiffSummary: result.remoteDiffSummary,
-          remote: result.remote
-        };
-        downloadFile(
-          `${agentInstallerConfig().cluster_name || 'openshift'}-airgap-installer-pieces.json`,
-          JSON.stringify(handoff, null, 2)
-        );
+      if (!response.ok && response.status !== 202) {
+        throw new Error(body.error || `Agent install request failed (${response.status})`);
       }
-      return result;
+
+      let running = true;
+      while (running) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        const logs = await fetch('/api/logs').then(r => r.text()).catch(() => '');
+        if (logs) setPreview(logs);
+        const status = await fetch('/api/openshift-agent/run').then(r => r.json()).catch(() => null);
+        if (!status) continue;
+        running = status.running === true;
+        if (!running) {
+          setBootstrapStatus(status.code === 0 ? 'complete' : 'failed');
+        }
+      }
     } catch (err) {
       setAgentInstallerResult({ valid: false, errors: [err.message], warnings: [] });
-      return null;
+      setBootstrapStatus('failed');
     } finally {
       setAgentInstallerBusy(false);
     }
@@ -7663,15 +7876,30 @@ echo $TOKEN
     iscsiStorageClass: 'StorageClass name to create. Default: synology-iscsi-storage.',
     agentClusterName: 'OpenShift cluster name used in install-config metadata. Example: ocp-dev.',
     agentBaseDomain: 'Base DNS domain for the cluster. Example: dev.rhlab.',
-    agentPullSecret: 'Red Hat pull secret JSON copied from cloud.redhat.com.',
-    agentSshKey: 'Public SSH key installed for core user access. Example: ssh-ed25519 AAAA...',
+    agentPullSecret: 'Red Hat pull secret JSON. Paste it here, or upload the pull-secret file.',
+    agentTrustBundle: 'PEM CA bundle added to install-config.yaml. Paste it here, or upload a .pem or .crt file.',
+    agentSshKey: 'Public SSH key for the core user. Paste it here, or upload a .pub file. Example: ssh-ed25519 AAAA...',
     agentVip: 'Virtual IP address inside the machine network CIDR.',
     agentNetworkCidr: 'CIDR block used by bare metal nodes. Example: 192.168.2.0/24.',
     agentRendezvousIp: 'IP address of the first control-plane host used by the agent installer.',
     agentNodeStatic: 'Static networking writes NMState config into agent-config.yaml. DHCP uses the MAC/interface only.',
     agentMac: 'Type 12 hex digits (112233445566) or colon-separated (11:22:33:44:55:66). Colons are added automatically when missing.',
     agentBond: 'Enable to create a bond0 NMState interface from two NICs (primary + secondary MAC/interface).',
-    agentKernelArgs: 'One kernel argument per line. Example: ixgbe.allow_unsupported_sfp=1. Generates MachineConfig manifests under openshift/ plus an assisted-style kernelArguments snippet.'
+    agentDisconnectedRegistry: (
+      <>
+        <p>One source per line. Text before the first colon is the source repository. Text after it is the mirror.</p>
+        <pre style={{ whiteSpace: 'pre-wrap', fontSize: '12px', margin: '8px 0 0' }}>{`quay.io/openshift-release-dev/ocp-release: registry.example.com:5000/ocp4/openshift4
+quay.io/openshift-release-dev/ocp-v4.0-art-dev: registry.example.com:5000/ocp4/openshift4`}</pre>
+      </>
+    ),
+    agentKernelArgs: (
+      <>
+        <p>One kernel argument per line. A bare line is appended. Start a line with append, replace, or delete when the operation matters.</p>
+        <pre style={{ whiteSpace: 'pre-wrap', fontSize: '12px', margin: '8px 0 0' }}>{`ixgbe.allow_unsupported_sfp=1
+append: rd.multipath=default
+replace: console=tty0`}</pre>
+      </>
+    )
   };
 
   const gitHelp = {
@@ -11844,7 +12072,14 @@ echo $TOKEN
       </GridItem>
     );
 
-    const agentTextArea = (label, key, help, rows = 5) => (
+    const readAgentTextFile = (key, file) => {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => setAgentInstaller(key, String(reader.result || '').replace(/\s+$/, ''));
+      reader.readAsText(file);
+    };
+
+    const agentTextArea = (label, key, help, rows = 5, uploadAccept = '') => (
       <GridItem span={12}>
         <FormGroup label={labelWithHelp(label, help)}>
           <textarea
@@ -11854,6 +12089,27 @@ echo $TOKEN
             spellCheck="false"
             style={inputStyle}
           />
+          {uploadAccept && (
+            <div style={{ marginTop: '8px' }}>
+              <input
+                id={`agent-file-${key}`}
+                type="file"
+                accept={uploadAccept}
+                style={{ display: 'none' }}
+                onChange={event => {
+                  const file = event.target.files?.[0];
+                  event.target.value = '';
+                  readAgentTextFile(key, file);
+                }}
+              />
+              <Button
+                variant="secondary"
+                onClick={() => document.getElementById(`agent-file-${key}`)?.click()}
+              >
+                Upload file
+              </Button>
+            </div>
+          )}
         </FormGroup>
       </GridItem>
     );
@@ -11933,7 +12189,23 @@ echo $TOKEN
           </GridItem>
           {agentField('Cluster Name', 'cluster_name', openshiftHelp.agentClusterName)}
           {agentField('Base Domain', 'base_domain', openshiftHelp.agentBaseDomain)}
-          {agentField('OpenShift Version', 'openshift_version', 'OpenShift release version for the saved profile. Example: 4.16.')}
+          <GridItem span={6}>
+            <FormGroup label={labelWithHelp('OpenShift Version', 'OpenShift release for the saved profile.')}>
+              <select
+                value={config.openshift_version || '4.18'}
+                onChange={e => setAgentInstaller('openshift_version', e.target.value)}
+                style={inputStyle}
+              >
+                {(() => {
+                  const versions = ['4.18', '4.19', '4.20', '4.21', '4.22'];
+                  const current = config.openshift_version || '4.18';
+                  return (versions.includes(current) ? versions : [current, ...versions]).map(version => (
+                    <option key={version} value={version}>{version}</option>
+                  ));
+                })()}
+              </select>
+            </FormGroup>
+          </GridItem>
           <GridItem span={6}>
             <FormGroup label="Topology">
               <select
@@ -11946,8 +12218,8 @@ echo $TOKEN
               </select>
             </FormGroup>
           </GridItem>
-          {agentTextArea('Pull Secret', 'pull_secret', openshiftHelp.agentPullSecret, 4)}
-          {agentTextArea('SSH Public Key', 'ssh_public_key', openshiftHelp.agentSshKey, 3)}
+          {agentTextArea('Pull Secret', 'pull_secret', openshiftHelp.agentPullSecret, 4, '.txt,.json,application/json')}
+          {agentTextArea('SSH Public Key', 'ssh_public_key', openshiftHelp.agentSshKey, 3, '.pub,.txt')}
 
           <GridItem span={12}>
             <div style={{ fontWeight: 700, margin: '12px 0 8px' }}>Networking</div>
@@ -11964,8 +12236,8 @@ echo $TOKEN
           {agentField('HTTP Proxy', 'proxy_http', 'Optional install-config proxy HTTP URL.')}
           {agentField('HTTPS Proxy', 'proxy_https', 'Optional install-config proxy HTTPS URL.')}
           {agentField('No Proxy', 'proxy_no_proxy', 'Optional comma-separated proxy bypass list.')}
-          {agentTextArea('Additional Trust Bundle', 'additional_trust_bundle', 'Optional PEM CA bundle added to install-config.yaml.', 4)}
-          {agentTextArea('Disconnected Registry Image Content Sources', 'disconnected_registry', 'Optional YAML list for imageContentSources when installing disconnected.', 4)}
+          {agentTextArea('Additional Trust Bundle', 'additional_trust_bundle', openshiftHelp.agentTrustBundle, 4, '.pem,.crt,.cer,.txt')}
+          {agentTextArea('Disconnected Registry Image Content Sources', 'disconnected_registry', openshiftHelp.agentDisconnectedRegistry, 4)}
           {agentTextArea(
             'Kernel Arguments',
             'kernel_arguments',
@@ -11989,6 +12261,7 @@ echo $TOKEN
         <div style={{ color: mutedTextColor, marginBottom: '8px', fontSize: '0.9em' }}>
           MAC tip: paste <code>112233445566</code> and blur the field — colons are inserted automatically if missing.
           Enable Bond when the host needs a second NIC/MAC for link aggregation.
+          Fill node 1, then use Mirror prev on a later row. That copies role, MAC, second MAC, interface, bond, network, prefix, gateway, DNS, disk, labels, and taints. Hostnames stay on each row. An empty static IP becomes the source address plus one. A line under the table names the fields that changed.
         </div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1480px' }}>
@@ -12099,6 +12372,22 @@ echo $TOKEN
                     <TextInput value={node.taints || ''} onChange={(_, v) => setAgentNode(index, 'taints', v)} />
                   </td>
                   <td style={{ padding: '6px', whiteSpace: 'nowrap' }}>
+                    {index > 0 && (
+                      <>
+                        <Button
+                          variant="link"
+                          type="button"
+                          onClick={event => {
+                            event.preventDefault();
+                            mirrorAgentNodeFromPrevious(index);
+                          }}
+                          title="Copy filled-in fields from the row above. Hostname stays on this row."
+                        >
+                          Mirror prev
+                        </Button>
+                        {' '}
+                      </>
+                    )}
                     <Button variant="link" onClick={() => setAgentNodeEditorIndex(index)}>Form</Button>
                     {' '}
                     <Button variant="link" onClick={() => removeAgentNode(index)}>Remove</Button>
@@ -12108,6 +12397,9 @@ echo $TOKEN
             </tbody>
           </table>
         </div>
+        {agentNodeMirrorNote && (
+          <div style={{ marginTop: '8px', fontSize: '0.9em' }}>{agentNodeMirrorNote}</div>
+        )}
 
         {editingNode && (
           <Modal
@@ -12170,74 +12462,61 @@ echo $TOKEN
           </Modal>
         )}
 
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '12px' }}>
-          <Button variant="secondary" onClick={addAgentNode}>Add Node</Button>
-          <Button variant="primary" isDisabled={agentInstallerBusy} onClick={validateAgentInstaller}>Validate Configuration</Button>
-          <Button variant="secondary" isDisabled={agentInstallerBusy} onClick={generateAgentInstaller}>Generate YAML Preview</Button>
-          <Button variant="secondary" isDisabled={agentInstallerBusy} onClick={downloadAgentInstallerZip}>Download ZIP</Button>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '12px', alignItems: 'center' }}>
+          <Button variant="secondary" type="button" onClick={addAgentNode}>Add Node</Button>
           <Button
-            variant="secondary"
-            isDisabled={agentInstallerBusy}
-            onClick={downloadSanitizedAgentInstallerZip}
-            title="Redacts hostnames, IPs, MACs, pull secret, SSH keys, certs, tokens, and proxy URLs for safe sharing."
+            variant="primary"
+            type="button"
+            isDisabled={agentInstallerBusy || bootstrapStatus === 'running'}
+            onClick={() => runAgentInstall('install')}
           >
-            Download sanitized ZIP
+            Run bootstrap disconnected Install
           </Button>
-          <Button
-            variant="secondary"
-            isDisabled={agentInstallerBusy}
-            onClick={() => mapToAirgapArchitect({ download: false })}
-            title="Preflight form → airgap installer pieces (imageset + field manual). Does not start an install."
+          <Dropdown
+            isOpen={agentActionsOpen}
+            onOpenChange={setAgentActionsOpen}
+            onSelect={() => setAgentActionsOpen(false)}
+            toggle={toggleRef => (
+              <MenuToggle
+                ref={toggleRef}
+                onClick={() => setAgentActionsOpen(open => !open)}
+                isDisabled={agentInstallerBusy}
+              >
+                Actions
+              </MenuToggle>
+            )}
           >
-            Generate airgap installer pieces
-          </Button>
-          <Button
-            variant="secondary"
-            isDisabled={agentInstallerBusy}
-            onClick={() => mapToAirgapArchitect({ download: true })}
-            title="Download JSON bundle of form YAML + airgap installer pieces."
-          >
-            Download airgap pieces JSON
-          </Button>
-          {result?.installConfig && (
-            <>
-              <Button variant="link" onClick={() => downloadFile('install-config.yaml', result.installConfig)}>Download install-config.yaml</Button>
-              <Button variant="link" onClick={() => downloadFile('agent-config.yaml', result.agentConfig)}>Download agent-config.yaml</Button>
-            </>
-          )}
-          {(result?.imagesetConfigYaml || result?.installerPieces?.['imageset-config.yaml']) && (
-            <Button
-              variant="link"
-              onClick={() => downloadFile(
-                'imageset-config.yaml',
-                result.imagesetConfigYaml || result.installerPieces['imageset-config.yaml']
-              )}
-            >
-              Download imageset-config.yaml
-            </Button>
-          )}
-          {(result?.fieldManual || result?.installerPieces?.['FIELD_MANUAL.md']) && (
-            <Button
-              variant="link"
-              onClick={() => downloadFile(
-                'FIELD_MANUAL.md',
-                result.fieldManual || result.installerPieces['FIELD_MANUAL.md']
-              )}
-            >
-              Download FIELD_MANUAL.md
-            </Button>
-          )}
+            <DropdownList>
+              <DropdownItem onClick={() => showAgentYaml('agent')}>
+                Show agent-config.yaml
+              </DropdownItem>
+              <DropdownItem onClick={() => showAgentYaml('install')}>
+                Show install-config.yaml
+              </DropdownItem>
+              <DropdownItem onClick={() => runAgentInstall('image')}>
+                Run agent install to generate ISO
+              </DropdownItem>
+              <DropdownItem onClick={() => runAgentInstall('pxe')}>
+                Run agent install to generate PXE
+              </DropdownItem>
+              <DropdownItem onClick={exportInstallationBundle}>
+                Export installation bundle
+              </DropdownItem>
+              <DropdownItem onClick={() => { setAgentActionsOpen(false); downloadAgentInstallerZip(); }}>
+                Download ZIP YAML files
+              </DropdownItem>
+              <DropdownItem onClick={() => { setAgentActionsOpen(false); downloadSanitizedAgentInstallerZip(); }}>
+                Download scrubbed YAML files
+              </DropdownItem>
+            </DropdownList>
+          </Dropdown>
         </div>
         <div style={{ color: mutedTextColor, marginTop: '8px', fontSize: '0.9em' }}>
-          Use <strong>Download sanitized ZIP</strong> when sharing configs off-site. It replaces customer hostnames, IPs, MACs, secrets, certs, and tokens with example values and includes <code>README-SANITIZED.txt</code>.
+          Run bootstrap disconnected Install writes the agent directory and streams
           {' '}
-          <strong>Generate airgap installer pieces</strong>: preflight keeps the form (install/agent YAML);
-          the airgap companion fills disconnected pieces (oc-mirror <code>imageset-config.yaml</code> + field manual).
-          Set <code>AIRGAP_ARCHITECT_URL</code> (e.g. <code>http://127.0.0.1:8081</code>) to enrich from ado-airgap-architect.
-          This does <em>not</em> boot nodes or run the installer.
-        </div>
-        <div style={{ color: mutedTextColor, marginTop: '8px', fontSize: '0.9em' }}>
-          Use <strong>Download sanitized ZIP</strong> when sharing configs off-site. It replaces customer hostnames, IPs, MACs, secrets, certs, and tokens with example values and includes <code>README-SANITIZED.txt</code>.
+          <code>openshift-install agent</code>
+          {' '}
+          into the bootstrap console. Actions shows the YAML, builds an ISO or PXE files, and downloads the YAML zip. Export installation bundle writes a versioned directory the ocp_disconnected_install role can validate without this UI staying open. The scrubbed zip replaces hostnames, IPs, MACs, secrets, and tokens with example values.
         </div>
 
         {result && (
@@ -13690,9 +13969,8 @@ echo $TOKEN
                 {' '}
                 <code>ado-aap-rhel-install-bootstrap.yml</code>
                 {' '}
-                targets inventory host <code>bastion</code> — add that host to
-                Controller inventory, or run the playbook from a machine that
-                can reach the install host.
+                SSHes to the RHEL / VM hostname below. That name is the install
+                target. The AAP route hostname is not.
               </div>
             </GridItem>
             <GridItem span={6}>
@@ -16131,15 +16409,17 @@ ${vaultYaml}
                     label={labelWithHelp(
                       <>
                         Additional Environments
-                        <span style={{ color: mutedTextColor, fontWeight: 400 }}> (optional)</span>
+                        <span style={{ color: mutedTextColor, fontWeight: 400 }}> (For additional Env. In Job Templates. Optional)</span>
                       </>,
                       <>
                         <p style={{ marginTop: 0 }}>
                           Survey choices for Contoller job templates (for example <code>prod</code>, <code>dev</code>, <code>pilot</code>).
-                          <code>prod</code> is selected by default.
+                          <code>prod</code> is selected by default. The primary Environment Type above is always included.
                         </p>
                         <p style={{ marginBottom: 0 }}>
-                          Does not create <code>group_vars</code> directories. The primary Environment Type above is always included.
+                          <strong>Create group_vars for selected environments</strong> copies
+                          <code>group_vars/all/&lt;primary&gt;</code> into each other selected name.
+                          Leave it off to keep these as job-template survey choices only.
                         </p>
                       </>
                     )}
@@ -16178,6 +16458,12 @@ ${vaultYaml}
                         }}
                       />
                     </div>
+                    <Checkbox
+                      id="additional-env-create-group-vars"
+                      label="Create group_vars for selected environments"
+                      isChecked={data.additional_environments_create_group_vars === true}
+                      onChange={(_, checked) => set('additional_environments_create_group_vars', checked === true)}
+                    />
                     {(additionalEnvOtherEnabled || additionalEnvCustom.length > 0) && (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '520px' }}>
                         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
@@ -16289,13 +16575,96 @@ ${vaultYaml}
                 <GridItem span={12}>
                     <div style={{ marginTop: '16px' }}>
                     <ExpandableSection toggleText="Additional components" isExpanded={additionalProfilesOpen} onToggle={(_, value) => setAdditionalProfilesOpen(value)}>
+                      <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
+                        Each selected component needs a platform. The ? beside Platform lists that platform and the components it can run.
+                      </div>
                       <Checkbox label="All components (legacy)" isChecked={data.components.includes('all')} onChange={() => toggleComponentAndOpen('all')} />
-                      {simpleComponents.filter(component => !groupComponents.includes(component)).map(component => (
-                        <div key={component} style={{ display: 'flex', gap: 8 }}>
-                          <Checkbox label={componentOptionLabels[component] || component} isChecked={data.components.includes(component)} onChange={() => toggleComponentAndOpen(component)} />
-                          {renderComponentLabel(component)}
-                        </div>
-                      ))}
+                      {simpleComponents.filter(component => !groupComponents.includes(component)).map(component => {
+                        const selected = data.components.includes(component);
+                        const offering = platformsOffering(component);
+                        const chosen = additionalComponentPlatforms(component);
+                        const platformId = chosen.length === 1 ? chosen[0] : '';
+                        const helpPlatforms = platformId ? [platformId] : offering;
+                        return (
+                          <div key={component} style={{ marginBottom: selected ? '10px' : 0 }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                              <Checkbox label={componentOptionLabels[component] || component} isChecked={selected} onChange={() => toggleComponentAndOpen(component)} />
+                              {renderComponentLabel(component)}
+                            </div>
+                            {selected && (
+                              <div style={{ marginLeft: '28px', marginTop: '4px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                  <span style={{ fontSize: '13px', fontWeight: 600 }}>
+                                    Platform <span style={{ color: '#c9190b' }}>*</span>
+                                  </span>
+                                  <select
+                                    aria-label={`${componentOptionLabels[component] || component} platform`}
+                                    value={platformId}
+                                    onChange={event => assignAdditionalComponentPlatform(component, event.target.value)}
+                                    style={{
+                                      minWidth: '220px',
+                                      padding: '6px 8px',
+                                      border: `1px solid ${platformId ? borderColor : '#c9190b'}`,
+                                      borderRadius: '4px',
+                                      background: fieldBg,
+                                      color: fieldColor
+                                    }}
+                                  >
+                                    <option value="">Select a platform</option>
+                                    {offering.map(id => (
+                                      <option key={id} value={id}>{PLATFORM_DETAILS[id].title}</option>
+                                    ))}
+                                  </select>
+                                  <Popover
+                                    headerContent={platformId ? PLATFORM_DETAILS[platformId].title : 'Platform'}
+                                    bodyContent={(
+                                      <div style={{ maxWidth: '380px' }}>
+                                        {helpPlatforms.map(id => (
+                                          <div key={id} style={{ marginBottom: '12px' }}>
+                                            <div style={{ fontWeight: 700 }}>{PLATFORM_DETAILS[id].title}</div>
+                                            <p style={{ margin: '4px 0 6px' }}>{PLATFORM_DETAILS[id].description}</p>
+                                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Available components</div>
+                                            <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                                              {(platformCatalogs[id] || []).map(app => (
+                                                <li key={app}>{componentOptionLabels[app] || configTabLabel(app)}</li>
+                                              ))}
+                                            </ul>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                    triggerAction="click"
+                                    appendTo={() => document.body}
+                                  >
+                                    <button
+                                      type="button"
+                                      aria-label={`${componentOptionLabels[component] || component} platform help`}
+                                      style={{
+                                        border: 'none',
+                                        background: 'transparent',
+                                        color: isDark ? '#73bcf7' : '#0066cc',
+                                        cursor: 'pointer',
+                                        fontWeight: 700,
+                                        padding: '0 2px',
+                                        lineHeight: 1
+                                      }}
+                                    >
+                                      ?
+                                    </button>
+                                  </Popover>
+                                </div>
+                                {!platformId && (
+                                  <div style={{ color: '#c9190b', fontSize: '12px', marginTop: '4px' }}>
+                                    {chosen.length > 1
+                                      ? 'This component is on more than one platform. Pick one.'
+                                      : 'Select a platform for this component.'}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </ExpandableSection>
                     </div>
                 </GridItem>
@@ -16990,7 +17359,7 @@ ${vaultYaml}
                 </>
               )}
 
-              {expandedSteps.aap && wizardUnlocked >= wizardStepNumber('aap') && (
+              {expandedSteps.aap && wizardUnlocked >= wizardStepNumber('aap') && (data.aap?.enabled !== false || installAapMode) && (
                 <>
                   <br />
                   <Tabs activeKey={activeAapConfigTab} onSelect={(_, key) => setActiveAapConfigTab(key)}>

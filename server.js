@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const fs = require('fs');
 const http = require('http');
@@ -825,7 +826,9 @@ function redactLogText(text) {
     .replace(/("(?:oauth_token|oauthtoken|galaxy_hub_token|vault_controller_oauthtoken|controller_oauthtoken)"\s*:\s*")[^"]*(")/gi, '$1[redacted]$2')
     .replace(/('(?:oauth_token|oauthtoken|galaxy_hub_token|vault_controller_oauthtoken|controller_oauthtoken)'\s*:\s*')[^']*(')/gi, '$1[redacted]$2')
     .replace(/((?:vault_controller_oauthtoken|controller_oauthtoken|oauth_token|galaxy_hub_token)\s*:\s*)(\S+)/gi, '$1[redacted]')
-    .replace(/(Authorization:\s*Bearer\s+)\S+/gi, '$1[redacted]');
+    .replace(/(Authorization:\s*Bearer\s+)\S+/gi, '$1[redacted]')
+    .replace(/("pullSecret"\s*:\s*")[^"]*(")/g, '$1[redacted]$2')
+    .replace(/("sshKey"\s*:\s*")[^"]*(")/g, '$1[redacted]$2');
 }
 
 function event(msg) {
@@ -2570,8 +2573,10 @@ function normalizePreflightPayload(input) {
   if (data.git.token === undefined) data.git.token = '';
   if (data.git.username === undefined) data.git.username = '';
 
-  // Normalize additional environments for survey choices (never create group_vars dirs).
+  // Survey choices for job templates. group_vars copies are opt-in.
   data.additional_environments = normalizeAdditionalEnvironments(data.additional_environments);
+  data.additional_environments_create_group_vars = data.additional_environments_create_group_vars === true
+    || data.additional_environments_create_group_vars === 'true';
 
   if (!data.vault) data.vault = {};
   if (data.vault.encrypt === undefined) data.vault.encrypt = true;
@@ -3481,7 +3486,7 @@ function normalizeAgentInstaller(input) {
   data.topology = data.topology || 'ha';
   data.cluster_name = data.cluster_name || 'ocp-dev';
   data.base_domain = data.base_domain || 'dev.rhlab';
-  data.openshift_version = data.openshift_version || '4.16';
+  data.openshift_version = data.openshift_version || '4.18';
   data.platform = data.platform || 'baremetal';
   data.publish = data.publish || 'External';
   data.network_type = data.network_type || 'OVNKubernetes';
@@ -3990,7 +3995,7 @@ function buildArchitectHostNode(node, index, machineCidr) {
  */
 function mapPreflightAgentToArchitectState(agentInput) {
   const config = normalizeAgentInstaller(agentInput);
-  const versionRaw = String(config.openshift_version || '4.16').trim() || '4.16';
+  const versionRaw = String(config.openshift_version || '4.18').trim() || '4.18';
   const channel = versionRaw.includes('.')
     ? versionRaw.split('.').slice(0, 2).join('.')
     : versionRaw;
@@ -6258,6 +6263,332 @@ app.post('/api/openshift/packagemanifests', async (req, res) => {
   }
 });
 
+let agentInstallJob = { running: false, action: '', code: null, dir: '' };
+
+function agentInstallBaseDir() {
+  const preferred = process.env.AGENT_INSTALL_DIR || path.join(workRoot, 'agent-install');
+  try {
+    fs.mkdirSync(preferred, { recursive: true });
+    return preferred;
+  } catch {
+    const fallback = '/tmp/ado-agent-install';
+    fs.mkdirSync(fallback, { recursive: true });
+    return fallback;
+  }
+}
+
+function resolveOpenshiftInstallBin() {
+  const candidates = [
+    process.env.OPENSHIFT_INSTALL_BIN,
+    '/usr/local/bin/openshift-install',
+    '/usr/bin/openshift-install'
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  try {
+    const found = execFileSync('bash', ['-lc', 'command -v openshift-install'], { encoding: 'utf8' }).trim();
+    if (found && fs.existsSync(found)) return found;
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function writeAgentInstallDir(generated, clusterName) {
+  const safe = String(clusterName || 'cluster').replace(/[^A-Za-z0-9._-]/g, '-') || 'cluster';
+  const dir = path.join(agentInstallBaseDir(), safe);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'install-config.yaml'), generated.installConfig);
+  fs.writeFileSync(path.join(dir, 'agent-config.yaml'), generated.agentConfig);
+  Object.entries(generated.additionalManifests || {}).forEach(([rel, content]) => {
+    const dest = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, content);
+  });
+  return dir;
+}
+
+async function runAgentInstallSequence(action, dir) {
+  const bin = resolveOpenshiftInstallBin();
+  if (!bin) {
+    append('\nopenshift-install was not found in this pod.\n');
+    append('Set OPENSHIFT_INSTALL_BIN or install the client that matches the OpenShift version, then run again.\n');
+    return 127;
+  }
+
+  const steps = action === 'image'
+    ? [['agent', 'create', 'image', '--dir', dir, '--log-level=debug']]
+    : action === 'pxe'
+      ? [['agent', 'create', 'pxe-files', '--dir', dir, '--log-level=debug']]
+      : [
+        ['agent', 'create', 'pxe-files', '--dir', dir, '--log-level=debug'],
+        ['agent', 'wait-for', 'bootstrap-complete', '--dir', dir, '--log-level=debug'],
+        ['agent', 'wait-for', 'install-complete', '--dir', dir, '--log-level=debug']
+      ];
+
+  for (const args of steps) {
+    const code = await runStream(bin, args, dir, `Agent install: ${args.slice(0, 3).join(' ')}`);
+    if (code !== 0) return code;
+  }
+  return 0;
+}
+
+function sha256Text(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function releaseChannel(version) {
+  const parts = String(version || '').trim().split('.');
+  if (parts.length >= 2 && parts[0] && parts[1]) return `${parts[0]}.${parts[1]}`;
+  return String(version || '').trim();
+}
+
+function exactRelease(version) {
+  const raw = String(version || '').trim();
+  if (/^\d+\.\d+$/.test(raw)) return `${raw}.0`;
+  return raw;
+}
+
+function registryUrlFromAgentConfig(config, explicit) {
+  const given = String(explicit || '').trim();
+  if (given) return given;
+  const sources = parseMaybeYamlList(config.disconnected_registry);
+  for (const source of sources) {
+    const mirror = Array.isArray(source.mirrors) ? source.mirrors[0] : '';
+    if (mirror) return String(mirror).trim();
+  }
+  return '';
+}
+
+function buildBundleImageSet(config, registryUrl) {
+  const version = exactRelease(config.openshift_version);
+  const channel = releaseChannel(version);
+  const lines = [
+    '---',
+    'apiVersion: mirror.openshift.io/v2alpha1',
+    'kind: ImageSetConfiguration',
+    'metadata:',
+    `  name: ${config.cluster_name}`,
+    'mirror:',
+    '  platform:',
+    '    channels:',
+    `      - name: stable-${channel}`,
+    '        type: ocp',
+    `        minVersion: ${version}`,
+    `        maxVersion: ${version}`,
+    '    graph: true',
+    '  operators: []',
+    '  additionalImages: []'
+  ];
+  if (registryUrl) {
+    lines.push(
+      'storageConfig:',
+      '  registry:',
+      `    imageURL: ${registryUrl.replace(/\/+$/, '')}/ocp-mirror`,
+      '    skipTLS: true'
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+function buildBundleFieldManual(config, registryUrl, mode) {
+  const release = exactRelease(config.openshift_version);
+  return [
+    `# Disconnected OpenShift install — ${config.cluster_name}.${config.base_domain}`,
+    '',
+    `Release: ${release}`,
+    `Registry mode: ${mode}`,
+    `Registry: ${registryUrl || '(unset)'}`,
+    '',
+    'The install-config.yaml and agent-config.yaml in this directory are authoritative.',
+    'Do not regenerate them. Milestone 1A only validates this bundle.',
+    'Mirroring and boot media are later stages of infra.ado.ocp_disconnected_install.',
+    '',
+    '```bash',
+    'ansible-playbook -i localhost, -c local \\',
+    '  playbooks/openshift/ado-validate-disconnected-install-bundle.yml \\',
+    '  -e ocp_disconnected_install_bundle_dir=$PWD',
+    '```',
+    ''
+  ].join('\n');
+}
+
+function yamlQuote(value) {
+  return JSON.stringify(String(value ?? ''));
+}
+
+function buildBundleManifest(config, extras) {
+  const release = exactRelease(config.openshift_version);
+  const channel = releaseChannel(release);
+  return [
+    '---',
+    'apiVersion: ado.infra/v1',
+    'kind: OpenShiftDisconnectedInstallBundle',
+    'schema_version: 1',
+    'cluster:',
+    `  name: ${yamlQuote(config.cluster_name)}`,
+    `  base_domain: ${yamlQuote(config.base_domain)}`,
+    'release:',
+    `  version: ${yamlQuote(release)}`,
+    `  channel: ${yamlQuote(`stable-${channel}`)}`,
+    '  architecture: amd64',
+    'install:',
+    '  method: agent',
+    `  media: ${extras.media === 'pxe' ? 'pxe' : 'iso'}`,
+    'registry:',
+    `  mode: ${extras.mode}`,
+    `  url: ${yamlQuote(extras.registryUrl)}`,
+    '  credential_file: credentials/pull-secret.json',
+    'artifacts:',
+    '  install_config: install-config.yaml',
+    '  agent_config: agent-config.yaml',
+    '  imageset_config: imageset-config.yaml',
+    '  manifests_dir: manifests',
+    '  field_manual: FIELD_MANUAL.md',
+    'checksums:',
+    `  install-config.yaml: >-`,
+    `    ${extras.checksums['install-config.yaml']}`,
+    `  agent-config.yaml: >-`,
+    `    ${extras.checksums['agent-config.yaml']}`,
+    `  imageset-config.yaml: >-`,
+    `    ${extras.checksums['imageset-config.yaml']}`,
+    'generated_by:',
+    '  component: ado-preflight-ui',
+    '  generator: openshift-agent',
+    ''
+  ].join('\n');
+}
+
+function resolveInstallationBundleDir(requested, clusterName) {
+  const root = process.env.OPENSHIFT_BUNDLE_DIR
+    || path.join(workRoot, 'openshift-install-bundles');
+  const safeCluster = String(clusterName || 'cluster').replace(/[^A-Za-z0-9._-]/g, '-') || 'cluster';
+  fs.mkdirSync(root, { recursive: true });
+  if (!requested) return path.join(root, safeCluster);
+  const resolved = path.resolve(String(requested));
+  const allowed = path.resolve(root);
+  if (resolved !== allowed && !resolved.startsWith(`${allowed}${path.sep}`)) {
+    throw new Error('bundle_dir must stay under OPENSHIFT_BUNDLE_DIR or the preflight bundle root.');
+  }
+  return resolved;
+}
+
+function writeBundleFile(filePath, contents, mode) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, contents);
+  if (mode) fs.chmodSync(filePath, mode);
+}
+
+function exportInstallationBundle(body) {
+  const input = extractAgentInstallerInput(body);
+  const generated = generateAgentInstallerFiles(input);
+  if (!generated.valid) return generated;
+  const config = validateAgentInstaller(input).config;
+  const mode = ['existing', 'direct', 'offline'].includes(body.registry_mode)
+    ? body.registry_mode
+    : 'existing';
+  const registryUrl = registryUrlFromAgentConfig(config, body.registry_url);
+  const imageset = buildBundleImageSet(config, registryUrl);
+  const manual = buildBundleFieldManual(config, registryUrl, mode);
+  const checksums = {
+    'install-config.yaml': sha256Text(generated.installConfig),
+    'agent-config.yaml': sha256Text(generated.agentConfig),
+    'imageset-config.yaml': sha256Text(imageset)
+  };
+  const bundleDir = resolveInstallationBundleDir(body.bundle_dir, config.cluster_name);
+  writeBundleFile(path.join(bundleDir, 'install-config.yaml'), generated.installConfig, 0o640);
+  writeBundleFile(path.join(bundleDir, 'agent-config.yaml'), generated.agentConfig, 0o640);
+  writeBundleFile(path.join(bundleDir, 'imageset-config.yaml'), imageset, 0o640);
+  writeBundleFile(path.join(bundleDir, 'FIELD_MANUAL.md'), manual, 0o640);
+  Object.entries(generated.additionalManifests || {}).forEach(([rel, content]) => {
+    const safeRel = String(rel).split('/').filter(part => part && part !== '.' && part !== '..').join('/');
+    if (!safeRel) return;
+    writeBundleFile(path.join(bundleDir, 'manifests', safeRel), content, 0o640);
+  });
+  const credentialDir = path.join(bundleDir, 'credentials');
+  fs.mkdirSync(credentialDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(credentialDir, 0o700);
+  writeBundleFile(
+    path.join(credentialDir, 'pull-secret.json'),
+    `${config.pull_secret}\n`,
+    0o600
+  );
+  writeBundleFile(
+    path.join(credentialDir, 'README.txt'),
+    'Local credentials only. Do not commit this directory.\n',
+    0o600
+  );
+  const manifest = buildBundleManifest(config, { mode, registryUrl, media: body.media, checksums });
+  writeBundleFile(path.join(bundleDir, 'manifest.yaml'), manifest, 0o640);
+  return {
+    valid: true,
+    errors: [],
+    warnings: generated.warnings || [],
+    bundle_dir: bundleDir,
+    schema_version: 1,
+    cluster: config.cluster_name,
+    release: exactRelease(config.openshift_version),
+    registry_mode: mode,
+    command: `ansible-playbook -i localhost, -c local validate-bundle.yml -e ocp_disconnected_install_bundle_dir=${bundleDir}`
+  };
+}
+
+app.post('/api/openshift-agent/export-bundle', (req, res) => {
+  try {
+    const result = exportInstallationBundle(req.body || {});
+    if (!result.valid) {
+      res.status(400).json(result);
+      return;
+    }
+    append(`Exported disconnected install bundle to ${result.bundle_dir}\n`);
+    res.status(200).json(result);
+  } catch (err) {
+    res.status(400).json({ valid: false, errors: [err.message], warnings: [] });
+  }
+});
+
+app.get('/api/openshift-agent/run', (_req, res) => {
+  res.json(agentInstallJob);
+});
+
+app.post('/api/openshift-agent/run', (req, res) => {
+  const action = String(req.body?.action || '').trim();
+  if (!['image', 'pxe', 'install'].includes(action)) {
+    res.status(400).json({ error: 'action must be image, pxe, or install.' });
+    return;
+  }
+  if (agentInstallJob.running || activeRunChild) {
+    res.status(409).json({ error: 'An install or bootstrap run is already in progress.' });
+    return;
+  }
+
+  const input = { ...(req.body || {}) };
+  delete input.action;
+  const generated = generateAgentInstallerFiles(input);
+  if (!generated.valid) {
+    res.status(400).json(generated);
+    return;
+  }
+
+  const dir = writeAgentInstallDir(generated, input.cluster_name);
+  latestLog = '';
+  latestEvents = '';
+  append(`Agent install directory: ${dir}\n`);
+  agentInstallJob = { running: true, action, code: null, dir };
+  res.status(202).json({ ok: true, action, dir });
+
+  runAgentInstallSequence(action, dir)
+    .then(code => {
+      agentInstallJob = { running: false, action, code, dir };
+    })
+    .catch(err => {
+      append(`\nAgent install failed: ${err.message}\n`);
+      agentInstallJob = { running: false, action, code: 1, dir };
+    });
+});
+
 app.post('/api/openshift-agent/validate', (req, res) => {
   const validation = validateAgentInstaller(req.body);
   res.json({
@@ -6909,6 +7240,7 @@ async function handleScaffoldingRequest(req, res) {
   append(`Overwrite Generated Content (legacy all): ${overrideAll}\n`);
   append(`Git overrides: group_vars=${overrideGroupVarsEnv} job_workflow=${overrideJtWf} all=${overrideAll}\n`);
   append(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}\n`);
+  append(`Create additional group_vars: ${data.additional_environments_create_group_vars === true}\n`);
   append(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}\n`);
   append(`Ansible Extra Args: ${ansibleExtraArgsRaw || '(none)'}\n`);
   append(`Skip TLS Verification: ${skipTlsVerify}\n`);
