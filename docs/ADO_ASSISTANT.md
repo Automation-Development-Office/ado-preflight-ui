@@ -7,7 +7,7 @@ navigation. It does not currently run a language model. Guided workflows cover:
 - **Not using AAP** (generate the playbook repo in the pod, then run generated playbooks)
 
 Ask / search also covers curated topics such as **NFS CSI / NFS StorageClass**
-(`infra.ado.ocp_nfs_storage`, preflight ``nfs_csi`` option) and ACM Fleet Management.
+(`infra.automation_development_office.ocp_nfs_storage`, preflight ``nfs_csi`` option) and ACM Fleet Management.
 
 All bundled role READMEs are available for lookup, including their examples.
 Unknown role names do not produce fabricated examples. The historical/misspelled
@@ -17,8 +17,12 @@ the selected collection.
 
 ## Offline knowledge
 
-`scripts/build-assistant-knowledge.py` reads every README from the newest bundled
-`collections/infra-ado-*.tar.gz`, plus tracked UI READMEs. The generated JSON records
+`scripts/build-assistant-knowledge.py` reads READMEs and `docs/**/*.md` from the
+same `infra-automation_development_office-*.tar.gz` Preflight executes (`sort -V` / numeric version order),
+plus preflight docs and `docs/troubleshooting/*.md`. When the ado checkout is
+next to preflight, it also indexes `AGENTS.md`. The image build runs this
+script after the tarball is copied and writes `dist/assistant-knowledge.json`.
+The generated JSON records
 the archive name and SHA-256. Nothing is fetched from the network. The container
 regenerates this bundle from its baked archive during image build. Source builds
 must refresh it before `npm run build`. The UI renders documentation as plain

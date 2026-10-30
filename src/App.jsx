@@ -5,6 +5,13 @@ import PodTerminal from './PodTerminal.jsx';
 import BootstrapProfiles from './BootstrapProfiles.jsx';
 import AdoAssistant from './AdoAssistant.jsx';
 import ControllerWorkflowPreview from './ControllerWorkflowPreview.jsx';
+import { workflowPreviewKeys } from './controllerWorkflowCatalog.mjs';
+import {
+  RHEL_SYSTEM_ROLES,
+  profileForSystemRoles,
+  systemRolesForProfile,
+  knownSystemRoleApp
+} from './rhelSystemRolesCatalog.mjs';
 import {
   selectProfileApps,
   componentIsSelected,
@@ -13,6 +20,8 @@ import {
   syncPlatformInstallOptions
 } from './profileSelection.mjs';
 import { explainLocalPlaybookCommand } from './playbookExplain.mjs';
+import { localCollectionDoc } from './localCollectionDoc.mjs';
+import { applyImportedGitSkipTls, gitTlsStage } from '../git-tls.js';
 import {
   Page,
   PageSection,
@@ -66,7 +75,7 @@ const orphanOpenShiftPlaybookApps = [
 const rhelApps = [
   'rhel','satellite','idm','aap','dirsrv',
   'eck','gitlab','grafana','kafka','rhbk',
-  'compliance','stig'
+  'compliance','stig','rhel_system_roles'
 ];
 
 const patchingApps = ['patching','satellite','idm'];
@@ -1438,6 +1447,7 @@ const componentOptionLabels = {
   discover_routes_print: 'Discover Routes and Print',
   alternate_routes: 'Alternate Routes',
   update_pull_secret: 'Update Pull Secret',
+  rhel_system_roles: 'RHEL System Roles',
   update_default_ingress: 'Default Ingress Cert',
   idm_acme: 'IdM ACME',
   aws_pca: 'AWS PCA',
@@ -1807,7 +1817,7 @@ const parseAdditionalEnvironmentsList = value => {
 
 /** Disconnected default: baked EE tar inside the preflight UI image. */
 const HUB_EE_BAKED_SOURCE = 'docker-archive:/opt/ado-ee/ado-ee.docker.tar';
-/** Preflight Hub collections (excludes infra.ado — that has its own checkbox). */
+/** Preflight Hub collections (excludes infra.automation_development_office — that has its own checkbox). */
 const PREFLIGHT_HUB_COLLECTION_OPTIONS = [
   'kubernetes.core',
   'redhat.openshift',
@@ -1960,7 +1970,9 @@ const defaults = {
 
   git: {
     auto_push: true,
-    skip_tls_verify: true,
+    // New forms verify Git TLS. Imported JSON that omits this key still
+    // normalizes to true so existing lab files keep their previous default.
+    skip_tls_verify: false,
     // Legacy boolean; kept in sync with git.overrides.all for imported JSON.
     overwrite_generated: false,
     overrides: {
@@ -2555,7 +2567,7 @@ const defaults = {
     hub_ee_execution_environment_name: 'ADO-ee',
     hub_ee_description:
       'ADO Contoller execution environment based on the supported RHEL 9 AAP EE. '
-      + 'Preloads Ansible collections used by infra.ado bootstrap and lab jobs '
+      + 'Preloads Ansible collections used by infra.automation_development_office bootstrap and lab jobs '
       + '(ansible.controller, ansible.posix, kubernetes.k8s, redhat.openshift, community.general, '
       + 'amazon.aws, and related dependencies) so Contoller can run disconnected without Galaxy pulls.',
     // Optional Galaxy/Hub credentials + org association (default off for disconnected)
@@ -2604,7 +2616,8 @@ const defaults = {
       ssh_key_data: '',
       ssh_key_unlock: '',
       become_method: 'sudo',
-      become_username: 'root'
+      become_username: 'root',
+      become_password: ''
     },
     oauth_token: '',
     admin_username: 'admin',
@@ -2805,6 +2818,9 @@ function App() {
   const [componentRunError, setComponentRunError] = useState('');
   // After no-AAP bootstrap succeeds, open the playbook runner (form already chose components).
   const [openPlaybookRunnerAfterBootstrap, setOpenPlaybookRunnerAfterBootstrap] = useState(true);
+  // Install AAP (standalone) only: after first successful Run Bootstrap, grey out
+  // that button and move the user to Run generated playbooks.
+  const [installAapBootstrapDone, setInstallAapBootstrapDone] = useState(false);
   // AAP-card black console: scaffolding command vs selected playbook commands.
   const [localPreviewMode, setLocalPreviewMode] = useState('bootstrap');
   // Which run drives the Bootstrap Console ticker / live logs.
@@ -3017,12 +3033,13 @@ function App() {
   };
 
   const installAapMode = !!data.pre_installs?.install_aap;
+  // Install AAP: Core → AAP → Git (no Component Configuration). Git step is
+  // labeled as the bootstrap/generate step because Controller is not up yet.
   const wizardSteps = installAapMode
     ? [
       { id: 'core', title: 'Core Environment' },
       { id: 'aap', title: 'Ansible Automation Platform Configuration' },
-      { id: 'components', title: 'Component Configuration' },
-      { id: 'git', title: 'Git Configuration' }
+      { id: 'git', title: 'Run Bootstrap to generate Ansible' }
     ]
     : [
       { id: 'core', title: 'Core Environment' },
@@ -3309,7 +3326,7 @@ function App() {
     configs: {
       title: 'Generated Configs',
       body: 'File contents from the local clone: configs/controller, configs/job_templates, configs/workflows, '
-        + 'playbooks/, and group_vars/ — what infra.ado scaffolding produced this run. Use to verify JT/workflow '
+        + 'playbooks/, and group_vars/ — what infra.automation_development_office scaffolding produced this run. Use to verify JT/workflow '
         + 'seeds and vars before pushing to Git or syncing Controller.'
     },
     runtime: {
@@ -4250,11 +4267,20 @@ function App() {
   };
 
   const defaultComponentConfig = component => {
+    if (component === 'rhel_system_roles') {
+      return {
+        profile: 'custom',
+        generate_playbooks: true,
+        generate_job_templates: true,
+        include_in_workflow: false,
+        roles: {}
+      };
+    }
     if (component === 'aws') {
       return JSON.parse(JSON.stringify(defaults.component_config.aws));
     }
 
-    const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching', 'aap_hub_harden'];
+    const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching', 'aap_hub_harden', 'rhel_system_roles'];
     const fallback = noReplicaComponents.includes(component)
       ? (component === 'patching' || component === 'rhel' ? { hostname: '', hosts: [] } : { hostname: '' })
       : { hostname: '', storage: '', replicas: 1 };
@@ -4430,6 +4456,10 @@ function App() {
     }
 
     let merged = deepMerge(defaults, normalizedInput);
+    // deepMerge fills skip_tls_verify from the new-form default (false).
+    // A file that omitted the key must stay on the legacy skip, and the
+    // checkbox must show that. Explicit true or false is left alone.
+    merged.git = applyImportedGitSkipTls(merged.git, normalizedInput.git);
 
     if (!Array.isArray(merged.components)) {
       merged.components = [];
@@ -4715,9 +4745,12 @@ function App() {
     }
 
     if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
+    if (merged.aap.machine_credential.become_password === undefined) {
+      merged.aap.machine_credential.become_password = '';
+    }
     if (!merged.git) merged.git = { ...defaults.git };
     if (merged.git.auto_push === undefined) merged.git.auto_push = true;
-    if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
+    merged.git = applyImportedGitSkipTls(merged.git, normalizedInput.git);
     if (merged.git.overwrite_generated === undefined) merged.git.overwrite_generated = false;
     if (!merged.git.overrides) {
       merged.git.overrides = {
@@ -4922,6 +4955,26 @@ function App() {
     payload.components = Array.isArray(payload.components) ? payload.components : [];
     payload.component_config = selectedConfig;
     payload.component_options = selectedOptions;
+    if (payload.openshift) {
+      const savedOcpOpts = payload.component_options?.openshift || [];
+      if (savedOcpOpts.includes('update_pull_secret')) {
+        payload.openshift.pull_secret_include_in_workflow = payload.openshift.pull_secret_include_in_workflow === true;
+      } else {
+        delete payload.openshift.pull_secret_include_in_workflow;
+      }
+    }
+    if ((payload.component_apps?.rhel || []).includes('rhel_system_roles')) {
+      const current = payload.component_config.rhel_system_roles || {};
+      const selectedRoles = (payload.component_options?.rhel_system_roles || []).filter(knownSystemRoleApp);
+      payload.component_options.rhel_system_roles = selectedRoles;
+      payload.component_config.rhel_system_roles = {
+        profile: profileForSystemRoles(selectedRoles),
+        generate_playbooks: current.generate_playbooks !== false,
+        generate_job_templates: current.generate_job_templates !== false,
+        include_in_workflow: current.include_in_workflow === true,
+        roles: current.roles && typeof current.roles === 'object' ? current.roles : {}
+      };
+    }
     if (payload.aap) {
       const org = payload.aap.organization || 'ADO';
       payload.aap.inventory = normalizeOrgScopedName(payload.aap.inventory, org, 'inventory');
@@ -5206,6 +5259,7 @@ function App() {
           if (payload.openshift.install_nfs_during_bootstrap === undefined) {
             payload.openshift.install_nfs_during_bootstrap = true;
           }
+          payload.openshift.nfs_include_in_workflow = payload.openshift.nfs_include_in_workflow === true;
           const nfsServer = String(payload.openshift.nfs_server || '').trim();
           const nfsShare = String(payload.openshift.nfs_share || '').trim();
           if (!nfsServer || !nfsShare) {
@@ -5227,12 +5281,14 @@ function App() {
           delete payload.openshift.nfs_version;
           delete payload.openshift.nfs_create_test_namespace;
           delete payload.openshift.nfs_create_test_pvc;
+          delete payload.openshift.nfs_include_in_workflow;
         }
 
         if (wantIscsi) {
           if (payload.openshift.install_iscsi_during_bootstrap === undefined) {
             payload.openshift.install_iscsi_during_bootstrap = true;
           }
+          payload.openshift.iscsi_include_in_workflow = payload.openshift.iscsi_include_in_workflow === true;
           const dsmHost = String(payload.openshift.iscsi_dsm_host || '').trim();
           const dsmUser = String(payload.openshift.iscsi_dsm_username || '').trim();
           const dsmPass = String(payload.openshift.iscsi_dsm_password || '').trim();
@@ -5255,6 +5311,7 @@ function App() {
           delete payload.openshift.iscsi_location;
           delete payload.openshift.iscsi_is_default;
           delete payload.openshift.iscsi_install_snapshotter;
+          delete payload.openshift.iscsi_include_in_workflow;
         }
 
         if (!wantNfs && !wantIscsi) {
@@ -5433,6 +5490,8 @@ function App() {
       payload.git.vars_only = false;
       payload.git.auto_push = false;
     }
+    if (!payload.git) payload.git = {};
+    payload.git.skip_tls_verify = gitTlsStage(payload.git.skip_tls_verify).skipTlsVerify;
 
     return payload;
   };
@@ -5447,7 +5506,7 @@ function App() {
         copy.component_config[component] || {}
       );
       if (copy.component_config[component].hostname === undefined) copy.component_config[component].hostname = '';
-      if (!['rhel', 'satellite', 'idm', 'compliance', 'stig', 'aws', 'openshift_virt'].includes(component) && copy.component_config[component].storage === undefined) {
+      if (!['rhel', 'satellite', 'idm', 'compliance', 'stig', 'aws', 'openshift_virt', 'rhel_system_roles'].includes(component) && copy.component_config[component].storage === undefined) {
         copy.component_config[component].storage = '';
       }
       if (component === 'idm') {
@@ -5488,6 +5547,7 @@ function App() {
   const setCoreAapChoice = choice => {
     if (choice === 'install') {
       setInstallAap(true);
+      setInstallAapBootstrapDone(false);
       const coreFilled = String(data.environment || '').trim() && String(data.domain || '').trim();
       if (coreFilled) {
         setAapOpen(true);
@@ -5497,6 +5557,7 @@ function App() {
     }
     if (data.pre_installs?.install_aap) {
       setInstallAap(false);
+      setInstallAapBootstrapDone(false);
     }
     setAapEnabled(choice === 'using', { stayOnCore: true });
   };
@@ -5527,7 +5588,7 @@ function App() {
     const encryptVault = data?.vault?.encrypt !== false ? 'true' : 'false';
     const hubOnly = aapStandaloneRun(data);
     const generatePlaybooks = hubOnly ? 'false' : 'true';
-    const gitSkipTls = data?.git?.skip_tls_verify !== false ? 'false' : 'true';
+    const gitSkipTls = gitTlsStage(data?.git?.skip_tls_verify).sslVerify;
     const extraArgs = effectiveAnsibleExtraArgs();
 
     const lines = [
@@ -6469,6 +6530,7 @@ function App() {
     setBootstrapStatus('idle');
     setBootstrapRuntime('');
     setComponentRunError('');
+    setInstallAapBootstrapDone(false);
   };
 
   const flushPodWorkspace = async ({ wipeCollections = false } = {}) => {
@@ -6965,10 +7027,29 @@ function App() {
       setBootstrapStatus(status);
       setBootstrapRuntime(runtime || '');
       setRunFinished(true);
+      const installOnly = !!data.pre_installs?.install_aap;
+      // Install AAP: grey Run Bootstrap only until the next job finishes.
+      // After playbook success/failure (or a failed bootstrap), enable it again.
+      if (installOnly && (runComponents || status === 'failed' || status === 'idle')) {
+        if (runComponents || status === 'failed') {
+          setInstallAapBootstrapDone(false);
+        }
+      }
       if (!runComponents && status === 'complete') {
+        if (installOnly) {
+          setInstallAapBootstrapDone(true);
+        }
         loadComponentPlan()
           .then(() => {
-            if (openPlaybookRunnerAfterBootstrap) setComponentRunnerOpen(true);
+            if (installOnly || openPlaybookRunnerAfterBootstrap) {
+              setComponentRunnerOpen(true);
+              setAapOpen(true);
+              openWizard(wizardStepNumber('aap'), 'aap');
+              window.setTimeout(() => {
+                document.getElementById('assistant-run-generated-playbooks')
+                  ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }, 80);
+            }
           })
           .catch(() => setComponentPlan(null));
       }
@@ -7931,8 +8012,9 @@ replace: console=tty0`}</pre>
     ),
     skipTlsVerify: (
       <>
-        <p>Default is SSL verification disabled.</p>
-        <p>When checked, local git uses <code>http.sslVerify=false</code>.</p>
+        <p>A new form verifies Git TLS. Check this only for a self-signed Git server.</p>
+        <p>When checked, clone, fetch, pull, and push use <code>http.sslVerify=false</code>. This does not change Controller API verification or the Git username.</p>
+        <p>An imported file that already sets this value is kept. A file that omits it still skips Git TLS, and this box is checked so that is visible. Unchecking it enables verification and is what gets saved.</p>
       </>
     ),
     varsOnly: (
@@ -7964,7 +8046,7 @@ replace: console=tty0`}</pre>
     hubPublishCollection: (
       <>
         <p>
-          Publishes <code>infra.ado</code> into Private Automation Hub validated content when it is
+          Publishes <code>infra.automation_development_office</code> into Private Automation Hub validated content when it is
           missing, or refreshes it when you also enable force below.
         </p>
         <p>Leave off if Hub already has the collection Controller should use.</p>
@@ -7974,12 +8056,12 @@ replace: console=tty0`}</pre>
       <>
         <p>
           Publishes selected preflight-baked collection tarballs into Hub
-          validated when missing. Does not include <code>infra.ado</code>.
+          validated when missing. Does not include <code>infra.automation_development_office</code>.
         </p>
         <p>
           Use the dropdown to pick which collections to upload. Already-installed
           versions are skipped when they exist in validated, published,
-          rh-certified, or pulp (no force for these — only <code>infra.ado</code>
+          rh-certified, or pulp (no force for these — only <code>infra.automation_development_office</code>
           has a force checkbox).
         </p>
         <p>
@@ -7992,10 +8074,10 @@ replace: console=tty0`}</pre>
     hubForceCollectionUpdate: (
       <>
         <p>
-          Overwrites an existing <code>infra.ado</code> in Hub validated content.
+          Overwrites an existing <code>infra.automation_development_office</code> in Hub validated content.
           Additional playbook collections always skip when the version already exists.
         </p>
-        <p>Without this, an already-installed <code>infra.ado</code> is left as-is.</p>
+        <p>Without this, an already-installed <code>infra.automation_development_office</code> is left as-is.</p>
       </>
     ),
     containerRegistryCredential: (
@@ -8029,7 +8111,7 @@ replace: console=tty0`}</pre>
         </p>
         <p>
           Without ADO EE, Controller jobs need Galaxy credentials already on the organization so
-          project sync can install vendored <code>infra.ado</code> (Galaxy tab creates them if
+          project sync can install vendored <code>infra.automation_development_office</code> (Galaxy tab creates them if
           missing; leave it off if they already exist in Controller).
         </p>
       </>
@@ -9422,6 +9504,19 @@ replace: console=tty0`}</pre>
             </FormGroup>
           </GridItem>
 
+          <GridItem span={6}>
+            <FormGroup
+              label="Sudo password"
+              helperText="Optional. Leave blank when sudo does not ask for a password."
+            >
+              {renderSecretTextInput(
+                'aap.machine_credential.become_password',
+                credential.become_password || '',
+                (_, v) => set('aap.machine_credential.become_password', v)
+              )}
+            </FormGroup>
+          </GridItem>
+
           <GridItem span={12}>
             <FormGroup label="SSH Private Key">
               <textarea
@@ -9538,7 +9633,8 @@ replace: console=tty0`}</pre>
                   </FormGroup>
                   {data.scm_tool === 'bitbucket' && (
                     <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
-                      Local bootstrap git uses <code>Authorization: Bearer</code>. Controller project sync uses your Bitbucket username plus HTTP access token (not OAuth2).
+                      Leave Bitbucket username blank to use <code>x-token-auth</code>.
+                      A typed username is used for Controller project sync with the HTTP access token.
                     </p>
                   )}
 
@@ -9648,9 +9744,12 @@ replace: console=tty0`}</pre>
                   <Checkbox
                     id="git-skip-tls-verify"
                     label={labelWithHelp('Skip TLS/SSL verification for Git (self-signed certificates)', gitHelp.skipTlsVerify)}
-                    isChecked={data.git.skip_tls_verify !== false}
-                    onChange={(_, v) => set('git.skip_tls_verify', v)}
+                    isChecked={gitTlsStage(data.git?.skip_tls_verify).checkboxChecked}
+                    onChange={(_, v) => set('git.skip_tls_verify', v === true)}
                   />
+                  <p id="git-tls-effective" style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
+                    {gitTlsStage(data.git?.skip_tls_verify).label}
+                  </p>
                 </GridItem>
 
                 <GridItem span={8}>
@@ -9666,19 +9765,29 @@ replace: console=tty0`}</pre>
 
                   <br />
 
-                  {data.scm_tool === 'bitbucket' && (
-                    <>
-                      <FormGroup label="Bitbucket username" isRequired>
-                        <TextInput
-                          value={data.git.username}
-                          onChange={(_, v) => set('git.username', v)}
-                          placeholder="Account username for HTTP access token"
-                        />
-                      </FormGroup>
-
-                      <br />
-                    </>
+                  <FormGroup
+                    label={data.scm_tool === 'bitbucket' ? 'Bitbucket username' : 'Git username'}
+                    isRequired={false}
+                  >
+                    <TextInput
+                      value={data.git.username}
+                      onChange={(_, v) => set('git.username', v)}
+                      placeholder={
+                        data.scm_tool === 'bitbucket'
+                          ? 'Blank uses x-token-auth'
+                          : 'Blank uses oauth2. SAML: account username'
+                      }
+                    />
+                  </FormGroup>
+                  {data.scm_tool !== 'bitbucket' && (
+                    <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
+                      For SAML logins, enter the username and the token. GitLab HTTPS
+                      still uses that username plus a personal access token.
+                      Leave blank to keep <code>oauth2</code>.
+                    </p>
                   )}
+
+                  <br />
 
                   <FormGroup label="Git Token">
                     <div style={{ display: 'flex', gap: '8px' }}>
@@ -9731,7 +9840,8 @@ replace: console=tty0`}</pre>
         ssh_key_data: '',
         ssh_key_unlock: '',
         become_method: 'sudo',
-        become_username: 'root'
+        become_username: 'root',
+        become_password: ''
       });
       return copy;
     });
@@ -9822,6 +9932,20 @@ replace: console=tty0`}</pre>
           <TextInput value={credential.become_username} onChange={(_, v) => set(`aap.additional_credentials.${index}.become_username`, v)} />
         </FormGroup>
       </GridItem>
+      {(credential.credential_type || 'Machine') === 'Machine' && (
+        <GridItem span={4}>
+          <FormGroup
+            label="Sudo password"
+            helperText="Optional. Leave blank when sudo does not ask for a password."
+          >
+            {renderSecretTextInput(
+              `aap.additional_credentials.${index}.become_password`,
+              credential.become_password || '',
+              (_, v) => set(`aap.additional_credentials.${index}.become_password`, v)
+            )}
+          </FormGroup>
+        </GridItem>
+      )}
       <GridItem span={12}>
         <FormGroup label="SSH Private Key">
           <textarea
@@ -9934,7 +10058,7 @@ replace: console=tty0`}</pre>
     oidcClientId: 'Confidential OIDC client id created in Keycloak. Lab default: ado-satellite.',
     oidcIssuer: 'OIDC issuer URL. Example: https://keycloak.apps.ocp.prod.rhlab/realms/rhlab',
     oidcClientSecret: 'Optional. Leave empty to fetch the client secret from Keycloak after create.',
-    oidcAdminUser: 'Keycloak admin user used by infra.ado.rhbk_client. Example: admin.',
+    oidcAdminUser: 'Keycloak admin user used by infra.automation_development_office.rhbk_client. Example: admin.',
     oidcAdminPassword: 'Keycloak admin password. Stored in generated vault files.',
     oidcCreateClient: 'Create or update the Keycloak client before configuring Satellite.'
   };
@@ -10296,7 +10420,7 @@ replace: console=tty0`}</pre>
         <GridItem span={12}>
           <p style={{ color: mutedTextColor, marginTop: 0 }}>
             Creates confidential client <code>ado-satellite</code> in existing realm <code>rhlab</code>
-            using <code>infra.ado.rhbk_client</code>, then enables Satellite external login.
+            using <code>infra.automation_development_office.rhbk_client</code>, then enables Satellite external login.
           </p>
         </GridItem>
         {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
@@ -10825,6 +10949,15 @@ replace: console=tty0`}</pre>
         'openshift',
         'OpenShift Options',
         'Select optional OpenShift configuration to include.'
+      )}
+
+      {(data.component_options?.openshift || []).includes('update_pull_secret') && (
+        <Checkbox
+          id="openshift-pull-secret-workflow"
+          label="Include Update Pull Secret in the OpenShift workflow"
+          isChecked={data.openshift?.pull_secret_include_in_workflow === true}
+          onChange={(_, checked) => set('openshift.pull_secret_include_in_workflow', checked)}
+        />
       )}
 
       <br />
@@ -12011,6 +12144,14 @@ replace: console=tty0`}</pre>
                   isChecked={nfsOn}
                   onChange={(_, checked) => set('openshift.storage_class_nfs', checked)}
                 />
+                {nfsOn && (
+                  <Checkbox
+                    id="storage-class-nfs-workflow"
+                    label="Include NFS CSI in the OpenShift workflow"
+                    isChecked={data.openshift.nfs_include_in_workflow === true}
+                    onChange={(_, checked) => set('openshift.nfs_include_in_workflow', checked)}
+                  />
+                )}
                 {nfsOn && <div style={{ marginTop: '12px' }}>{renderOpenShiftNfsCsiConfig()}</div>}
               </div>
             </Tab>
@@ -12022,6 +12163,14 @@ replace: console=tty0`}</pre>
                   isChecked={iscsiOn}
                   onChange={(_, checked) => set('openshift.storage_class_iscsi', checked)}
                 />
+                {iscsiOn && (
+                  <Checkbox
+                    id="storage-class-iscsi-workflow"
+                    label="Include iSCSI CSI in the OpenShift workflow"
+                    isChecked={data.openshift.iscsi_include_in_workflow === true}
+                    onChange={(_, checked) => set('openshift.iscsi_include_in_workflow', checked)}
+                  />
+                )}
                 {iscsiOn && <div style={{ marginTop: '12px' }}>{renderOpenShiftIscsiCsiConfig()}</div>}
               </div>
             </Tab>
@@ -14388,14 +14537,6 @@ replace: console=tty0`}</pre>
                 Auto-push is on, but no Git token is set. Add it on Git Configuration or turn auto-push off.
               </div>
             )}
-            {data.scm_tool === 'bitbucket'
-              && data.aap?.enabled !== false
-              && !installAapFullRequested(data)
-              && !String(data.git?.username || '').trim() && (
-              <div style={{ color: '#8a6d3b', fontSize: '13px', marginTop: '8px' }}>
-                Bitbucket is selected — set Bitbucket username on Git Configuration so Controller project sync can authenticate (username + HTTP access token, not OAuth2).
-              </div>
-            )}
           </CardBody>
         </Card>
 
@@ -15088,6 +15229,101 @@ replace: console=tty0`}</pre>
     );
   };
 
+  const renderRhelSystemRolesConfig = () => {
+    const cfg = {
+      profile: 'custom',
+      generate_playbooks: true,
+      generate_job_templates: true,
+      include_in_workflow: false,
+      roles: {},
+      ...(data.component_config?.rhel_system_roles || {})
+    };
+    const selected = data.component_options?.rhel_system_roles || [];
+    const profile = profileForSystemRoles(selected);
+    const setRoles = (next, nextProfile) => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_options) copy.component_options = {};
+        if (!copy.component_config) copy.component_config = {};
+        copy.component_options.rhel_system_roles = next.filter(knownSystemRoleApp);
+        const previous = copy.component_config.rhel_system_roles || {};
+        copy.component_config.rhel_system_roles = {
+          ...previous,
+          profile: nextProfile || profileForSystemRoles(copy.component_options.rhel_system_roles),
+          roles: previous.roles && typeof previous.roles === 'object' ? previous.roles : {}
+        };
+        return copy;
+      });
+    };
+    return (
+      <div>
+        <p style={{ color: mutedTextColor, marginTop: 0 }}>
+          Choose Red Hat system roles from the collection catalog. Nothing runs until you check a role.
+          Standalone playbooks and job templates are generated for the roles you check. Workflow membership is off until you turn it on.
+        </p>
+        <FormGroup label="Profile">
+          <select
+            id="rhel-system-role-profile"
+            aria-label="RHEL system role profile"
+            value={profile}
+            onChange={event => {
+              const nextProfile = event.target.value;
+              const nextRoles = systemRolesForProfile(nextProfile);
+              if (nextRoles) setRoles(nextRoles, nextProfile);
+              else setRoles(selected, 'custom');
+            }}
+          >
+            <option value="minimal">Minimal — timesync and SSH</option>
+            <option value="standard">Standard — minimal plus firewall, SELinux, and logging</option>
+            <option value="security">Security — firewall, SELinux, crypto policy, SSH, AIDE, fapolicyd, and sudo</option>
+            <option value="custom">Custom — keep the checkboxes below</option>
+          </select>
+        </FormGroup>
+        <Checkbox
+          id="rhel-system-roles-playbooks"
+          label="Generate standalone playbooks"
+          isChecked={cfg.generate_playbooks !== false}
+          onChange={(_, checked) => set('component_config.rhel_system_roles.generate_playbooks', checked)}
+        />
+        <Checkbox
+          id="rhel-system-roles-job-templates"
+          label="Generate AAP job templates"
+          isChecked={cfg.generate_job_templates !== false}
+          onChange={(_, checked) => set('component_config.rhel_system_roles.generate_job_templates', checked)}
+        />
+        <Checkbox
+          id="rhel-system-roles-workflow"
+          label="Include selected roles in the RHEL workflow"
+          isChecked={cfg.include_in_workflow === true}
+          onChange={(_, checked) => set('component_config.rhel_system_roles.include_in_workflow', checked)}
+        />
+        <div style={{ marginTop: '12px' }}>
+          {RHEL_SYSTEM_ROLES.map(role => (
+            <div key={role.app} style={{ marginBottom: '10px' }}>
+              <Checkbox
+                id={`rhel-system-role-${role.role}`}
+                label={role.title}
+                isChecked={selected.includes(role.app)}
+                onChange={(_, checked) => {
+                  const next = checked
+                    ? [...selected, role.app]
+                    : selected.filter(item => item !== role.app);
+                  setRoles(next, 'custom');
+                }}
+              />
+              <div style={{ color: mutedTextColor, fontSize: '13px', marginLeft: '28px' }}>
+                {role.summary} Settings go in <code>{role.settingsKey}</code> inside
+                vars_rhel_system_roles.yml. An empty mapping uses the role defaults.
+                Required keys are those of <code>redhat.rhel_system_roles.{role.role}</code>.
+                Outside AAP: <code>ansible-playbook {role.playbook} -e env=&lt;env&gt;</code>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   const renderConfigForm = (panelOverride = null) => {
     const panel = panelOverride || activeConfigPanel || 'all';
 
@@ -15136,6 +15372,8 @@ replace: console=tty0`}</pre>
         return renderAcsConfig();
       case 'ocp_compliance':
         return renderOcpComplianceConfig();
+      case 'rhel_system_roles':
+        return renderRhelSystemRolesConfig();
       case 'rhel':
         return renderRhelConfig();
       case 'patching':
@@ -15369,7 +15607,8 @@ ${vaultYaml}
         'acs',
         'zabbix',
         'compliance',
-        'stig'
+        'stig',
+        'rhel_system_roles'
       ];
     }
 
@@ -15409,6 +15648,9 @@ ${vaultYaml}
       const tabs = ['rhel'];
       (data.component_apps?.rhel || []).forEach(app => {
         if (simpleComponents.includes(app) && !tabs.includes(app)) {
+          tabs.push(app);
+        }
+        if (app === 'rhel_system_roles' && !tabs.includes(app)) {
           tabs.push(app);
         }
       });
@@ -15472,6 +15714,7 @@ ${vaultYaml}
     if (tab === 'idm') return 'IDM';
     if (tab === 'aap') return 'AAP';
     if (tab === 'stig') return 'STIG';
+    if (tab === 'rhel_system_roles') return 'RHEL System Roles';
     return tab.charAt(0).toUpperCase() + tab.slice(1);
   };
 
@@ -15564,11 +15807,13 @@ ${vaultYaml}
     const index = wizardSteps.findIndex(step => step.id === stepId);
     const next = index >= 0 ? wizardSteps[index + 1] : undefined;
     if (!next) return null;
-    const label = next.id === 'aap'
-      ? 'Continue to Ansible Automation Platform'
-      : next.id === 'git'
-        ? 'Continue to Git Configuration'
-        : 'Continue to Component Configuration';
+    let label = 'Continue to Component Configuration';
+    if (next.id === 'aap') {
+      label = 'Continue to Ansible Automation Platform';
+    } else if (next.id === 'git') {
+      // Install AAP only: point at Git Config (bootstrap generate lives there).
+      label = installAapMode ? 'Continue to Git Config' : 'Continue to Git Configuration';
+    }
     return (
       <div style={{ marginTop: '16px' }}>
         <Button
@@ -15644,24 +15889,36 @@ ${vaultYaml}
   };
 
   const openAdoMarkdownLink = href => {
-    const roleMatch = String(href || '').match(/^roles\/([^/]+)\/README\.md$/);
+    const local = localCollectionDoc(href);
+    if (!local) return false;
 
-    if (!roleMatch) return false;
+    const show = text => {
+      setAdoReadmeMarkdown(text);
+      setDocumentationType('ado');
+      setDocumentationOpen(true);
+      if (local.hash) {
+        const id = decodeURIComponent(local.hash.slice(1)).trim();
+        if (id) {
+          window.setTimeout(() => {
+            document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 0);
+        }
+      }
+    };
 
-    fetch(`/api/readme/ado/role/${encodeURIComponent(roleMatch[1])}`)
+    if (local.kind === 'root') {
+      show(adoReadmeMarkdown);
+      return true;
+    }
+
+    fetch(local.url)
       .then(r => {
-        if (!r.ok) throw new Error('ADO role README request failed');
+        if (!r.ok) throw new Error('ADO documentation request failed');
         return r.text();
       })
-      .then(text => {
-        setAdoReadmeMarkdown(text);
-        setDocumentationType('ado');
-        setDocumentationOpen(true);
-      })
+      .then(show)
       .catch(() => {
-        setAdoReadmeMarkdown(`# ADO Role Documentation Unavailable\n\nCould not load \`${href}\`.`);
-        setDocumentationType('ado');
-        setDocumentationOpen(true);
+        show(`# ADO documentation unavailable\n\nCould not load \`${href}\` from this pod.`);
       });
 
     return true;
@@ -15703,10 +15960,11 @@ ${vaultYaml}
       if (link) {
         const label = link[1];
         const href = link[2];
+        const local = localCollectionDoc(href);
         return (
           <a
             key={index}
-            href={href}
+            href={local ? (local.url || local.hash || '#') : href}
             onClick={event => {
               if (openAdoMarkdownLink(href) || openMarkdownHashLink(href)) {
                 event.preventDefault();
@@ -16042,7 +16300,7 @@ ${vaultYaml}
                       }}
                     >
                       <span>
-                        ✓ {c.name === 'infra-ado' ? 'infra.ado' : c.name.replaceAll('-', '.')}
+                        ✓ {c.name === 'infra-automation_development_office' ? 'infra.automation_development_office' : c.name.replaceAll('-', '.')}
                       </span>
                       <strong>{c.version}</strong>
                     </div>
@@ -16055,7 +16313,7 @@ ${vaultYaml}
               </div>
 
               <div style={{ color: mutedTextColor, fontSize: '13px' }}>
-                Collections are installed automatically by the container. The old split ADO collections can remain in source control for now, but this UI now prefers the single <strong>infra.ado</strong> collection when present.
+                Collections are installed automatically by the container. The old split ADO collections can remain in source control for now, but this UI now prefers the single <strong>infra.automation_development_office</strong> collection when present.
               </div>
             </GridItem>
 
@@ -16105,7 +16363,7 @@ ${vaultYaml}
               >
                 <div>✓ Installs collections into <code>/workspace/collections</code></div>
                 <div>✓ Generates env vars, playbooks, AAP configs, job templates, and workflows</div>
-                <div>✓ Uses <code>infra.ado.bootstrap_controller</code></div>
+                <div>✓ Uses <code>infra.automation_development_office.bootstrap_controller</code></div>
                 <div>✓ Supports optional Git commit and push</div>
               </div>
             </GridItem>
@@ -16122,6 +16380,29 @@ ${vaultYaml}
       open={assistantOpen}
       onClose={() => { setAssistantOpen(false); document.getElementById("ado-assistant-toggle")?.focus(); }}
       onShow={showAssistantStep}
+      onOpenDoc={docPath => {
+        const raw = String(docPath || '');
+        if (raw.startsWith('infra.automation_development_office/')) {
+          openAdoMarkdownLink(raw.slice('infra.automation_development_office/'.length));
+          return;
+        }
+        const rel = raw.replace(/^ado-preflight-ui\//, '');
+        fetch(`/api/readme/preflight/doc?path=${encodeURIComponent(rel)}`)
+          .then(response => {
+            if (!response.ok) throw new Error('preflight doc');
+            return response.text();
+          })
+          .then(text => {
+            setReadmeMarkdown(text);
+            setDocumentationType('ui');
+            setDocumentationOpen(true);
+          })
+          .catch(() => {
+            setReadmeMarkdown(`# Documentation unavailable\n\nCould not load \`${rel}\`.`);
+            setDocumentationType('ui');
+            setDocumentationOpen(true);
+          });
+      }}
       seedMessage={assistantExplain}
       onSeedConsumed={() => setAssistantExplain(null)}
       installed={!!data.pre_installs?.install_aap}
@@ -16680,11 +16961,13 @@ ${vaultYaml}
 
           {activeMainTab === 'core' && (
             <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {!installAapMode && (
           <div style={{ order: wizardStepNumber('components') }}>
           <br />
 
           {renderActiveConfigPanel()}
           </div>
+          )}
 
           <div style={{ order: wizardStepNumber('git') }}>
           <br />
@@ -16693,7 +16976,9 @@ ${vaultYaml}
             <CardBody>
               {renderWizardToggle(
                 wizardStepNumber('git'),
-                'Git Configuration',
+                installAapMode
+                  ? 'Run Bootstrap to generate Ansible'
+                  : 'Git Configuration',
                 'git',
                 String(data.aap?.git_url || '').trim() ? 'Project Git source set' : 'Project Git source'
               )}
@@ -16774,6 +17059,7 @@ ${vaultYaml}
                   <div style={{ marginTop: '4px' }}>
                     <button
                       type="button"
+                      id="assistant-run-generated-playbooks"
                       onClick={async () => {
                         const next = !componentRunnerOpen;
                         setComponentRunnerOpen(next);
@@ -16789,11 +17075,17 @@ ${vaultYaml}
                         fontWeight: 600,
                         cursor: 'pointer',
                         fontSize: '14px',
-                        color: textColor,
+                        color: installAapMode && installAapBootstrapDone
+                          ? (isDark ? '#73bcf7' : '#0066cc')
+                          : textColor,
                         textAlign: 'left'
                       }}
                     >
-                      {componentRunnerOpen ? '−' : '+'} Run generated playbooks (no AAP)
+                      {componentRunnerOpen ? '−' : '+'}
+                      {' '}
+                      {installAapMode
+                        ? 'Run generated playbooks (Ansible)'
+                        : 'Run generated playbooks (no AAP)'}
                     </button>
                     {componentRunnerOpen && (
                       <div
@@ -17649,7 +17941,7 @@ ${vaultYaml}
                     <Grid hasGutter>
                       <GridItem span={12}>
                         <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
-                          Publish the <code>infra.ado</code> collection and/or push the ADO execution
+                          Publish the <code>infra.automation_development_office</code> collection and/or push the ADO execution
                           environment image into Private Automation Hub. Check General → Standalone AAP run
                           to apply Hub/Galaxy/Add authentication/Onboard without OpenShift/RHEL component playbooks.
                         </div>
@@ -17718,13 +18010,13 @@ ${vaultYaml}
                           <FormGroup label={labelWithHelp('Collections', (
                             <>
                               <p>Publish or refresh vendored collections in Private Automation Hub validated content.</p>
-                              <p><code>infra.ado</code> is separate from the additional playbook-requirement tarballs.</p>
-                              <p>Everything skips when the version already exists unless Force is checked for <code>infra.ado</code> only.</p>
+                              <p><code>infra.automation_development_office</code> is separate from the additional playbook-requirement tarballs.</p>
+                              <p>Everything skips when the version already exists unless Force is checked for <code>infra.automation_development_office</code> only.</p>
                             </>
                           ))}>
                             <Checkbox
                               label={labelWithHelp(
-                                'Install or update infra.ado collection in Hub validated content (optional)',
+                                'Install or update infra.automation_development_office collection in Hub validated content (optional)',
                                 aapHelp.hubPublishCollection
                               )}
                               isChecked={data.aap.hub_publish_ado_collection === true}
@@ -17733,7 +18025,7 @@ ${vaultYaml}
                             <div style={{ marginTop: '12px' }}>
                               <Checkbox
                                 label={labelWithHelp(
-                                  'Force infra.ado collection update if already installed',
+                                  'Force infra.automation_development_office collection update if already installed',
                                   aapHelp.hubForceCollectionUpdate
                                 )}
                                 isChecked={data.aap.hub_force_ado_collection_update}
@@ -18130,10 +18422,10 @@ ${vaultYaml}
                             }}
                           >
                             Contoller only installs project <code>collections/requirements.yml</code>{' '}
-                            (vendored <code>infra.ado</code>) when the organization already has Galaxy
+                            (vendored <code>infra.automation_development_office</code>) when the organization already has Galaxy
                             credentials attached. If they are already on the org in Contoller, leave
                             this off. Use this tab only to create/attach them. Stock EEs like{' '}
-                            <code>ee-supported-rhel9</code> do not ship <code>infra.ado</code>; ADO EE
+                            <code>ee-supported-rhel9</code> do not ship <code>infra.automation_development_office</code>; ADO EE
                             push is the other option.
                           </div>
                           <Checkbox
@@ -19224,8 +19516,23 @@ ${vaultYaml}
                     id="assistant-run-bootstrap"
                     variant="primary"
                     onClick={runBootstrapInsideContainer}
-                    isDisabled={bootstrapStatus === 'running' || deployStatus === 'running'}
-                    style={{ borderRadius: '18px', fontWeight: 600 }}
+                    isDisabled={
+                      bootstrapStatus === 'running'
+                      || deployStatus === 'running'
+                      || (installAapMode && installAapBootstrapDone)
+                    }
+                    title={
+                      installAapMode && installAapBootstrapDone
+                        ? 'Bootstrap already ran for Install AAP — use Run generated playbooks (Ansible)'
+                        : undefined
+                    }
+                    style={{
+                      borderRadius: '18px',
+                      fontWeight: 600,
+                      ...(installAapMode && installAapBootstrapDone
+                        ? { opacity: 0.45, cursor: 'not-allowed' }
+                        : {})
+                    }}
                   >
                     ⊕ Run Bootstrap
                   </Button>
@@ -19519,7 +19826,7 @@ ${vaultYaml}
     <ControllerWorkflowPreview
       isOpen={workflowPreviewOpen}
       onClose={() => setWorkflowPreviewOpen(false)}
-      selectedComponents={Array.isArray(data.components) ? data.components : []}
+      selectedComponents={workflowPreviewKeys(data)}
       usingAap={data.aap?.enabled !== false}
       environment={data.environment || 'prod'}
       gitAutoPush={data.git?.auto_push === true}

@@ -1,7 +1,7 @@
 # AGENTS.md — ado-preflight-ui
 
 Containerized questionnaire + runner that turns operator answers into a bootstrap
-repo via `infra.ado`. This repo is the **form**; bootstrap logic lives in `ado`.
+repo via `infra.automation_development_office`. This repo is the **form**; bootstrap logic lives in `ado`.
 
 ## Always-on reminder
 
@@ -23,7 +23,7 @@ Do not ask them to paste the checklist — the phrase **is** the checklist.
 2. Re-read `.cursor/rules/local/chad-lab-preflight.mdc` in this repo
 3. Skim portal / lab-tools local rules if the task touches them
 4. Load newest matching `~/Downloads/ado-preflight-*.json`
-5. Confirm baked `collections/infra-ado-*.tar.gz` matches `ado/galaxy.yml`
+5. Confirm baked `collections/infra-automation_development_office-*.tar.gz` matches `ado/galaxy.yml`
 6. **Fix code, not Controller** — agent builds/copies tarball; user redeploys this UI and re-bootstraps
 
 `.cursor/` is gitignored. Never commit preflight JSON exports or secrets.
@@ -35,7 +35,7 @@ Do not ask them to paste the checklist — the phrase **is** the checklist.
 ## Cross-repo map
 
 ```text
-ado/                    → infra.ado collection source
+ado/                    → infra.automation_development_office collection source
 ado-preflight-ui/       → this repo — form + server.js + baked tarball
 bootstrap-sample/       → generated bootstrap output (Controller SCM)
 ado-cluster-portal/     → lab portal (links to this UI)
@@ -52,7 +52,7 @@ lab-tools-dont-delete/  → IdM / VPN / Satellite ops (separate Controller proje
 | Schema changes: update `server.js` + `src/App.jsx` **and** `ado` env gen | Change payload shape in UI only |
 | After UI-only fixes: `npm run build` + `./restart_pod.sh` | Assume live git checkout of `ado` is what the container runs |
 
-Preflight runs the collection from `collections/infra-ado-*.tar.gz` inside the container.
+Preflight runs the collection from `collections/infra-automation_development_office-*.tar.gz` inside the container.
 
 ## Deploy
 
@@ -67,6 +67,6 @@ Smoke when idle: `GET /api/bootstrap/result` returns JSON (not HTML).
 
 ```bash
 cd ../ado && ansible-galaxy collection build -o /tmp
-cp /tmp/infra-ado-*.tar.gz ../ado-preflight-ui/collections/
+cp /tmp/infra-automation_development_office-*.tar.gz ../ado-preflight-ui/collections/
 # User: ./restart_pod.sh → import JSON → bootstrap → push → Controller sync → relaunch
 ```

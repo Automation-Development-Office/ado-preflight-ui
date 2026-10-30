@@ -78,6 +78,13 @@ function AnswerBody({ text }) {
           return <div key={i} className="ado-assistant-answer-blank" aria-hidden="true" />;
         }
         const isHeading = EXPLAIN_HEADINGS.includes(line)
+          || line === 'Problem'
+          || line === 'Likely cause'
+          || line === 'Check first'
+          || line === 'Resolution'
+          || line === 'Verification'
+          || line === 'Simpler'
+          || line.startsWith('Status:')
           || line.startsWith('Your current selection')
           || line.startsWith('What the command-line')
           || line.startsWith('Where the rest of the variables')
@@ -129,6 +136,7 @@ export default function AdoAssistant({
   open,
   onClose,
   onShow,
+  onOpenDoc,
   seedMessage,
   onSeedConsumed,
   installed,
@@ -149,21 +157,35 @@ export default function AdoAssistant({
   const [search, setSearch] = useState('');
   const heading = useRef(null);
 
+  const loadKnowledge = () => {
+    if (knowledge) return Promise.resolve(knowledge);
+    const load = url => fetch(url).then(r => {
+      if (!r.ok) throw new Error(`Documentation bundle unavailable (${r.status}). Rebuild and restart preflight.`);
+      return r.json();
+    });
+    return load('/api/assistant/knowledge')
+      .catch(() => load('/assistant-knowledge.json'))
+      .then(bundle => {
+        setKnowledge(bundle);
+        setError('');
+        return bundle;
+      })
+      .catch(e => {
+        setError(e.message);
+        return null;
+      });
+  };
+
   useEffect(() => {
     if (!open) return;
     heading.current?.focus();
-    if (!knowledge) {
-      fetch('/assistant-knowledge.json').then(r => {
-        if (!r.ok) throw new Error('Documentation bundle unavailable. Rebuild the UI.');
-        return r.json();
-      }).then(setKnowledge).catch(e => setError(e.message));
-    }
+    if (!knowledge) loadKnowledge();
   }, [open]);
 
   useEffect(() => {
     if (!open || !seedMessage) return;
     setGuide(null);
-    setMessages(m => [...m.slice(-5), {
+    setMessages(m => [...m, {
       question: seedMessage.question,
       answer: seedMessage.answer,
       documents: seedMessage.documents || [],
@@ -193,8 +215,8 @@ export default function AdoAssistant({
   const sources = (knowledge?.documents || []).filter(d => search.trim()
     ? (d.path + '\n' + d.text).toLowerCase().includes(search.toLowerCase().trim())
     : [
-      'infra.ado/roles/install_aap/README.md',
-      'infra.ado/roles/ocp_nfs_storage/README.md',
+      'infra.automation_development_office/roles/install_aap/README.md',
+      'infra.automation_development_office/roles/ocp_nfs_storage/README.md',
       'ado-preflight-ui/README.md'
     ].includes(d.path));
 
@@ -203,17 +225,46 @@ export default function AdoAssistant({
     setStep(0);
   };
 
+  const finish = (docs, failed) => {
+    const asked = question.trim();
+    if (failed || !Array.isArray(docs)) {
+      setMessages(current => [...current, {
+        question: asked,
+        kind: 'unavailable',
+        answer: 'The documentation bundle did not load. This is not a search miss. Rebuild and restart preflight, then ask again.',
+        documents: [],
+        commands: []
+      }].slice(-40));
+      setQuestion('');
+      return;
+    }
+    const history = messages.map(item => ({
+      question: item.question,
+      topic: item.topic,
+      answer: item.answer
+    }));
+    const result = answerQuestion(asked, docs, history);
+    setMessages(current => [...current, { question: asked, ...result }].slice(-40));
+    if (result.guide && guides[result.guide]) startGuide(result.guide);
+    setQuestion('');
+  };
+
   const ask = e => {
     e.preventDefault();
     if (!question.trim()) return;
-    const result = answerQuestion(question, knowledge?.documents || []);
-    setMessages(m => [...m.slice(-5), { question, ...result }]);
-    if (result.guide && guides[result.guide]) {
-      startGuide(result.guide);
-    } else if (!result.guide) {
-      setGuide(null);
+    if (knowledge?.documents) {
+      finish(knowledge.documents, false);
+      return;
     }
-    setQuestion('');
+    loadKnowledge().then(bundle => finish(bundle?.documents, !bundle));
+  };
+
+  const copyCommand = async text => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      setError('Could not copy. Select the command and copy it manually.');
+    }
   };
 
   return (
@@ -223,6 +274,7 @@ export default function AdoAssistant({
           <h2 id="ado-assistant-title" ref={heading} tabIndex={-1}>ADO Assistant</h2>
           <small>Role help · guided walkthroughs</small>
         </div>
+        <Button variant="plain" onClick={() => { setMessages([]); setQuestion(''); }}>New chat</Button>
         <Button variant="plain" aria-label="Close ADO Assistant" onClick={onClose}>✕</Button>
       </header>
       <div className="ado-assistant-body">
@@ -232,26 +284,37 @@ export default function AdoAssistant({
           Preview command to explain that playbook’s vars.
         </p>
         <div className="ado-assistant-note">
-          Offline guided preview and README lookup. No AI language model is configured — answers are
-          curated steps plus bundled README search. Questions stay in this page.
+          Offline documentation search. No language model is configured. Follow-up questions use this browser session only. Nothing is sent off this page.
         </div>
         {messages.map((m, i) => (
           <div key={i} className="ado-assistant-message">
             <strong>You</strong>
             <p>{m.question}</p>
             <strong>ADO Assistant</strong>
-            <AnswerBody text={m.answer} />
+            {m.kind === 'unavailable' ? <p role="alert">{m.answer}</p> : <AnswerBody text={m.answer} />}
+            {m.followUp && <p className="ado-assistant-follow-up">{m.followUp}</p>}
+            {m.commands?.map(command => (
+              <div key={`${command.label}-${command.text.slice(0, 24)}`} className="ado-assistant-command">
+                <div className="ado-assistant-command-label">{command.label}</div>
+                <pre>{command.text}</pre>
+                <Button variant="secondary" onClick={() => copyCommand(command.text)}>Copy</Button>
+              </div>
+            ))}
             {m.groupVars && <GroupVarsPanel groupVars={m.groupVars} />}
             {m.documents?.length > 0 && (
-              <>
-                <hr className="ado-assistant-readme-divider" />
+              <div className="ado-assistant-sources">
+                <p className="ado-assistant-answer-heading">Sources</p>
                 {m.documents.map(doc => (
-                  <details key={doc.path} className="ado-assistant-readme-block">
-                    <summary>{doc.path}</summary>
-                    <pre>{doc.text}</pre>
-                  </details>
+                  <button
+                    key={doc.path}
+                    type="button"
+                    className="ado-assistant-source"
+                    onClick={() => onOpenDoc?.(doc.path)}
+                  >
+                    {doc.path}
+                  </button>
                 ))}
-              </>
+              </div>
             )}
           </div>
         ))}
@@ -262,8 +325,9 @@ export default function AdoAssistant({
             value={question}
             onChange={(_, v) => setQuestion(v)}
           />
-          <Button type="submit" variant="secondary" isDisabled={!knowledge}>Ask</Button>
+          <Button type="submit" variant="primary" isDisabled={!question.trim()}>Ask</Button>
         </form>
+        {error && <p role="alert">{error}</p>}
         <div className="ado-assistant-navigation" style={{ marginTop: '8px', gap: '8px', flexWrap: 'wrap' }}>
           <Button variant="secondary" onClick={() => startGuide('aap')}>Start ADO walk through with AAP</Button>
           <Button variant="secondary" onClick={() => startGuide('local')}>Start ADO walk through without AAP</Button>
