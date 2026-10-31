@@ -24,6 +24,10 @@ USER 0
 RUN dnf install -y git python3 python3-pip skopeo gcc-c++ make python3-devel tar sshpass && \
     curl -fsSL https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/stable/openshift-client-linux.tar.gz \
       | tar -xz -C /usr/local/bin oc kubectl && \
+    curl -fsSL -o /usr/local/bin/helm \
+      https://mirror.openshift.com/pub/openshift-v4/clients/helm/latest/helm-linux-amd64 && \
+    chmod 0755 /usr/local/bin/helm && \
+    helm version --short && \
     pip3 install ansible-core kubernetes jsonpatch requests-oauthlib && \
     dnf clean all
 
@@ -42,6 +46,11 @@ COPY deploy ./deploy
 COPY --from=build /opt/app-root/src/dist ./dist
 COPY examples ./examples
 
+# Bust layer cache whenever baked infra-ado (or sibling) tarballs change. Same
+# filename + podman cache previously kept shipping a stale collection after
+# collections/infra-ado-*.tar.gz was replaced on the host.
+ARG ADO_COLLECTIONS_SHA=unknown
+RUN mkdir -p /opt/ado-collections && printf '%s\n' "${ADO_COLLECTIONS_SHA}" > /opt/ado-collections/.ado-collections.sha
 COPY collections/ /opt/ado-collections/
 
 # Disconnected Hub EE source (prepared by restart_pod.sh / scripts/prepare-ado-ee-archive.sh).
@@ -56,7 +65,9 @@ RUN set -eux; \
     mkdir -p /workspace /opt/ado-collections/extracted /opt/ado-ee; \
     ado_archive="$(find /opt/ado-collections -maxdepth 1 -name 'infra-automation_development_office-*.tar.gz' | sort -V | tail -n 1)"; \
     if [ -n "$ado_archive" ]; then \
-      tar -xzf "$ado_archive" -C /opt/ado-collections/extracted README.md roles docs galaxy.yml meta plugins || true; \
+      tar -xzf "$ado_archive" -C /opt/ado-collections/extracted \
+        roles docs meta plugins README.md 2>/dev/null \
+        || tar -xzf "$ado_archive" -C /opt/ado-collections/extracted; \
     fi; \
     ADO_ASSISTANT_COLLECTIONS=/opt/ado-collections python3 scripts/build-assistant-knowledge.py; \
     cp public/assistant-knowledge.json dist/assistant-knowledge.json; \
