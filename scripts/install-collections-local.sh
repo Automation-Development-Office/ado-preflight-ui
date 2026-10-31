@@ -36,7 +36,7 @@ echo "COLLECTION_DIR=${COLLECTION_DIR}"
 echo "DEST=${DEST}"
 ls -l "$COLLECTION_DIR"/*.tar.gz 2>/dev/null | awk '{print $NF}' | xargs -n1 basename || true
 
-install_latest infra-ado 1 "infra.ado"
+install_latest infra-automation_development_office 1 "infra.automation_development_office"
 install_latest ansible-controller 0 "ansible.controller"
 install_latest awx-awx 0 "awx.awx"
 install_latest infra-controller_configuration 0 "infra.controller_configuration"

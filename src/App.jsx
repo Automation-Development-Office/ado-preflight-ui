@@ -5,6 +5,13 @@ import PodTerminal from './PodTerminal.jsx';
 import BootstrapProfiles from './BootstrapProfiles.jsx';
 import AdoAssistant from './AdoAssistant.jsx';
 import ControllerWorkflowPreview from './ControllerWorkflowPreview.jsx';
+import { workflowPreviewKeys } from './controllerWorkflowCatalog.mjs';
+import {
+  RHEL_SYSTEM_ROLES,
+  profileForSystemRoles,
+  systemRolesForProfile,
+  knownSystemRoleApp
+} from './rhelSystemRolesCatalog.mjs';
 import {
   selectProfileApps,
   componentIsSelected,
@@ -13,6 +20,8 @@ import {
   syncPlatformInstallOptions
 } from './profileSelection.mjs';
 import { explainLocalPlaybookCommand } from './playbookExplain.mjs';
+import { localCollectionDoc } from './localCollectionDoc.mjs';
+import { applyImportedGitSkipTls, gitTlsStage } from '../git-tls.js';
 import {
   Page,
   PageSection,
@@ -66,13 +75,59 @@ const orphanOpenShiftPlaybookApps = [
 const rhelApps = [
   'rhel','satellite','idm','aap','dirsrv',
   'eck','gitlab','grafana','kafka','rhbk',
-  'compliance','stig'
+  'compliance','stig','rhel_system_roles'
 ];
 
 const patchingApps = ['patching','satellite','idm'];
 const awsApps = ['ec2_ami_copy'];
 const provisionApps = ['aws_instance','openshift_virt'];
 const satelliteApps = ['satellite'];
+
+const PLATFORM_DETAILS = {
+  openshift: {
+    title: 'OpenShift',
+    description: 'Operators and applications installed on an OpenShift cluster. Bootstrap writes cluster auth, routes, and the OpenShift playbooks.'
+  },
+  rhel: {
+    title: 'Standalone / RHEL',
+    description: 'Services installed on RHEL hosts. Use this when the component runs on a virtual machine instead of as an OpenShift operator.'
+  },
+  satellite: {
+    title: 'Satellite',
+    description: 'Red Hat Satellite server, content views, capsules, client registration, and dynamic inventory.'
+  },
+  patching: {
+    title: 'Patching',
+    description: 'Host patching that uses Satellite and IdM to register systems and apply content.'
+  },
+  aws: {
+    title: 'AWS',
+    description: 'Amazon Web Services tasks, including copying an EC2 AMI.'
+  },
+  provision: {
+    title: 'Provisioning',
+    description: 'Create new hosts as an AWS instance or an OpenShift Virtualization virtual machine.'
+  }
+};
+
+const platformCatalogs = {
+  openshift: openshiftApps,
+  rhel: rhelApps,
+  patching: patchingApps,
+  aws: awsApps,
+  provision: provisionApps,
+  satellite: satelliteApps
+};
+
+const componentPlatformIds = component => (component === 'elastic' ? ['elastic', 'eck'] : [component]);
+
+function platformsOffering(component) {
+  const ids = componentPlatformIds(component);
+  const matches = Object.keys(PLATFORM_DETAILS).filter(platform =>
+    (platformCatalogs[platform] || []).some(app => ids.includes(app))
+  );
+  return matches.length ? matches : Object.keys(PLATFORM_DETAILS);
+}
 
 const AAP_VERSION_OPTIONS = [
   { value: '24', label: '2.4' },
@@ -1392,6 +1447,7 @@ const componentOptionLabels = {
   discover_routes_print: 'Discover Routes and Print',
   alternate_routes: 'Alternate Routes',
   update_pull_secret: 'Update Pull Secret',
+  rhel_system_roles: 'RHEL System Roles',
   update_default_ingress: 'Default Ingress Cert',
   idm_acme: 'IdM ACME',
   aws_pca: 'AWS PCA',
@@ -1474,6 +1530,61 @@ const formatMacAddress = value => {
   return raw;
 };
 
+const AGENT_NODE_MIRROR_FIELDS = [
+  'role',
+  'macAddress',
+  'interfaceName',
+  'bondEnabled',
+  'bondName',
+  'bondMode',
+  'secondaryMacAddress',
+  'secondaryInterfaceName',
+  'networkMode',
+  'prefixLength',
+  'gateway',
+  'dnsServers',
+  'diskDevice',
+  'labels',
+  'taints'
+];
+
+const bumpedIpv4 = (ip, offset) => {
+  const parts = String(ip || '').trim().split('.');
+  if (parts.length !== 4 || parts.some(part => !/^\d+$/.test(part))) return '';
+  const nums = parts.map(Number);
+  if (nums.some(num => num > 255)) return '';
+  const host = nums[3] + offset;
+  if (host < 0 || host > 255) return '';
+  return `${nums[0]}.${nums[1]}.${nums[2]}.${host}`;
+};
+
+const applyMirroredNodeFields = (target, source, ipOffset = 1) => {
+  const changed = [];
+  AGENT_NODE_MIRROR_FIELDS.forEach(field => {
+    const value = source[field];
+    if (typeof value === 'boolean' || (typeof value === 'number' && !Number.isNaN(value))) {
+      if (target[field] !== value) {
+        target[field] = value;
+        changed.push(field);
+      }
+      return;
+    }
+    if (value === undefined || value === null || String(value).trim() === '') return;
+    if (target[field] !== value) {
+      target[field] = value;
+      changed.push(field);
+    }
+  });
+  if (source.networkMode === 'static' && String(source.ipAddress || '').trim()) {
+    const nextIp = bumpedIpv4(source.ipAddress, ipOffset);
+    if (nextIp && !String(target.ipAddress || '').trim()) {
+      target.ipAddress = nextIp;
+      changed.push('ipAddress');
+    }
+  }
+  return changed;
+};
+
 const defaultAgentInstallerNode = index => ({
   // Stable id so editing hostname does not remount the row and steal focus.
   id: `node-${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${index}`,
@@ -1502,7 +1613,7 @@ const agentInstallerDefaults = {
   topology: 'ha',
   cluster_name: 'ocp-dev',
   base_domain: 'dev.rhlab',
-  openshift_version: '4.16',
+  openshift_version: '4.18',
   platform: 'baremetal',
   publish: 'External',
   network_type: 'OVNKubernetes',
@@ -1706,7 +1817,7 @@ const parseAdditionalEnvironmentsList = value => {
 
 /** Disconnected default: baked EE tar inside the preflight UI image. */
 const HUB_EE_BAKED_SOURCE = 'docker-archive:/opt/ado-ee/ado-ee.docker.tar';
-/** Preflight Hub collections (excludes infra.ado — that has its own checkbox). */
+/** Preflight Hub collections (excludes infra.automation_development_office — that has its own checkbox). */
 const PREFLIGHT_HUB_COLLECTION_OPTIONS = [
   'kubernetes.core',
   'redhat.openshift',
@@ -1788,14 +1899,32 @@ function galaxySetupTokenError(aap) {
   return 'Galaxy setup needs an API token. Set General → Hub / Galaxy API token, or put a token on each enabled Galaxy credential. One of those is enough.';
 }
 
+function missingComponentPlatforms(source) {
+  const components = source?.components || [];
+  if (components.includes('all')) return [];
+  const groups = Object.keys(PLATFORM_DETAILS);
+  return simpleComponents.filter(component => {
+    if (groups.includes(component) || !components.includes(component)) return false;
+    const ids = componentPlatformIds(component);
+    const chosen = groups.filter(group =>
+      (source?.component_apps?.[group] || []).some(app => ids.includes(app))
+    );
+    return chosen.length !== 1;
+  });
+}
+
 function wizardRequirements(source) {
   const aap = source?.aap || {};
   const core = [];
   if (!String(source?.environment || '').trim()) core.push('Environment Type');
   if (!String(source?.domain || '').trim()) core.push('Base Infrastructure Domain');
-  if (!Array.isArray(source?.components) || source.components.length === 0) {
+  const installAap = source?.pre_installs?.install_aap === true;
+  if ((!Array.isArray(source?.components) || source.components.length === 0) && !installAap) {
     core.push('at least one profile or component');
   }
+  missingComponentPlatforms(source).forEach(component => {
+    core.push(`Platform for ${componentOptionLabels[component] || component}`);
+  });
   const git = [];
   if (!String(aap.git_url || '').trim()) git.push('Git URL');
   const platform = [];
@@ -1827,6 +1956,7 @@ const defaults = {
   // Extra survey-only environment names. Primary Environment Type is always
   // included; prod is selected by default for Contoller JT surveys.
   additional_environments: ['prod'],
+  additional_environments_create_group_vars: false,
   domain: 'prod.rhlab',
 
   ansible: {
@@ -1840,7 +1970,9 @@ const defaults = {
 
   git: {
     auto_push: true,
-    skip_tls_verify: true,
+    // New forms verify Git TLS. Imported JSON that omits this key still
+    // normalizes to true so existing lab files keep their previous default.
+    skip_tls_verify: false,
     // Legacy boolean; kept in sync with git.overrides.all for imported JSON.
     overwrite_generated: false,
     overrides: {
@@ -2143,6 +2275,13 @@ const defaults = {
       standalone_hostname: '',
       standalone_database_hostname: '',
       aap_setup_containerized: true,
+      aap_setup_bundle_dir: '',
+      aap_setup_bundle_file: '',
+      aap_setup_ssh_user: '',
+      aap_setup_ssh_password: '',
+      aap_setup_ssh_private_key_secret: '',
+      aap_gateway_cert_path: '',
+      aap_gateway_key_path: '',
       subscription_manifest_file: '',
       subscription_manifest_content_base64: '',
       rhn_username: '',
@@ -2428,7 +2567,7 @@ const defaults = {
     hub_ee_execution_environment_name: 'ADO-ee',
     hub_ee_description:
       'ADO Contoller execution environment based on the supported RHEL 9 AAP EE. '
-      + 'Preloads Ansible collections used by infra.ado bootstrap and lab jobs '
+      + 'Preloads Ansible collections used by infra.automation_development_office bootstrap and lab jobs '
       + '(ansible.controller, ansible.posix, kubernetes.k8s, redhat.openshift, community.general, '
       + 'amazon.aws, and related dependencies) so Contoller can run disconnected without Galaxy pulls.',
     // Optional Galaxy/Hub credentials + org association (default off for disconnected)
@@ -2477,7 +2616,8 @@ const defaults = {
       ssh_key_data: '',
       ssh_key_unlock: '',
       become_method: 'sudo',
-      become_username: 'root'
+      become_username: 'root',
+      become_password: ''
     },
     oauth_token: '',
     admin_username: 'admin',
@@ -2579,6 +2719,13 @@ const defaults = {
       standalone_hostname: '',
       standalone_database_hostname: '',
       aap_setup_containerized: true,
+      aap_setup_bundle_dir: '',
+      aap_setup_bundle_file: '',
+      aap_setup_ssh_user: '',
+      aap_setup_ssh_password: '',
+      aap_setup_ssh_private_key_secret: '',
+      aap_gateway_cert_path: '',
+      aap_gateway_key_path: '',
       reset_database: false,
       subscription_manifest_file: '',
       subscription_manifest_content_base64: '',
@@ -2671,6 +2818,9 @@ function App() {
   const [componentRunError, setComponentRunError] = useState('');
   // After no-AAP bootstrap succeeds, open the playbook runner (form already chose components).
   const [openPlaybookRunnerAfterBootstrap, setOpenPlaybookRunnerAfterBootstrap] = useState(true);
+  // Install AAP (standalone) only: after first successful Run Bootstrap, grey out
+  // that button and move the user to Run generated playbooks.
+  const [installAapBootstrapDone, setInstallAapBootstrapDone] = useState(false);
   // AAP-card black console: scaffolding command vs selected playbook commands.
   const [localPreviewMode, setLocalPreviewMode] = useState('bootstrap');
   // Which run drives the Bootstrap Console ticker / live logs.
@@ -2700,8 +2850,8 @@ function App() {
   const [documentationType, setDocumentationType] = useState('ui');
   const [collectionsToolsOpen, setCollectionsToolsOpen] = useState(false);
   const [aapOpen, setAapOpen] = useState(true);
-  // 1 Core, 2 Component Configuration, 3 Git, 4 AAP. Later steps stay collapsed
-  // until the previous step is filled in.
+  // 1 Core, then Component, Git, AAP. Install AAP moves the AAP form to step 2.
+  // Later steps stay collapsed until the previous step is filled in.
   const [openWizardStep, setOpenWizardStep] = useState('core');
   const [expandedSteps, setExpandedSteps] = useState(WIZARD_EXPANDED_NONE);
   const [wizardUnlocked, setWizardUnlocked] = useState(1);
@@ -2722,6 +2872,8 @@ function App() {
   const [showAapOauthToken, setShowAapOauthToken] = useState(false);
   const [showAapGalaxyHubToken, setShowAapGalaxyHubToken] = useState(false);
   const [showAapAdminPassword, setShowAapAdminPassword] = useState(false);
+  const [showAapSshPassword, setShowAapSshPassword] = useState(false);
+  const [showAapSshKey, setShowAapSshKey] = useState(false);
   const [showVaultPassword, setShowVaultPassword] = useState(false);
   const [showHtpasswdPassword, setShowHtpasswdPassword] = useState(false);
   const [showMinioRootPassword, setShowMinioRootPassword] = useState(false);
@@ -2823,6 +2975,8 @@ function App() {
   const [agentInstallerPreviewTab, setAgentInstallerPreviewTab] = useState('install');
   const [agentInstallerProfiles, setAgentInstallerProfiles] = useState([]);
   const [agentNodeEditorIndex, setAgentNodeEditorIndex] = useState(null);
+  const [agentNodeMirrorNote, setAgentNodeMirrorNote] = useState('');
+  const [agentActionsOpen, setAgentActionsOpen] = useState(false);
   const outputRef = useRef(null);
   const importFileRef = useRef(null);
   const agentProfileFileRef = useRef(null);
@@ -2878,24 +3032,48 @@ function App() {
     });
   };
 
+  const installAapMode = !!data.pre_installs?.install_aap;
+  // Install AAP: Core → AAP → Git (no Component Configuration). Git step is
+  // labeled as the bootstrap/generate step because Controller is not up yet.
+  const wizardSteps = installAapMode
+    ? [
+      { id: 'core', title: 'Core Environment' },
+      { id: 'aap', title: 'Ansible Automation Platform Configuration' },
+      { id: 'git', title: 'Run Bootstrap to generate Ansible' }
+    ]
+    : [
+      { id: 'core', title: 'Core Environment' },
+      { id: 'components', title: 'Component Configuration' },
+      { id: 'git', title: 'Git Configuration' },
+      { id: 'aap', title: 'Ansible Automation Platform Configuration' }
+    ];
+  const wizardStepNumber = stepId => {
+    const index = wizardSteps.findIndex(step => step.id === stepId);
+    return index >= 0 ? index + 1 : 1;
+  };
+
   const goToGitConfiguration = () => {
     setFocusSection('git');
     setActiveMainTab('core');
-    openWizard(3, 'git');
+    openWizard(wizardStepNumber('git'), 'git');
   };
 
   const goToAapConfiguration = () => {
     setFocusSection('aap');
     setActiveMainTab('core');
     setAapOpen(true);
-    openWizard(4, 'aap');
+    openWizard(wizardStepNumber('aap'), 'aap');
   };
 
+  const coreHasSelection = (
+    (Array.isArray(data.components) && data.components.length > 0)
+    || installAapMode
+  );
   const coreStepReady = Boolean(
     String(data.environment || '').trim()
     && String(data.domain || '').trim()
-    && Array.isArray(data.components)
-    && data.components.length > 0
+    && coreHasSelection
+    && missingComponentPlatforms(data).length === 0
   );
 
   useEffect(() => {
@@ -2904,11 +3082,12 @@ function App() {
       return;
     }
     if (coreStepReady && !coreWasReadyRef.current) {
+      const nextId = installAapMode ? 'aap' : 'components';
       setWizardUnlocked(prev => Math.max(prev, 2));
-      setOpenWizardStep('components');
-      setExpandedSteps({ core: false, components: true, git: false, aap: false });
+      setOpenWizardStep(nextId);
+      setExpandedSteps({ core: false, components: false, git: false, aap: false, [nextId]: true });
       window.setTimeout(() => {
-        document.getElementById('assistant-component-config')?.scrollIntoView({
+        document.getElementById(nextId === 'aap' ? 'aap-configuration' : 'assistant-component-config')?.scrollIntoView({
           behavior: 'smooth',
           block: 'start'
         });
@@ -2920,7 +3099,7 @@ function App() {
       setExpandedSteps(WIZARD_EXPANDED_NONE);
     }
     coreWasReadyRef.current = coreStepReady;
-  }, [coreStepReady]);
+  }, [coreStepReady, installAapMode]);
 
   useEffect(() => {
     const missing = wizardRequirements(data);
@@ -3147,7 +3326,7 @@ function App() {
     configs: {
       title: 'Generated Configs',
       body: 'File contents from the local clone: configs/controller, configs/job_templates, configs/workflows, '
-        + 'playbooks/, and group_vars/ — what infra.ado scaffolding produced this run. Use to verify JT/workflow '
+        + 'playbooks/, and group_vars/ — what infra.automation_development_office scaffolding produced this run. Use to verify JT/workflow '
         + 'seeds and vars before pushing to Git or syncing Controller.'
     },
     runtime: {
@@ -3195,6 +3374,31 @@ function App() {
       fetchDebugTab(debugTab);
     }
   }, [activeTab, debugTab, runFinished]);
+
+  useEffect(() => {
+    setData(prev => {
+      const folders = prev.component_config?.grafana?.folders;
+      if (!Array.isArray(folders)) return prev;
+      let changed = false;
+      const nextFolders = folders.map(folder => {
+        if (!folder || typeof folder !== 'object') return folder;
+        const path = String(folder.dashboards_path || '');
+        const fromPath = path.startsWith('dashboards/') ? path.slice('dashboards/'.length) : '';
+        const name = String(folder.name || '').trim();
+        const renamedByGeneral = folder.use_general_folder
+          || (name.toLowerCase() === 'general' && fromPath && fromPath.toLowerCase() !== 'general');
+        if (!renamedByGeneral) return folder;
+        changed = true;
+        const restored = { ...folder, name: fromPath || name };
+        delete restored.use_general_folder;
+        return restored;
+      });
+      if (!changed) return prev;
+      const copy = JSON.parse(JSON.stringify(prev));
+      copy.component_config.grafana.folders = nextFolders;
+      return copy;
+    });
+  }, [data.component_config?.grafana?.folders]);
 
   useEffect(() => {
     if (!isRhbkSelected(data) || !isGrafanaSelected(data)) return;
@@ -4063,11 +4267,20 @@ function App() {
   };
 
   const defaultComponentConfig = component => {
+    if (component === 'rhel_system_roles') {
+      return {
+        profile: 'custom',
+        generate_playbooks: true,
+        generate_job_templates: true,
+        include_in_workflow: false,
+        roles: {}
+      };
+    }
     if (component === 'aws') {
       return JSON.parse(JSON.stringify(defaults.component_config.aws));
     }
 
-    const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching', 'aap_hub_harden'];
+    const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching', 'aap_hub_harden', 'rhel_system_roles'];
     const fallback = noReplicaComponents.includes(component)
       ? (component === 'patching' || component === 'rhel' ? { hostname: '', hosts: [] } : { hostname: '' })
       : { hostname: '', storage: '', replicas: 1 };
@@ -4243,6 +4456,10 @@ function App() {
     }
 
     let merged = deepMerge(defaults, normalizedInput);
+    // deepMerge fills skip_tls_verify from the new-form default (false).
+    // A file that omitted the key must stay on the legacy skip, and the
+    // checkbox must show that. Explicit true or false is left alone.
+    merged.git = applyImportedGitSkipTls(merged.git, normalizedInput.git);
 
     if (!Array.isArray(merged.components)) {
       merged.components = [];
@@ -4528,9 +4745,12 @@ function App() {
     }
 
     if (!merged.aap.machine_credential) merged.aap.machine_credential = { ...defaults.aap.machine_credential };
+    if (merged.aap.machine_credential.become_password === undefined) {
+      merged.aap.machine_credential.become_password = '';
+    }
     if (!merged.git) merged.git = { ...defaults.git };
     if (merged.git.auto_push === undefined) merged.git.auto_push = true;
-    if (merged.git.skip_tls_verify === undefined) merged.git.skip_tls_verify = true;
+    merged.git = applyImportedGitSkipTls(merged.git, normalizedInput.git);
     if (merged.git.overwrite_generated === undefined) merged.git.overwrite_generated = false;
     if (!merged.git.overrides) {
       merged.git.overrides = {
@@ -4550,6 +4770,7 @@ function App() {
     if (merged.git.username === undefined) merged.git.username = '';
     if (merged.additional_environments === undefined) merged.additional_environments = ['prod'];
     merged.additional_environments = parseAdditionalEnvironmentsList(merged.additional_environments);
+    merged.additional_environments_create_group_vars = merged.additional_environments_create_group_vars === true;
     if (!merged.ansible) merged.ansible = { ...defaults.ansible };
     if (merged.ansible.extra_args === undefined) merged.ansible.extra_args = '';
     if (merged.ansible.state !== 'absent') merged.ansible.state = 'present';
@@ -4734,6 +4955,26 @@ function App() {
     payload.components = Array.isArray(payload.components) ? payload.components : [];
     payload.component_config = selectedConfig;
     payload.component_options = selectedOptions;
+    if (payload.openshift) {
+      const savedOcpOpts = payload.component_options?.openshift || [];
+      if (savedOcpOpts.includes('update_pull_secret')) {
+        payload.openshift.pull_secret_include_in_workflow = payload.openshift.pull_secret_include_in_workflow === true;
+      } else {
+        delete payload.openshift.pull_secret_include_in_workflow;
+      }
+    }
+    if ((payload.component_apps?.rhel || []).includes('rhel_system_roles')) {
+      const current = payload.component_config.rhel_system_roles || {};
+      const selectedRoles = (payload.component_options?.rhel_system_roles || []).filter(knownSystemRoleApp);
+      payload.component_options.rhel_system_roles = selectedRoles;
+      payload.component_config.rhel_system_roles = {
+        profile: profileForSystemRoles(selectedRoles),
+        generate_playbooks: current.generate_playbooks !== false,
+        generate_job_templates: current.generate_job_templates !== false,
+        include_in_workflow: current.include_in_workflow === true,
+        roles: current.roles && typeof current.roles === 'object' ? current.roles : {}
+      };
+    }
     if (payload.aap) {
       const org = payload.aap.organization || 'ADO';
       payload.aap.inventory = normalizeOrgScopedName(payload.aap.inventory, org, 'inventory');
@@ -5018,6 +5259,7 @@ function App() {
           if (payload.openshift.install_nfs_during_bootstrap === undefined) {
             payload.openshift.install_nfs_during_bootstrap = true;
           }
+          payload.openshift.nfs_include_in_workflow = payload.openshift.nfs_include_in_workflow === true;
           const nfsServer = String(payload.openshift.nfs_server || '').trim();
           const nfsShare = String(payload.openshift.nfs_share || '').trim();
           if (!nfsServer || !nfsShare) {
@@ -5039,12 +5281,14 @@ function App() {
           delete payload.openshift.nfs_version;
           delete payload.openshift.nfs_create_test_namespace;
           delete payload.openshift.nfs_create_test_pvc;
+          delete payload.openshift.nfs_include_in_workflow;
         }
 
         if (wantIscsi) {
           if (payload.openshift.install_iscsi_during_bootstrap === undefined) {
             payload.openshift.install_iscsi_during_bootstrap = true;
           }
+          payload.openshift.iscsi_include_in_workflow = payload.openshift.iscsi_include_in_workflow === true;
           const dsmHost = String(payload.openshift.iscsi_dsm_host || '').trim();
           const dsmUser = String(payload.openshift.iscsi_dsm_username || '').trim();
           const dsmPass = String(payload.openshift.iscsi_dsm_password || '').trim();
@@ -5067,6 +5311,7 @@ function App() {
           delete payload.openshift.iscsi_location;
           delete payload.openshift.iscsi_is_default;
           delete payload.openshift.iscsi_install_snapshotter;
+          delete payload.openshift.iscsi_include_in_workflow;
         }
 
         if (!wantNfs && !wantIscsi) {
@@ -5156,6 +5401,23 @@ function App() {
           payload.component_config.aap.aap_setup_containerized = (
             payload.pre_installs.aap.aap_setup_containerized
           );
+          [
+            'aap_setup_bundle_dir',
+            'aap_setup_bundle_file',
+            'aap_setup_ssh_user',
+            'aap_setup_ssh_password',
+            'aap_setup_ssh_private_key_secret',
+            'aap_gateway_cert_path',
+            'aap_gateway_key_path'
+          ].forEach((key) => {
+            const value = String(
+              payload.pre_installs.aap[key]
+              || payload.component_config.aap[key]
+              || ''
+            ).trim();
+            payload.pre_installs.aap[key] = value;
+            payload.component_config.aap[key] = value;
+          });
           if (payload.aap?.admin_password && !payload.component_config.aap.admin_password) {
             payload.component_config.aap.admin_password = payload.aap.admin_password;
           }
@@ -5228,6 +5490,8 @@ function App() {
       payload.git.vars_only = false;
       payload.git.auto_push = false;
     }
+    if (!payload.git) payload.git = {};
+    payload.git.skip_tls_verify = gitTlsStage(payload.git.skip_tls_verify).skipTlsVerify;
 
     return payload;
   };
@@ -5242,7 +5506,7 @@ function App() {
         copy.component_config[component] || {}
       );
       if (copy.component_config[component].hostname === undefined) copy.component_config[component].hostname = '';
-      if (!['rhel', 'satellite', 'idm', 'compliance', 'stig', 'aws', 'openshift_virt'].includes(component) && copy.component_config[component].storage === undefined) {
+      if (!['rhel', 'satellite', 'idm', 'compliance', 'stig', 'aws', 'openshift_virt', 'rhel_system_roles'].includes(component) && copy.component_config[component].storage === undefined) {
         copy.component_config[component].storage = '';
       }
       if (component === 'idm') {
@@ -5270,12 +5534,32 @@ function App() {
     setYamlDraft(JSON.stringify(componentData, null, 2));
   };
 
-  const setAapEnabled = value => {
+  const setAapEnabled = (value, options = {}) => {
     set('aap.enabled', value);
     // Keep the AAP panel open when switching to Not using AAP so Credentials
     // (Vault) stay reachable; vault is also shown inline under Not using AAP.
     setAapOpen(true);
-    openWizard(4, 'aap');
+    if (!options.stayOnCore) {
+      openWizard(wizardStepNumber('aap'), 'aap');
+    }
+  };
+
+  const setCoreAapChoice = choice => {
+    if (choice === 'install') {
+      setInstallAap(true);
+      setInstallAapBootstrapDone(false);
+      const coreFilled = String(data.environment || '').trim() && String(data.domain || '').trim();
+      if (coreFilled) {
+        setAapOpen(true);
+        openWizard(2, 'aap');
+      }
+      return;
+    }
+    if (data.pre_installs?.install_aap) {
+      setInstallAap(false);
+      setInstallAapBootstrapDone(false);
+    }
+    setAapEnabled(choice === 'using', { stayOnCore: true });
   };
 
   /** Strip -e/--extra-vars state=… so Common extra vars owns state. */
@@ -5304,7 +5588,7 @@ function App() {
     const encryptVault = data?.vault?.encrypt !== false ? 'true' : 'false';
     const hubOnly = aapStandaloneRun(data);
     const generatePlaybooks = hubOnly ? 'false' : 'true';
-    const gitSkipTls = data?.git?.skip_tls_verify !== false ? 'false' : 'true';
+    const gitSkipTls = gitTlsStage(data?.git?.skip_tls_verify).sslVerify;
     const extraArgs = effectiveAnsibleExtraArgs();
 
     const lines = [
@@ -5557,6 +5841,13 @@ function App() {
         }
       }
 
+      if (wasSelected && component !== 'all' && !groupComponents.includes(component)) {
+        const ids = componentPlatformIds(component);
+        Object.keys(copy.component_apps).forEach(group => {
+          copy.component_apps[group] = (copy.component_apps[group] || []).filter(app => !ids.includes(app));
+        });
+      }
+
       if (!copy.jira) copy.jira = {};
       copy.jira.enabled = next.includes('all') || next.includes('jira');
 
@@ -5570,6 +5861,35 @@ function App() {
   const toggleComponentAndOpen = component => {
     toggleComponent(component);
     openConfigPanel(component);
+  };
+
+  const assignAdditionalComponentPlatform = (component, platformId) => {
+    if (!platformId || !PLATFORM_DETAILS[platformId]) return;
+    setData(prev => {
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (!copy.component_apps) copy.component_apps = {};
+      const ids = componentPlatformIds(component);
+      Object.keys(copy.component_apps).forEach(group => {
+        copy.component_apps[group] = (copy.component_apps[group] || []).filter(app => !ids.includes(app));
+      });
+      const current = copy.component_apps[platformId] || [];
+      copy.component_apps[platformId] = [...current, ...ids.filter(id => !current.includes(id))];
+      const next = [...(copy.components || [])].filter(value => value !== 'all');
+      if (!next.includes(component)) next.push(component);
+      if (!next.includes(platformId)) next.push(platformId);
+      copy.components = next;
+      copy.component = next[0] || '';
+      clearStandaloneWhenComponentsSelected(copy);
+      syncPlatformInstallOptions(copy);
+      return copy;
+    });
+  };
+
+  const additionalComponentPlatforms = component => {
+    const ids = componentPlatformIds(component);
+    return groupComponents.filter(group =>
+      (data.component_apps?.[group] || []).some(app => ids.includes(app))
+    );
   };
 
 
@@ -5798,9 +6118,28 @@ function App() {
       if (!Array.isArray(copy.openshift.agent_installer.nodes)) {
         copy.openshift.agent_installer.nodes = [];
       }
-      copy.openshift.agent_installer.nodes.push(defaultAgentInstallerNode(copy.openshift.agent_installer.nodes.length));
+      const nodes = copy.openshift.agent_installer.nodes;
+      const next = defaultAgentInstallerNode(nodes.length);
+      const previous = nodes[nodes.length - 1];
+      if (previous) applyMirroredNodeFields(next, previous, 1);
+      nodes.push(next);
       return copy;
     });
+  };
+
+  const mirrorAgentNodeFromPrevious = index => {
+    const nodes = data.openshift?.agent_installer?.nodes;
+    if (index < 1 || !Array.isArray(nodes) || !nodes[index] || !nodes[index - 1]) {
+      setAgentNodeMirrorNote('Could not read that node row.');
+      return;
+    }
+    const next = { ...nodes[index] };
+    const changed = applyMirroredNodeFields(next, nodes[index - 1], 1);
+    const nextNodes = nodes.map((node, nodeIndex) => (nodeIndex === index ? next : node));
+    setAgentInstaller('nodes', nextNodes);
+    setAgentNodeMirrorNote(changed.length
+      ? `Filled node ${index + 1} from node ${index}: ${changed.join(', ')}. Hostname stayed on this row. Give this host its own MAC if you copied one.`
+      : `Node ${index + 1} already had the filled-in values from node ${index}. Type a MAC, interface, or static IP on the row above, then mirror again.`);
   };
 
   const removeAgentNode = index => {
@@ -6010,11 +6349,43 @@ function App() {
     }
   };
 
-  const validateAgentInstaller = () => callAgentInstallerApi('validate');
-
-  const generateAgentInstaller = () => callAgentInstallerApi('generate');
-
   const downloadAgentInstallerZip = () => callAgentInstallerApi('download', true);
+
+  const exportInstallationBundle = async () => {
+    setAgentActionsOpen(false);
+    setAgentInstallerBusy(true);
+    try {
+      const response = await fetch('/api/openshift-agent/export-bundle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...agentInstallerConfig(),
+          registry_mode: 'existing'
+        })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.valid === false) {
+        setAgentInstallerResult({
+          valid: false,
+          errors: body.errors || [body.error || 'Bundle export failed.'],
+          warnings: body.warnings || []
+        });
+        return;
+      }
+      setAgentInstallerResult({
+        valid: true,
+        errors: [],
+        warnings: [
+          `Installation bundle: ${body.bundle_dir}`,
+          body.command
+        ]
+      });
+    } catch (err) {
+      setAgentInstallerResult({ valid: false, errors: [err.message], warnings: [] });
+    } finally {
+      setAgentInstallerBusy(false);
+    }
+  };
 
   const downloadSanitizedAgentInstallerZip = () => callAgentInstallerApi(
     'download-sanitized',
@@ -6022,63 +6393,66 @@ function App() {
     `${agentInstallerConfig().cluster_name || 'openshift-agent'}-agent-configs-sanitized.zip`
   );
 
-  const mapToAirgapArchitect = async ({ download = false } = {}) => {
+  const showAgentYaml = async (tab) => {
+    setAgentActionsOpen(false);
+    const result = await callAgentInstallerApi('generate');
+    if (result?.valid) setAgentInstallerPreviewTab(tab);
+  };
+
+  const runAgentInstall = async (action) => {
+    setAgentActionsOpen(false);
+    if (bootstrapStatus === 'running') {
+      setAgentInstallerResult({
+        valid: false,
+        errors: ['The bootstrap console is already running a job.'],
+        warnings: []
+      });
+      return;
+    }
+
     setAgentInstallerBusy(true);
+    setBootstrapStatus('running');
+    setActiveTab('logs');
+    setPreview('Starting OpenShift agent install...\n');
+    requestAnimationFrame(() => {
+      document.querySelector('.ado-console-toolbar')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+
     try {
-      const response = await fetch('/api/airgap-architect/map', {
+      const response = await fetch('/api/openshift-agent/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(agentInstallerConfig())
+        body: JSON.stringify({ action, ...agentInstallerConfig() })
       });
-      const result = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(
-          (result && (result.errors || []).join('; '))
-          || `Airgap Architect map failed (${response.status})`
-        );
+      const body = await response.json().catch(() => ({}));
+      if (response.status === 400) {
+        setAgentInstallerResult({
+          valid: false,
+          errors: body.errors || [body.error || 'Agent config is not valid.'],
+          warnings: body.warnings || []
+        });
+        setBootstrapStatus('failed');
+        return;
       }
-      setAgentInstallerResult({
-        valid: result.valid !== false,
-        errors: result.errors || [],
-        warnings: [
-          ...(result.warnings || []),
-          result.mode === 'remote'
-            ? `Airgap companion filled installer pieces via ${result.architectUrl}`
-            : 'Local installer pieces (set AIRGAP_ARCHITECT_URL for companion enrich).'
-        ],
-        installConfig: result.installConfig,
-        agentConfig: result.agentConfig,
-        imagesetConfigYaml: result.imagesetConfigYaml || '',
-        fieldManual: result.fieldManual || '',
-        installerPieces: result.installerPieces || null,
-        airgapArchitect: result
-      });
-      if (download) {
-        const handoff = {
-          kind: 'ado-airgap-installer-pieces',
-          version: 1,
-          exported_at: new Date().toISOString(),
-          mode: result.mode,
-          role: result.role,
-          architectState: result.architectState,
-          installConfig: result.installConfig,
-          agentConfig: result.agentConfig,
-          imagesetConfigYaml: result.imagesetConfigYaml,
-          fieldManual: result.fieldManual,
-          installerPieces: result.installerPieces,
-          imagesetHint: result.imagesetHint,
-          remoteDiffSummary: result.remoteDiffSummary,
-          remote: result.remote
-        };
-        downloadFile(
-          `${agentInstallerConfig().cluster_name || 'openshift'}-airgap-installer-pieces.json`,
-          JSON.stringify(handoff, null, 2)
-        );
+      if (!response.ok && response.status !== 202) {
+        throw new Error(body.error || `Agent install request failed (${response.status})`);
       }
-      return result;
+
+      let running = true;
+      while (running) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        const logs = await fetch('/api/logs').then(r => r.text()).catch(() => '');
+        if (logs) setPreview(logs);
+        const status = await fetch('/api/openshift-agent/run').then(r => r.json()).catch(() => null);
+        if (!status) continue;
+        running = status.running === true;
+        if (!running) {
+          setBootstrapStatus(status.code === 0 ? 'complete' : 'failed');
+        }
+      }
     } catch (err) {
       setAgentInstallerResult({ valid: false, errors: [err.message], warnings: [] });
-      return null;
+      setBootstrapStatus('failed');
     } finally {
       setAgentInstallerBusy(false);
     }
@@ -6156,6 +6530,7 @@ function App() {
     setBootstrapStatus('idle');
     setBootstrapRuntime('');
     setComponentRunError('');
+    setInstallAapBootstrapDone(false);
   };
 
   const flushPodWorkspace = async ({ wipeCollections = false } = {}) => {
@@ -6652,10 +7027,29 @@ function App() {
       setBootstrapStatus(status);
       setBootstrapRuntime(runtime || '');
       setRunFinished(true);
+      const installOnly = !!data.pre_installs?.install_aap;
+      // Install AAP: grey Run Bootstrap only until the next job finishes.
+      // After playbook success/failure (or a failed bootstrap), enable it again.
+      if (installOnly && (runComponents || status === 'failed' || status === 'idle')) {
+        if (runComponents || status === 'failed') {
+          setInstallAapBootstrapDone(false);
+        }
+      }
       if (!runComponents && status === 'complete') {
+        if (installOnly) {
+          setInstallAapBootstrapDone(true);
+        }
         loadComponentPlan()
           .then(() => {
-            if (openPlaybookRunnerAfterBootstrap) setComponentRunnerOpen(true);
+            if (installOnly || openPlaybookRunnerAfterBootstrap) {
+              setComponentRunnerOpen(true);
+              setAapOpen(true);
+              openWizard(wizardStepNumber('aap'), 'aap');
+              window.setTimeout(() => {
+                document.getElementById('assistant-run-generated-playbooks')
+                  ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }, 80);
+            }
           })
           .catch(() => setComponentPlan(null));
       }
@@ -7563,15 +7957,30 @@ echo $TOKEN
     iscsiStorageClass: 'StorageClass name to create. Default: synology-iscsi-storage.',
     agentClusterName: 'OpenShift cluster name used in install-config metadata. Example: ocp-dev.',
     agentBaseDomain: 'Base DNS domain for the cluster. Example: dev.rhlab.',
-    agentPullSecret: 'Red Hat pull secret JSON copied from cloud.redhat.com.',
-    agentSshKey: 'Public SSH key installed for core user access. Example: ssh-ed25519 AAAA...',
+    agentPullSecret: 'Red Hat pull secret JSON. Paste it here, or upload the pull-secret file.',
+    agentTrustBundle: 'PEM CA bundle added to install-config.yaml. Paste it here, or upload a .pem or .crt file.',
+    agentSshKey: 'Public SSH key for the core user. Paste it here, or upload a .pub file. Example: ssh-ed25519 AAAA...',
     agentVip: 'Virtual IP address inside the machine network CIDR.',
     agentNetworkCidr: 'CIDR block used by bare metal nodes. Example: 192.168.2.0/24.',
     agentRendezvousIp: 'IP address of the first control-plane host used by the agent installer.',
     agentNodeStatic: 'Static networking writes NMState config into agent-config.yaml. DHCP uses the MAC/interface only.',
     agentMac: 'Type 12 hex digits (112233445566) or colon-separated (11:22:33:44:55:66). Colons are added automatically when missing.',
     agentBond: 'Enable to create a bond0 NMState interface from two NICs (primary + secondary MAC/interface).',
-    agentKernelArgs: 'One kernel argument per line. Example: ixgbe.allow_unsupported_sfp=1. Generates MachineConfig manifests under openshift/ plus an assisted-style kernelArguments snippet.'
+    agentDisconnectedRegistry: (
+      <>
+        <p>One source per line. Text before the first colon is the source repository. Text after it is the mirror.</p>
+        <pre style={{ whiteSpace: 'pre-wrap', fontSize: '12px', margin: '8px 0 0' }}>{`quay.io/openshift-release-dev/ocp-release: registry.example.com:5000/ocp4/openshift4
+quay.io/openshift-release-dev/ocp-v4.0-art-dev: registry.example.com:5000/ocp4/openshift4`}</pre>
+      </>
+    ),
+    agentKernelArgs: (
+      <>
+        <p>One kernel argument per line. A bare line is appended. Start a line with append, replace, or delete when the operation matters.</p>
+        <pre style={{ whiteSpace: 'pre-wrap', fontSize: '12px', margin: '8px 0 0' }}>{`ixgbe.allow_unsupported_sfp=1
+append: rd.multipath=default
+replace: console=tty0`}</pre>
+      </>
+    )
   };
 
   const gitHelp = {
@@ -7603,8 +8012,9 @@ echo $TOKEN
     ),
     skipTlsVerify: (
       <>
-        <p>Default is SSL verification disabled.</p>
-        <p>When checked, local git uses <code>http.sslVerify=false</code>.</p>
+        <p>A new form verifies Git TLS. Check this only for a self-signed Git server.</p>
+        <p>When checked, clone, fetch, pull, and push use <code>http.sslVerify=false</code>. This does not change Controller API verification or the Git username.</p>
+        <p>An imported file that already sets this value is kept. A file that omits it still skips Git TLS, and this box is checked so that is visible. Unchecking it enables verification and is what gets saved.</p>
       </>
     ),
     varsOnly: (
@@ -7636,7 +8046,7 @@ echo $TOKEN
     hubPublishCollection: (
       <>
         <p>
-          Publishes <code>infra.ado</code> into Private Automation Hub validated content when it is
+          Publishes <code>infra.automation_development_office</code> into Private Automation Hub validated content when it is
           missing, or refreshes it when you also enable force below.
         </p>
         <p>Leave off if Hub already has the collection Controller should use.</p>
@@ -7646,12 +8056,12 @@ echo $TOKEN
       <>
         <p>
           Publishes selected preflight-baked collection tarballs into Hub
-          validated when missing. Does not include <code>infra.ado</code>.
+          validated when missing. Does not include <code>infra.automation_development_office</code>.
         </p>
         <p>
           Use the dropdown to pick which collections to upload. Already-installed
           versions are skipped when they exist in validated, published,
-          rh-certified, or pulp (no force for these — only <code>infra.ado</code>
+          rh-certified, or pulp (no force for these — only <code>infra.automation_development_office</code>
           has a force checkbox).
         </p>
         <p>
@@ -7664,10 +8074,10 @@ echo $TOKEN
     hubForceCollectionUpdate: (
       <>
         <p>
-          Overwrites an existing <code>infra.ado</code> in Hub validated content.
+          Overwrites an existing <code>infra.automation_development_office</code> in Hub validated content.
           Additional playbook collections always skip when the version already exists.
         </p>
-        <p>Without this, an already-installed <code>infra.ado</code> is left as-is.</p>
+        <p>Without this, an already-installed <code>infra.automation_development_office</code> is left as-is.</p>
       </>
     ),
     containerRegistryCredential: (
@@ -7701,7 +8111,7 @@ echo $TOKEN
         </p>
         <p>
           Without ADO EE, Controller jobs need Galaxy credentials already on the organization so
-          project sync can install vendored <code>infra.ado</code> (Galaxy tab creates them if
+          project sync can install vendored <code>infra.automation_development_office</code> (Galaxy tab creates them if
           missing; leave it off if they already exist in Controller).
         </p>
       </>
@@ -7745,7 +8155,7 @@ echo $TOKEN
       ['connection', true],
       ['standalone', hasStandalone],
       ['datasources', grafanaOpts.includes('datasources')],
-      ['folders', grafanaOpts.includes('folders') || grafanaOpts.includes('dashboards')],
+      ['folders', grafanaOpts.includes('folders')],
       ['dashboards', grafanaOpts.includes('dashboards')],
       ['alerts', grafanaOpts.includes('alerts')],
       ['email', grafanaOpts.includes('email')],
@@ -7763,9 +8173,7 @@ echo $TOKEN
         if (!copy.component_config.grafana.folders) copy.component_config.grafana.folders = [];
         const current = copy.component_config.grafana.folders[index] || {};
         const next = { ...current, [key]: value };
-        if (key === 'use_general_folder' && value) {
-          next.name = 'General';
-        }
+        delete next.use_general_folder;
         if (key === 'name' && !current.dashboards_path_manual) {
           const previousName = String(current.name || '').trim();
           const previousDefault = previousName ? `dashboards/${previousName}` : '';
@@ -7901,19 +8309,10 @@ echo $TOKEN
                 </Tooltip>
               </div>
               <Grid hasGutter>
-                <GridItem span={12}>
-                  <Checkbox
-                    id={`grafana-folder-general-${index}`}
-                    label="Use Grafana General (root) folder"
-                    isChecked={!!folder.use_general_folder || ['', 'general', 'main', 'root'].includes(String(folder.name || '').trim().toLowerCase())}
-                    onChange={(_, v) => updateFolder(index, 'use_general_folder', v)}
-                  />
-                </GridItem>
                 <GridItem span={3}>
                   <FormGroup label="Folder name">
                     <TextInput
-                      value={folder.use_general_folder ? 'General' : (folder.name || '')}
-                      isDisabled={!!folder.use_general_folder}
+                      value={folder.name || ''}
                       onChange={(_, v) => updateFolder(index, 'name', v)}
                     />
                   </FormGroup>
@@ -7963,8 +8362,7 @@ echo $TOKEN
               name: '',
               source_type: 'path',
               source: '.',
-              dashboards_path: '',
-              use_general_folder: false
+              dashboards_path: ''
             });
             return copy;
           })}>Add Folder</Button>
@@ -9106,6 +9504,19 @@ echo $TOKEN
             </FormGroup>
           </GridItem>
 
+          <GridItem span={6}>
+            <FormGroup
+              label="Sudo password"
+              helperText="Optional. Leave blank when sudo does not ask for a password."
+            >
+              {renderSecretTextInput(
+                'aap.machine_credential.become_password',
+                credential.become_password || '',
+                (_, v) => set('aap.machine_credential.become_password', v)
+              )}
+            </FormGroup>
+          </GridItem>
+
           <GridItem span={12}>
             <FormGroup label="SSH Private Key">
               <textarea
@@ -9222,7 +9633,8 @@ echo $TOKEN
                   </FormGroup>
                   {data.scm_tool === 'bitbucket' && (
                     <p style={{ color: mutedTextColor, marginTop: '6px', marginBottom: 0 }}>
-                      Local bootstrap git uses <code>Authorization: Bearer</code>. Controller project sync uses your Bitbucket username plus HTTP access token (not OAuth2).
+                      Leave Bitbucket username blank to use <code>x-token-auth</code>.
+                      A typed username is used for Controller project sync with the HTTP access token.
                     </p>
                   )}
 
@@ -9332,9 +9744,12 @@ echo $TOKEN
                   <Checkbox
                     id="git-skip-tls-verify"
                     label={labelWithHelp('Skip TLS/SSL verification for Git (self-signed certificates)', gitHelp.skipTlsVerify)}
-                    isChecked={data.git.skip_tls_verify !== false}
-                    onChange={(_, v) => set('git.skip_tls_verify', v)}
+                    isChecked={gitTlsStage(data.git?.skip_tls_verify).checkboxChecked}
+                    onChange={(_, v) => set('git.skip_tls_verify', v === true)}
                   />
+                  <p id="git-tls-effective" style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
+                    {gitTlsStage(data.git?.skip_tls_verify).label}
+                  </p>
                 </GridItem>
 
                 <GridItem span={8}>
@@ -9350,19 +9765,29 @@ echo $TOKEN
 
                   <br />
 
-                  {data.scm_tool === 'bitbucket' && (
-                    <>
-                      <FormGroup label="Bitbucket username" isRequired>
-                        <TextInput
-                          value={data.git.username}
-                          onChange={(_, v) => set('git.username', v)}
-                          placeholder="Account username for HTTP access token"
-                        />
-                      </FormGroup>
-
-                      <br />
-                    </>
+                  <FormGroup
+                    label={data.scm_tool === 'bitbucket' ? 'Bitbucket username' : 'Git username'}
+                    isRequired={false}
+                  >
+                    <TextInput
+                      value={data.git.username}
+                      onChange={(_, v) => set('git.username', v)}
+                      placeholder={
+                        data.scm_tool === 'bitbucket'
+                          ? 'Blank uses x-token-auth'
+                          : 'Blank uses oauth2. SAML: account username'
+                      }
+                    />
+                  </FormGroup>
+                  {data.scm_tool !== 'bitbucket' && (
+                    <p style={{ color: mutedTextColor, marginTop: '4px', marginBottom: 0, fontSize: '13px' }}>
+                      For SAML logins, enter the username and the token. GitLab HTTPS
+                      still uses that username plus a personal access token.
+                      Leave blank to keep <code>oauth2</code>.
+                    </p>
                   )}
+
+                  <br />
 
                   <FormGroup label="Git Token">
                     <div style={{ display: 'flex', gap: '8px' }}>
@@ -9415,7 +9840,8 @@ echo $TOKEN
         ssh_key_data: '',
         ssh_key_unlock: '',
         become_method: 'sudo',
-        become_username: 'root'
+        become_username: 'root',
+        become_password: ''
       });
       return copy;
     });
@@ -9506,6 +9932,20 @@ echo $TOKEN
           <TextInput value={credential.become_username} onChange={(_, v) => set(`aap.additional_credentials.${index}.become_username`, v)} />
         </FormGroup>
       </GridItem>
+      {(credential.credential_type || 'Machine') === 'Machine' && (
+        <GridItem span={4}>
+          <FormGroup
+            label="Sudo password"
+            helperText="Optional. Leave blank when sudo does not ask for a password."
+          >
+            {renderSecretTextInput(
+              `aap.additional_credentials.${index}.become_password`,
+              credential.become_password || '',
+              (_, v) => set(`aap.additional_credentials.${index}.become_password`, v)
+            )}
+          </FormGroup>
+        </GridItem>
+      )}
       <GridItem span={12}>
         <FormGroup label="SSH Private Key">
           <textarea
@@ -9618,7 +10058,7 @@ echo $TOKEN
     oidcClientId: 'Confidential OIDC client id created in Keycloak. Lab default: ado-satellite.',
     oidcIssuer: 'OIDC issuer URL. Example: https://keycloak.apps.ocp.prod.rhlab/realms/rhlab',
     oidcClientSecret: 'Optional. Leave empty to fetch the client secret from Keycloak after create.',
-    oidcAdminUser: 'Keycloak admin user used by infra.ado.rhbk_client. Example: admin.',
+    oidcAdminUser: 'Keycloak admin user used by infra.automation_development_office.rhbk_client. Example: admin.',
     oidcAdminPassword: 'Keycloak admin password. Stored in generated vault files.',
     oidcCreateClient: 'Create or update the Keycloak client before configuring Satellite.'
   };
@@ -9980,7 +10420,7 @@ echo $TOKEN
         <GridItem span={12}>
           <p style={{ color: mutedTextColor, marginTop: 0 }}>
             Creates confidential client <code>ado-satellite</code> in existing realm <code>rhlab</code>
-            using <code>infra.ado.rhbk_client</code>, then enables Satellite external login.
+            using <code>infra.automation_development_office.rhbk_client</code>, then enables Satellite external login.
           </p>
         </GridItem>
         {renderTextField('Hostname / URL', 'component_config.satellite.hostname', 'text', satelliteHelp.hostname)}
@@ -10353,6 +10793,7 @@ echo $TOKEN
           {options.map(option => (
             <GridItem key={option} span={4}>
               <Checkbox
+                id={`${component}-option-${option}`}
                 label={
                   component === 'quay' && option === 'minio'
                     ? 'Use existing MinIO'
@@ -10390,8 +10831,15 @@ echo $TOKEN
 
   const renderGroupComponentOptions = (group, title = null, description = null) => {
     const apps = getGroupApps(group);
+    const orderedApps = group === 'openshift'
+      ? [...apps].sort((left, right) => {
+        const leftLabel = String(componentOptionLabels[left] || left);
+        const rightLabel = String(componentOptionLabels[right] || right);
+        return leftLabel.localeCompare(rightLabel, undefined, { sensitivity: 'base' });
+      })
+      : apps;
     const selected = data.component_apps?.[group] || [];
-    const allSelected = apps.length > 0 && apps.every(app => selected.includes(app));
+    const allSelected = orderedApps.length > 0 && orderedApps.every(app => selected.includes(app));
 
     return (
       <div
@@ -10435,7 +10883,7 @@ echo $TOKEN
             setData(prev => {
               const copy = JSON.parse(JSON.stringify(prev));
               if (!copy.component_apps) copy.component_apps = {};
-              copy.component_apps[group] = v ? [...apps] : [];
+              copy.component_apps[group] = v ? [...orderedApps] : [];
 
               if (group === 'aws') {
                 if (!copy.component_options) copy.component_options = {};
@@ -10445,13 +10893,13 @@ echo $TOKEN
               let nextComponents = [...(copy.components || [])].filter(c => c !== 'all');
 
               if (v) {
-                apps.forEach(app => {
+                orderedApps.forEach(app => {
                   if (simpleComponents.includes(app) && !nextComponents.includes(app)) {
                     nextComponents.push(app);
                   }
                 });
               } else {
-                apps.forEach(app => {
+                orderedApps.forEach(app => {
                   const selectedSomewhereElse = appSelectedInAnyGroup(copy.component_apps, app, group);
                   if (simpleComponents.includes(app) && !selectedSomewhereElse) {
                     nextComponents = nextComponents.filter(c => c !== app);
@@ -10472,7 +10920,7 @@ echo $TOKEN
         <br />
 
         <Grid hasGutter>
-          {apps.map(app => (
+          {orderedApps.map(app => (
             <GridItem key={app} span={4}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Checkbox
@@ -10501,6 +10949,15 @@ echo $TOKEN
         'openshift',
         'OpenShift Options',
         'Select optional OpenShift configuration to include.'
+      )}
+
+      {(data.component_options?.openshift || []).includes('update_pull_secret') && (
+        <Checkbox
+          id="openshift-pull-secret-workflow"
+          label="Include Update Pull Secret in the OpenShift workflow"
+          isChecked={data.openshift?.pull_secret_include_in_workflow === true}
+          onChange={(_, checked) => set('openshift.pull_secret_include_in_workflow', checked)}
+        />
       )}
 
       <br />
@@ -11687,6 +12144,14 @@ echo $TOKEN
                   isChecked={nfsOn}
                   onChange={(_, checked) => set('openshift.storage_class_nfs', checked)}
                 />
+                {nfsOn && (
+                  <Checkbox
+                    id="storage-class-nfs-workflow"
+                    label="Include NFS CSI in the OpenShift workflow"
+                    isChecked={data.openshift.nfs_include_in_workflow === true}
+                    onChange={(_, checked) => set('openshift.nfs_include_in_workflow', checked)}
+                  />
+                )}
                 {nfsOn && <div style={{ marginTop: '12px' }}>{renderOpenShiftNfsCsiConfig()}</div>}
               </div>
             </Tab>
@@ -11698,6 +12163,14 @@ echo $TOKEN
                   isChecked={iscsiOn}
                   onChange={(_, checked) => set('openshift.storage_class_iscsi', checked)}
                 />
+                {iscsiOn && (
+                  <Checkbox
+                    id="storage-class-iscsi-workflow"
+                    label="Include iSCSI CSI in the OpenShift workflow"
+                    isChecked={data.openshift.iscsi_include_in_workflow === true}
+                    onChange={(_, checked) => set('openshift.iscsi_include_in_workflow', checked)}
+                  />
+                )}
                 {iscsiOn && <div style={{ marginTop: '12px' }}>{renderOpenShiftIscsiCsiConfig()}</div>}
               </div>
             </Tab>
@@ -11748,7 +12221,14 @@ echo $TOKEN
       </GridItem>
     );
 
-    const agentTextArea = (label, key, help, rows = 5) => (
+    const readAgentTextFile = (key, file) => {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => setAgentInstaller(key, String(reader.result || '').replace(/\s+$/, ''));
+      reader.readAsText(file);
+    };
+
+    const agentTextArea = (label, key, help, rows = 5, uploadAccept = '') => (
       <GridItem span={12}>
         <FormGroup label={labelWithHelp(label, help)}>
           <textarea
@@ -11758,6 +12238,27 @@ echo $TOKEN
             spellCheck="false"
             style={inputStyle}
           />
+          {uploadAccept && (
+            <div style={{ marginTop: '8px' }}>
+              <input
+                id={`agent-file-${key}`}
+                type="file"
+                accept={uploadAccept}
+                style={{ display: 'none' }}
+                onChange={event => {
+                  const file = event.target.files?.[0];
+                  event.target.value = '';
+                  readAgentTextFile(key, file);
+                }}
+              />
+              <Button
+                variant="secondary"
+                onClick={() => document.getElementById(`agent-file-${key}`)?.click()}
+              >
+                Upload file
+              </Button>
+            </div>
+          )}
         </FormGroup>
       </GridItem>
     );
@@ -11837,7 +12338,23 @@ echo $TOKEN
           </GridItem>
           {agentField('Cluster Name', 'cluster_name', openshiftHelp.agentClusterName)}
           {agentField('Base Domain', 'base_domain', openshiftHelp.agentBaseDomain)}
-          {agentField('OpenShift Version', 'openshift_version', 'OpenShift release version for the saved profile. Example: 4.16.')}
+          <GridItem span={6}>
+            <FormGroup label={labelWithHelp('OpenShift Version', 'OpenShift release for the saved profile.')}>
+              <select
+                value={config.openshift_version || '4.18'}
+                onChange={e => setAgentInstaller('openshift_version', e.target.value)}
+                style={inputStyle}
+              >
+                {(() => {
+                  const versions = ['4.18', '4.19', '4.20', '4.21', '4.22'];
+                  const current = config.openshift_version || '4.18';
+                  return (versions.includes(current) ? versions : [current, ...versions]).map(version => (
+                    <option key={version} value={version}>{version}</option>
+                  ));
+                })()}
+              </select>
+            </FormGroup>
+          </GridItem>
           <GridItem span={6}>
             <FormGroup label="Topology">
               <select
@@ -11850,8 +12367,8 @@ echo $TOKEN
               </select>
             </FormGroup>
           </GridItem>
-          {agentTextArea('Pull Secret', 'pull_secret', openshiftHelp.agentPullSecret, 4)}
-          {agentTextArea('SSH Public Key', 'ssh_public_key', openshiftHelp.agentSshKey, 3)}
+          {agentTextArea('Pull Secret', 'pull_secret', openshiftHelp.agentPullSecret, 4, '.txt,.json,application/json')}
+          {agentTextArea('SSH Public Key', 'ssh_public_key', openshiftHelp.agentSshKey, 3, '.pub,.txt')}
 
           <GridItem span={12}>
             <div style={{ fontWeight: 700, margin: '12px 0 8px' }}>Networking</div>
@@ -11868,8 +12385,8 @@ echo $TOKEN
           {agentField('HTTP Proxy', 'proxy_http', 'Optional install-config proxy HTTP URL.')}
           {agentField('HTTPS Proxy', 'proxy_https', 'Optional install-config proxy HTTPS URL.')}
           {agentField('No Proxy', 'proxy_no_proxy', 'Optional comma-separated proxy bypass list.')}
-          {agentTextArea('Additional Trust Bundle', 'additional_trust_bundle', 'Optional PEM CA bundle added to install-config.yaml.', 4)}
-          {agentTextArea('Disconnected Registry Image Content Sources', 'disconnected_registry', 'Optional YAML list for imageContentSources when installing disconnected.', 4)}
+          {agentTextArea('Additional Trust Bundle', 'additional_trust_bundle', openshiftHelp.agentTrustBundle, 4, '.pem,.crt,.cer,.txt')}
+          {agentTextArea('Disconnected Registry Image Content Sources', 'disconnected_registry', openshiftHelp.agentDisconnectedRegistry, 4)}
           {agentTextArea(
             'Kernel Arguments',
             'kernel_arguments',
@@ -11893,6 +12410,7 @@ echo $TOKEN
         <div style={{ color: mutedTextColor, marginBottom: '8px', fontSize: '0.9em' }}>
           MAC tip: paste <code>112233445566</code> and blur the field — colons are inserted automatically if missing.
           Enable Bond when the host needs a second NIC/MAC for link aggregation.
+          Fill node 1, then use Mirror prev on a later row. That copies role, MAC, second MAC, interface, bond, network, prefix, gateway, DNS, disk, labels, and taints. Hostnames stay on each row. An empty static IP becomes the source address plus one. A line under the table names the fields that changed.
         </div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1480px' }}>
@@ -12003,6 +12521,22 @@ echo $TOKEN
                     <TextInput value={node.taints || ''} onChange={(_, v) => setAgentNode(index, 'taints', v)} />
                   </td>
                   <td style={{ padding: '6px', whiteSpace: 'nowrap' }}>
+                    {index > 0 && (
+                      <>
+                        <Button
+                          variant="link"
+                          type="button"
+                          onClick={event => {
+                            event.preventDefault();
+                            mirrorAgentNodeFromPrevious(index);
+                          }}
+                          title="Copy filled-in fields from the row above. Hostname stays on this row."
+                        >
+                          Mirror prev
+                        </Button>
+                        {' '}
+                      </>
+                    )}
                     <Button variant="link" onClick={() => setAgentNodeEditorIndex(index)}>Form</Button>
                     {' '}
                     <Button variant="link" onClick={() => removeAgentNode(index)}>Remove</Button>
@@ -12012,6 +12546,9 @@ echo $TOKEN
             </tbody>
           </table>
         </div>
+        {agentNodeMirrorNote && (
+          <div style={{ marginTop: '8px', fontSize: '0.9em' }}>{agentNodeMirrorNote}</div>
+        )}
 
         {editingNode && (
           <Modal
@@ -12074,74 +12611,61 @@ echo $TOKEN
           </Modal>
         )}
 
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '12px' }}>
-          <Button variant="secondary" onClick={addAgentNode}>Add Node</Button>
-          <Button variant="primary" isDisabled={agentInstallerBusy} onClick={validateAgentInstaller}>Validate Configuration</Button>
-          <Button variant="secondary" isDisabled={agentInstallerBusy} onClick={generateAgentInstaller}>Generate YAML Preview</Button>
-          <Button variant="secondary" isDisabled={agentInstallerBusy} onClick={downloadAgentInstallerZip}>Download ZIP</Button>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '12px', alignItems: 'center' }}>
+          <Button variant="secondary" type="button" onClick={addAgentNode}>Add Node</Button>
           <Button
-            variant="secondary"
-            isDisabled={agentInstallerBusy}
-            onClick={downloadSanitizedAgentInstallerZip}
-            title="Redacts hostnames, IPs, MACs, pull secret, SSH keys, certs, tokens, and proxy URLs for safe sharing."
+            variant="primary"
+            type="button"
+            isDisabled={agentInstallerBusy || bootstrapStatus === 'running'}
+            onClick={() => runAgentInstall('install')}
           >
-            Download sanitized ZIP
+            Run bootstrap disconnected Install
           </Button>
-          <Button
-            variant="secondary"
-            isDisabled={agentInstallerBusy}
-            onClick={() => mapToAirgapArchitect({ download: false })}
-            title="Preflight form → airgap installer pieces (imageset + field manual). Does not start an install."
+          <Dropdown
+            isOpen={agentActionsOpen}
+            onOpenChange={setAgentActionsOpen}
+            onSelect={() => setAgentActionsOpen(false)}
+            toggle={toggleRef => (
+              <MenuToggle
+                ref={toggleRef}
+                onClick={() => setAgentActionsOpen(open => !open)}
+                isDisabled={agentInstallerBusy}
+              >
+                Actions
+              </MenuToggle>
+            )}
           >
-            Generate airgap installer pieces
-          </Button>
-          <Button
-            variant="secondary"
-            isDisabled={agentInstallerBusy}
-            onClick={() => mapToAirgapArchitect({ download: true })}
-            title="Download JSON bundle of form YAML + airgap installer pieces."
-          >
-            Download airgap pieces JSON
-          </Button>
-          {result?.installConfig && (
-            <>
-              <Button variant="link" onClick={() => downloadFile('install-config.yaml', result.installConfig)}>Download install-config.yaml</Button>
-              <Button variant="link" onClick={() => downloadFile('agent-config.yaml', result.agentConfig)}>Download agent-config.yaml</Button>
-            </>
-          )}
-          {(result?.imagesetConfigYaml || result?.installerPieces?.['imageset-config.yaml']) && (
-            <Button
-              variant="link"
-              onClick={() => downloadFile(
-                'imageset-config.yaml',
-                result.imagesetConfigYaml || result.installerPieces['imageset-config.yaml']
-              )}
-            >
-              Download imageset-config.yaml
-            </Button>
-          )}
-          {(result?.fieldManual || result?.installerPieces?.['FIELD_MANUAL.md']) && (
-            <Button
-              variant="link"
-              onClick={() => downloadFile(
-                'FIELD_MANUAL.md',
-                result.fieldManual || result.installerPieces['FIELD_MANUAL.md']
-              )}
-            >
-              Download FIELD_MANUAL.md
-            </Button>
-          )}
+            <DropdownList>
+              <DropdownItem onClick={() => showAgentYaml('agent')}>
+                Show agent-config.yaml
+              </DropdownItem>
+              <DropdownItem onClick={() => showAgentYaml('install')}>
+                Show install-config.yaml
+              </DropdownItem>
+              <DropdownItem onClick={() => runAgentInstall('image')}>
+                Run agent install to generate ISO
+              </DropdownItem>
+              <DropdownItem onClick={() => runAgentInstall('pxe')}>
+                Run agent install to generate PXE
+              </DropdownItem>
+              <DropdownItem onClick={exportInstallationBundle}>
+                Export installation bundle
+              </DropdownItem>
+              <DropdownItem onClick={() => { setAgentActionsOpen(false); downloadAgentInstallerZip(); }}>
+                Download ZIP YAML files
+              </DropdownItem>
+              <DropdownItem onClick={() => { setAgentActionsOpen(false); downloadSanitizedAgentInstallerZip(); }}>
+                Download scrubbed YAML files
+              </DropdownItem>
+            </DropdownList>
+          </Dropdown>
         </div>
         <div style={{ color: mutedTextColor, marginTop: '8px', fontSize: '0.9em' }}>
-          Use <strong>Download sanitized ZIP</strong> when sharing configs off-site. It replaces customer hostnames, IPs, MACs, secrets, certs, and tokens with example values and includes <code>README-SANITIZED.txt</code>.
+          Run bootstrap disconnected Install writes the agent directory and streams
           {' '}
-          <strong>Generate airgap installer pieces</strong>: preflight keeps the form (install/agent YAML);
-          the airgap companion fills disconnected pieces (oc-mirror <code>imageset-config.yaml</code> + field manual).
-          Set <code>AIRGAP_ARCHITECT_URL</code> (e.g. <code>http://127.0.0.1:8081</code>) to enrich from ado-airgap-architect.
-          This does <em>not</em> boot nodes or run the installer.
-        </div>
-        <div style={{ color: mutedTextColor, marginTop: '8px', fontSize: '0.9em' }}>
-          Use <strong>Download sanitized ZIP</strong> when sharing configs off-site. It replaces customer hostnames, IPs, MACs, secrets, certs, and tokens with example values and includes <code>README-SANITIZED.txt</code>.
+          <code>openshift-install agent</code>
+          {' '}
+          into the bootstrap console. Actions shows the YAML, builds an ISO or PXE files, and downloads the YAML zip. Export installation bundle writes a versioned directory the ocp_disconnected_install role can validate without this UI staying open. The scrubbed zip replaces hostnames, IPs, MACs, secrets, and tokens with example values.
         </div>
 
         {result && (
@@ -13211,6 +13735,13 @@ echo $TOKEN
           standalone_hostname: '',
           standalone_database_hostname: '',
           aap_setup_containerized: true,
+          aap_setup_bundle_dir: '',
+          aap_setup_bundle_file: '',
+          aap_setup_ssh_user: '',
+          aap_setup_ssh_password: '',
+          aap_setup_ssh_private_key_secret: '',
+          aap_gateway_cert_path: '',
+          aap_gateway_key_path: '',
           reset_database: false
         };
         copy.component_config.aap.install_during_bootstrap = false;
@@ -13220,6 +13751,13 @@ echo $TOKEN
         copy.component_config.aap.standalone_hostname = '';
         copy.component_config.aap.standalone_database_hostname = '';
         copy.component_config.aap.aap_setup_containerized = true;
+        copy.component_config.aap.aap_setup_bundle_dir = '';
+        copy.component_config.aap.aap_setup_bundle_file = '';
+        copy.component_config.aap.aap_setup_ssh_user = '';
+        copy.component_config.aap.aap_setup_ssh_password = '';
+        copy.component_config.aap.aap_setup_ssh_private_key_secret = '';
+        copy.component_config.aap.aap_gateway_cert_path = '';
+        copy.component_config.aap.aap_gateway_key_path = '';
         copy.component_config.aap.reset_database = false;
       }
       return copy;
@@ -13481,9 +14019,9 @@ echo $TOKEN
       setActiveMainTab('core');
       setAapOpen(true);
       if (step === 'local-env') setOpenWizardStep('core');
-      if (step === 'local-components') openWizard(2, 'components');
+      if (step === 'local-components') openWizard(wizardStepNumber('components'), 'components');
       if (step === 'local-bootstrap' || step === 'local-playbooks' || step === 'local-mode' || step === 'local-options') {
-        openWizard(4, 'aap');
+        openWizard(wizardStepNumber('aap'), 'aap');
       }
       if (step === 'local-playbooks') setComponentRunnerOpen(true);
       window.setTimeout(() => {
@@ -13511,7 +14049,7 @@ echo $TOKEN
 
     setActiveMainTab('core');
     setAapOpen(true);
-    openWizard(4, 'aap');
+    openWizard(wizardStepNumber('aap'), 'aap');
     setActiveAapConfigTab('install');
     window.setTimeout(() => {
       const keys = { connection: 'assistant-aap-connection', namespace: 'component_config.aap.namespace', version: 'assistant-aap-version', storage: 'component_config.aap.storage-field' };
@@ -13580,9 +14118,8 @@ echo $TOKEN
                 {' '}
                 <code>ado-aap-rhel-install-bootstrap.yml</code>
                 {' '}
-                targets inventory host <code>bastion</code> — add that host to
-                Controller inventory, or run the playbook from a machine that
-                can reach the install host.
+                SSHes to the RHEL / VM hostname below. That name is the install
+                target. The AAP route hostname is not.
               </div>
             </GridItem>
             <GridItem span={6}>
@@ -13628,10 +14165,110 @@ echo $TOKEN
                 />
               </FormGroup>
             </GridItem>
+            <GridItem span={6}>
+              <FormGroup label="SSH user">
+                <TextInput
+                  id="install-aap-ssh-user"
+                  value={data.pre_installs?.aap?.aap_setup_ssh_user || ''}
+                  onChange={(_, v) => {
+                    set('pre_installs.aap.aap_setup_ssh_user', v);
+                    set('component_config.aap.aap_setup_ssh_user', v);
+                  }}
+                />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={6}>
+              <FormGroup label={labelWithHelp('SSH password', 'Used to SSH when no private key is set, and as the become password when set.')}>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <TextInput
+                    type={showAapSshPassword ? 'text' : 'password'}
+                    value={data.pre_installs?.aap?.aap_setup_ssh_password || ''}
+                    onChange={(_, v) => {
+                      set('pre_installs.aap.aap_setup_ssh_password', v);
+                      set('component_config.aap.aap_setup_ssh_password', v);
+                    }}
+                  />
+                  <Button variant="secondary" onClick={() => toggleSecretRevealed('aap-ssh-password', setShowAapSshPassword, showAapSshPassword)}>
+                    {showAapSshPassword ? 'Hide' : 'Show'}
+                  </Button>
+                </div>
+              </FormGroup>
+            </GridItem>
+            <GridItem span={12}>
+              <FormGroup label={labelWithHelp('SSH private key', 'Optional. When set, this key is used to SSH instead of the password. The password is still used for sudo if you set one.')}>
+                <TextArea
+                  id="install-aap-ssh-key"
+                  value={showAapSshKey ? (data.pre_installs?.aap?.aap_setup_ssh_private_key_secret || '') : ((data.pre_installs?.aap?.aap_setup_ssh_private_key_secret) ? '••••••••' : '')}
+                  onChange={(_, v) => {
+                    if (!showAapSshKey) return;
+                    set('pre_installs.aap.aap_setup_ssh_private_key_secret', v);
+                    set('component_config.aap.aap_setup_ssh_private_key_secret', v);
+                  }}
+                  rows={4}
+                  spellCheck="false"
+                />
+                <Button variant="secondary" style={{ marginTop: '8px' }} onClick={() => toggleSecretRevealed('aap-ssh-key', setShowAapSshKey, showAapSshKey)}>
+                  {showAapSshKey ? 'Hide' : 'Show'}
+                </Button>
+              </FormGroup>
+            </GridItem>
+            <GridItem span={6}>
+              <FormGroup label={labelWithHelp('Bundle directory on the VM', 'Where the setup tarball is downloaded and unpacked. Leave empty for /var/tmp.')}>
+                <TextInput
+                  id="install-aap-bundle-dir"
+                  value={data.pre_installs?.aap?.aap_setup_bundle_dir || ''}
+                  placeholder="/var/tmp"
+                  onChange={(_, v) => {
+                    set('pre_installs.aap.aap_setup_bundle_dir', v);
+                    set('component_config.aap.aap_setup_bundle_dir', v);
+                  }}
+                />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={6}>
+              <FormGroup label={labelWithHelp('Local bundle file on the VM', 'Existing tarball path. When set, the portal download is skipped.')}>
+                <TextInput
+                  id="install-aap-bundle-file"
+                  value={data.pre_installs?.aap?.aap_setup_bundle_file || ''}
+                  placeholder="/var/tmp/ansible-automation-platform-containerized-setup-bundle-2.7.tar.gz"
+                  onChange={(_, v) => {
+                    set('pre_installs.aap.aap_setup_bundle_file', v);
+                    set('component_config.aap.aap_setup_bundle_file', v);
+                  }}
+                />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={6}>
+              <FormGroup label={labelWithHelp('Gateway TLS cert path', 'Path on the VM. Written to the installer inventory as gateway_tls_cert.')}>
+                <TextInput
+                  id="install-aap-gateway-cert"
+                  value={data.pre_installs?.aap?.aap_gateway_cert_path || ''}
+                  placeholder="/etc/pki/aap/tls.crt"
+                  onChange={(_, v) => {
+                    set('pre_installs.aap.aap_gateway_cert_path', v);
+                    set('component_config.aap.aap_gateway_cert_path', v);
+                  }}
+                />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={6}>
+              <FormGroup label={labelWithHelp('Gateway TLS key path', 'Path on the VM. Written to the installer inventory as gateway_tls_key.')}>
+                <TextInput
+                  id="install-aap-gateway-key"
+                  value={data.pre_installs?.aap?.aap_gateway_key_path || ''}
+                  placeholder="/etc/pki/aap/tls.key"
+                  onChange={(_, v) => {
+                    set('pre_installs.aap.aap_gateway_key_path', v);
+                    set('component_config.aap.aap_gateway_key_path', v);
+                  }}
+                />
+              </FormGroup>
+            </GridItem>
             <GridItem span={12}>
               <div style={{ color: mutedTextColor, fontSize: '13px' }}>
                 Set Admin password on the General tab. That password becomes the
-                AAP admin account created by setup.
+                AAP admin account created by setup. Provide an SSH user and
+                either a password or a private key so the job can reach this host.
               </div>
             </GridItem>
           </>
@@ -13898,14 +14535,6 @@ echo $TOKEN
               && data.git?.auto_push !== false && (
               <div style={{ color: '#8a6d3b', fontSize: '13px', marginTop: '8px' }}>
                 Auto-push is on, but no Git token is set. Add it on Git Configuration or turn auto-push off.
-              </div>
-            )}
-            {data.scm_tool === 'bitbucket'
-              && data.aap?.enabled !== false
-              && !installAapFullRequested(data)
-              && !String(data.git?.username || '').trim() && (
-              <div style={{ color: '#8a6d3b', fontSize: '13px', marginTop: '8px' }}>
-                Bitbucket is selected — set Bitbucket username on Git Configuration so Controller project sync can authenticate (username + HTTP access token, not OAuth2).
               </div>
             )}
           </CardBody>
@@ -14600,6 +15229,101 @@ echo $TOKEN
     );
   };
 
+  const renderRhelSystemRolesConfig = () => {
+    const cfg = {
+      profile: 'custom',
+      generate_playbooks: true,
+      generate_job_templates: true,
+      include_in_workflow: false,
+      roles: {},
+      ...(data.component_config?.rhel_system_roles || {})
+    };
+    const selected = data.component_options?.rhel_system_roles || [];
+    const profile = profileForSystemRoles(selected);
+    const setRoles = (next, nextProfile) => {
+      setData(prev => {
+        const copy = JSON.parse(JSON.stringify(prev));
+        if (!copy.component_options) copy.component_options = {};
+        if (!copy.component_config) copy.component_config = {};
+        copy.component_options.rhel_system_roles = next.filter(knownSystemRoleApp);
+        const previous = copy.component_config.rhel_system_roles || {};
+        copy.component_config.rhel_system_roles = {
+          ...previous,
+          profile: nextProfile || profileForSystemRoles(copy.component_options.rhel_system_roles),
+          roles: previous.roles && typeof previous.roles === 'object' ? previous.roles : {}
+        };
+        return copy;
+      });
+    };
+    return (
+      <div>
+        <p style={{ color: mutedTextColor, marginTop: 0 }}>
+          Choose Red Hat system roles from the collection catalog. Nothing runs until you check a role.
+          Standalone playbooks and job templates are generated for the roles you check. Workflow membership is off until you turn it on.
+        </p>
+        <FormGroup label="Profile">
+          <select
+            id="rhel-system-role-profile"
+            aria-label="RHEL system role profile"
+            value={profile}
+            onChange={event => {
+              const nextProfile = event.target.value;
+              const nextRoles = systemRolesForProfile(nextProfile);
+              if (nextRoles) setRoles(nextRoles, nextProfile);
+              else setRoles(selected, 'custom');
+            }}
+          >
+            <option value="minimal">Minimal — timesync and SSH</option>
+            <option value="standard">Standard — minimal plus firewall, SELinux, and logging</option>
+            <option value="security">Security — firewall, SELinux, crypto policy, SSH, AIDE, fapolicyd, and sudo</option>
+            <option value="custom">Custom — keep the checkboxes below</option>
+          </select>
+        </FormGroup>
+        <Checkbox
+          id="rhel-system-roles-playbooks"
+          label="Generate standalone playbooks"
+          isChecked={cfg.generate_playbooks !== false}
+          onChange={(_, checked) => set('component_config.rhel_system_roles.generate_playbooks', checked)}
+        />
+        <Checkbox
+          id="rhel-system-roles-job-templates"
+          label="Generate AAP job templates"
+          isChecked={cfg.generate_job_templates !== false}
+          onChange={(_, checked) => set('component_config.rhel_system_roles.generate_job_templates', checked)}
+        />
+        <Checkbox
+          id="rhel-system-roles-workflow"
+          label="Include selected roles in the RHEL workflow"
+          isChecked={cfg.include_in_workflow === true}
+          onChange={(_, checked) => set('component_config.rhel_system_roles.include_in_workflow', checked)}
+        />
+        <div style={{ marginTop: '12px' }}>
+          {RHEL_SYSTEM_ROLES.map(role => (
+            <div key={role.app} style={{ marginBottom: '10px' }}>
+              <Checkbox
+                id={`rhel-system-role-${role.role}`}
+                label={role.title}
+                isChecked={selected.includes(role.app)}
+                onChange={(_, checked) => {
+                  const next = checked
+                    ? [...selected, role.app]
+                    : selected.filter(item => item !== role.app);
+                  setRoles(next, 'custom');
+                }}
+              />
+              <div style={{ color: mutedTextColor, fontSize: '13px', marginLeft: '28px' }}>
+                {role.summary} Settings go in <code>{role.settingsKey}</code> inside
+                vars_rhel_system_roles.yml. An empty mapping uses the role defaults.
+                Required keys are those of <code>redhat.rhel_system_roles.{role.role}</code>.
+                Outside AAP: <code>ansible-playbook {role.playbook} -e env=&lt;env&gt;</code>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   const renderConfigForm = (panelOverride = null) => {
     const panel = panelOverride || activeConfigPanel || 'all';
 
@@ -14648,6 +15372,8 @@ echo $TOKEN
         return renderAcsConfig();
       case 'ocp_compliance':
         return renderOcpComplianceConfig();
+      case 'rhel_system_roles':
+        return renderRhelSystemRolesConfig();
       case 'rhel':
         return renderRhelConfig();
       case 'patching':
@@ -14881,7 +15607,8 @@ ${vaultYaml}
         'acs',
         'zabbix',
         'compliance',
-        'stig'
+        'stig',
+        'rhel_system_roles'
       ];
     }
 
@@ -14921,6 +15648,9 @@ ${vaultYaml}
       const tabs = ['rhel'];
       (data.component_apps?.rhel || []).forEach(app => {
         if (simpleComponents.includes(app) && !tabs.includes(app)) {
+          tabs.push(app);
+        }
+        if (app === 'rhel_system_roles' && !tabs.includes(app)) {
           tabs.push(app);
         }
       });
@@ -14984,6 +15714,7 @@ ${vaultYaml}
     if (tab === 'idm') return 'IDM';
     if (tab === 'aap') return 'AAP';
     if (tab === 'stig') return 'STIG';
+    if (tab === 'rhel_system_roles') return 'RHEL System Roles';
     return tab.charAt(0).toUpperCase() + tab.slice(1);
   };
 
@@ -15072,17 +15803,44 @@ ${vaultYaml}
     );
   };
 
+  const renderWizardContinue = stepId => {
+    const index = wizardSteps.findIndex(step => step.id === stepId);
+    const next = index >= 0 ? wizardSteps[index + 1] : undefined;
+    if (!next) return null;
+    let label = 'Continue to Component Configuration';
+    if (next.id === 'aap') {
+      label = 'Continue to Ansible Automation Platform';
+    } else if (next.id === 'git') {
+      // Install AAP only: point at Git Config (bootstrap generate lives there).
+      label = installAapMode ? 'Continue to Git Config' : 'Continue to Git Configuration';
+    }
+    return (
+      <div style={{ marginTop: '16px' }}>
+        <Button
+          variant="primary"
+          onClick={() => {
+            if (next.id === 'git') goToGitConfiguration();
+            else if (next.id === 'aap') goToAapConfiguration();
+            else openWizard(wizardStepNumber(next.id), next.id);
+          }}
+        >
+          {label}
+        </Button>
+      </div>
+    );
+  };
+
   const renderActiveConfigPanel = () => {
     const visibleTabs = getVisibleConfigTabs();
     const selectedTab = visibleTabs.includes(activeConfigTab) ? activeConfigTab : (visibleTabs[0] || 'all');
-    const componentOpen = Boolean(expandedSteps.components) && wizardUnlocked >= 2;
+    const componentOpen = Boolean(expandedSteps.components) && wizardUnlocked >= wizardStepNumber('components');
 
     return (
       <>
         <Card style={cardStyle} id="assistant-component-config">
           <CardBody>
             {renderWizardToggle(
-              2,
+              wizardStepNumber('components'),
               'Component Configuration',
               'components',
               visibleTabs.length ? `${visibleTabs.length} component tab${visibleTabs.length === 1 ? '' : 's'}` : 'Choose components in step 1'
@@ -15120,11 +15878,7 @@ ${vaultYaml}
             <div style={{ marginTop: '16px' }}>
               {renderConfigForm(selectedTab)}
             </div>
-            <div style={{ marginTop: '16px' }}>
-              <Button variant="primary" onClick={() => openWizard(3, 'git')}>
-                Continue to Git Configuration
-              </Button>
-            </div>
+            {renderWizardContinue('components')}
             </>
             )}
           </CardBody>
@@ -15135,24 +15889,36 @@ ${vaultYaml}
   };
 
   const openAdoMarkdownLink = href => {
-    const roleMatch = String(href || '').match(/^roles\/([^/]+)\/README\.md$/);
+    const local = localCollectionDoc(href);
+    if (!local) return false;
 
-    if (!roleMatch) return false;
+    const show = text => {
+      setAdoReadmeMarkdown(text);
+      setDocumentationType('ado');
+      setDocumentationOpen(true);
+      if (local.hash) {
+        const id = decodeURIComponent(local.hash.slice(1)).trim();
+        if (id) {
+          window.setTimeout(() => {
+            document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 0);
+        }
+      }
+    };
 
-    fetch(`/api/readme/ado/role/${encodeURIComponent(roleMatch[1])}`)
+    if (local.kind === 'root') {
+      show(adoReadmeMarkdown);
+      return true;
+    }
+
+    fetch(local.url)
       .then(r => {
-        if (!r.ok) throw new Error('ADO role README request failed');
+        if (!r.ok) throw new Error('ADO documentation request failed');
         return r.text();
       })
-      .then(text => {
-        setAdoReadmeMarkdown(text);
-        setDocumentationType('ado');
-        setDocumentationOpen(true);
-      })
+      .then(show)
       .catch(() => {
-        setAdoReadmeMarkdown(`# ADO Role Documentation Unavailable\n\nCould not load \`${href}\`.`);
-        setDocumentationType('ado');
-        setDocumentationOpen(true);
+        show(`# ADO documentation unavailable\n\nCould not load \`${href}\` from this pod.`);
       });
 
     return true;
@@ -15194,10 +15960,11 @@ ${vaultYaml}
       if (link) {
         const label = link[1];
         const href = link[2];
+        const local = localCollectionDoc(href);
         return (
           <a
             key={index}
-            href={href}
+            href={local ? (local.url || local.hash || '#') : href}
             onClick={event => {
               if (openAdoMarkdownLink(href) || openMarkdownHashLink(href)) {
                 event.preventDefault();
@@ -15533,7 +16300,7 @@ ${vaultYaml}
                       }}
                     >
                       <span>
-                        ✓ {c.name === 'infra-ado' ? 'infra.ado' : c.name.replaceAll('-', '.')}
+                        ✓ {c.name === 'infra-automation_development_office' ? 'infra.automation_development_office' : c.name.replaceAll('-', '.')}
                       </span>
                       <strong>{c.version}</strong>
                     </div>
@@ -15546,7 +16313,7 @@ ${vaultYaml}
               </div>
 
               <div style={{ color: mutedTextColor, fontSize: '13px' }}>
-                Collections are installed automatically by the container. The old split ADO collections can remain in source control for now, but this UI now prefers the single <strong>infra.ado</strong> collection when present.
+                Collections are installed automatically by the container. The old split ADO collections can remain in source control for now, but this UI now prefers the single <strong>infra.automation_development_office</strong> collection when present.
               </div>
             </GridItem>
 
@@ -15596,7 +16363,7 @@ ${vaultYaml}
               >
                 <div>✓ Installs collections into <code>/workspace/collections</code></div>
                 <div>✓ Generates env vars, playbooks, AAP configs, job templates, and workflows</div>
-                <div>✓ Uses <code>infra.ado.bootstrap_controller</code></div>
+                <div>✓ Uses <code>infra.automation_development_office.bootstrap_controller</code></div>
                 <div>✓ Supports optional Git commit and push</div>
               </div>
             </GridItem>
@@ -15613,6 +16380,29 @@ ${vaultYaml}
       open={assistantOpen}
       onClose={() => { setAssistantOpen(false); document.getElementById("ado-assistant-toggle")?.focus(); }}
       onShow={showAssistantStep}
+      onOpenDoc={docPath => {
+        const raw = String(docPath || '');
+        if (raw.startsWith('infra.automation_development_office/')) {
+          openAdoMarkdownLink(raw.slice('infra.automation_development_office/'.length));
+          return;
+        }
+        const rel = raw.replace(/^ado-preflight-ui\//, '');
+        fetch(`/api/readme/preflight/doc?path=${encodeURIComponent(rel)}`)
+          .then(response => {
+            if (!response.ok) throw new Error('preflight doc');
+            return response.text();
+          })
+          .then(text => {
+            setReadmeMarkdown(text);
+            setDocumentationType('ui');
+            setDocumentationOpen(true);
+          })
+          .catch(() => {
+            setReadmeMarkdown(`# Documentation unavailable\n\nCould not load \`${rel}\`.`);
+            setDocumentationType('ui');
+            setDocumentationOpen(true);
+          });
+      }}
       seedMessage={assistantExplain}
       onSeedConsumed={() => setAssistantExplain(null)}
       installed={!!data.pre_installs?.install_aap}
@@ -15900,15 +16690,17 @@ ${vaultYaml}
                     label={labelWithHelp(
                       <>
                         Additional Environments
-                        <span style={{ color: mutedTextColor, fontWeight: 400 }}> (optional)</span>
+                        <span style={{ color: mutedTextColor, fontWeight: 400 }}> (For additional Env. In Job Templates. Optional)</span>
                       </>,
                       <>
                         <p style={{ marginTop: 0 }}>
                           Survey choices for Contoller job templates (for example <code>prod</code>, <code>dev</code>, <code>pilot</code>).
-                          <code>prod</code> is selected by default.
+                          <code>prod</code> is selected by default. The primary Environment Type above is always included.
                         </p>
                         <p style={{ marginBottom: 0 }}>
-                          Does not create <code>group_vars</code> directories. The primary Environment Type above is always included.
+                          <strong>Create group_vars for selected environments</strong> copies
+                          <code>group_vars/all/&lt;primary&gt;</code> into each other selected name.
+                          Leave it off to keep these as job-template survey choices only.
                         </p>
                       </>
                     )}
@@ -15947,6 +16739,12 @@ ${vaultYaml}
                         }}
                       />
                     </div>
+                    <Checkbox
+                      id="additional-env-create-group-vars"
+                      label="Create group_vars for selected environments"
+                      isChecked={data.additional_environments_create_group_vars === true}
+                      onChange={(_, checked) => set('additional_environments_create_group_vars', checked === true)}
+                    />
                     {(additionalEnvOtherEnabled || additionalEnvCustom.length > 0) && (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '520px' }}>
                         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
@@ -15994,6 +16792,42 @@ ${vaultYaml}
                 </GridItem>
 
                 <GridItem span={12}>
+                  <FormGroup
+                    label="Ansible Automation Platform"
+                    isRequired
+                  >
+                    <Radio
+                      id="core-using-aap"
+                      name="core-aap-mode"
+                      label="Using AAP"
+                      isChecked={data.aap?.enabled !== false && !installAapMode}
+                      onChange={() => setCoreAapChoice('using')}
+                    />
+                    <Radio
+                      id="core-not-using-aap"
+                      name="core-aap-mode"
+                      label="Not using AAP"
+                      isChecked={data.aap?.enabled === false && !installAapMode}
+                      onChange={() => setCoreAapChoice('not')}
+                    />
+                    <Radio
+                      id="core-install-aap"
+                      name="core-aap-mode"
+                      label="Install AAP"
+                      isChecked={installAapMode}
+                      onChange={() => setCoreAapChoice('install')}
+                    />
+                    {installAapMode && (
+                      <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '8px' }}>
+                        Install AAP stays on <strong>Not using AAP</strong>. There is no
+                        controller yet. Step 2 is the Ansible Automation Platform
+                        configuration.
+                      </div>
+                    )}
+                  </FormGroup>
+                </GridItem>
+
+                <GridItem span={12}>
                   <FormGroup label="Profiles" isRequired>
                     <BootstrapProfiles
                       key={profileImportKey}
@@ -16022,13 +16856,96 @@ ${vaultYaml}
                 <GridItem span={12}>
                     <div style={{ marginTop: '16px' }}>
                     <ExpandableSection toggleText="Additional components" isExpanded={additionalProfilesOpen} onToggle={(_, value) => setAdditionalProfilesOpen(value)}>
+                      <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
+                        Each selected component needs a platform. The ? beside Platform lists that platform and the components it can run.
+                      </div>
                       <Checkbox label="All components (legacy)" isChecked={data.components.includes('all')} onChange={() => toggleComponentAndOpen('all')} />
-                      {simpleComponents.filter(component => !groupComponents.includes(component)).map(component => (
-                        <div key={component} style={{ display: 'flex', gap: 8 }}>
-                          <Checkbox label={componentOptionLabels[component] || component} isChecked={data.components.includes(component)} onChange={() => toggleComponentAndOpen(component)} />
-                          {renderComponentLabel(component)}
-                        </div>
-                      ))}
+                      {simpleComponents.filter(component => !groupComponents.includes(component)).map(component => {
+                        const selected = data.components.includes(component);
+                        const offering = platformsOffering(component);
+                        const chosen = additionalComponentPlatforms(component);
+                        const platformId = chosen.length === 1 ? chosen[0] : '';
+                        const helpPlatforms = platformId ? [platformId] : offering;
+                        return (
+                          <div key={component} style={{ marginBottom: selected ? '10px' : 0 }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                              <Checkbox label={componentOptionLabels[component] || component} isChecked={selected} onChange={() => toggleComponentAndOpen(component)} />
+                              {renderComponentLabel(component)}
+                            </div>
+                            {selected && (
+                              <div style={{ marginLeft: '28px', marginTop: '4px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                  <span style={{ fontSize: '13px', fontWeight: 600 }}>
+                                    Platform <span style={{ color: '#c9190b' }}>*</span>
+                                  </span>
+                                  <select
+                                    aria-label={`${componentOptionLabels[component] || component} platform`}
+                                    value={platformId}
+                                    onChange={event => assignAdditionalComponentPlatform(component, event.target.value)}
+                                    style={{
+                                      minWidth: '220px',
+                                      padding: '6px 8px',
+                                      border: `1px solid ${platformId ? borderColor : '#c9190b'}`,
+                                      borderRadius: '4px',
+                                      background: fieldBg,
+                                      color: fieldColor
+                                    }}
+                                  >
+                                    <option value="">Select a platform</option>
+                                    {offering.map(id => (
+                                      <option key={id} value={id}>{PLATFORM_DETAILS[id].title}</option>
+                                    ))}
+                                  </select>
+                                  <Popover
+                                    headerContent={platformId ? PLATFORM_DETAILS[platformId].title : 'Platform'}
+                                    bodyContent={(
+                                      <div style={{ maxWidth: '380px' }}>
+                                        {helpPlatforms.map(id => (
+                                          <div key={id} style={{ marginBottom: '12px' }}>
+                                            <div style={{ fontWeight: 700 }}>{PLATFORM_DETAILS[id].title}</div>
+                                            <p style={{ margin: '4px 0 6px' }}>{PLATFORM_DETAILS[id].description}</p>
+                                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Available components</div>
+                                            <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                                              {(platformCatalogs[id] || []).map(app => (
+                                                <li key={app}>{componentOptionLabels[app] || configTabLabel(app)}</li>
+                                              ))}
+                                            </ul>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                    triggerAction="click"
+                                    appendTo={() => document.body}
+                                  >
+                                    <button
+                                      type="button"
+                                      aria-label={`${componentOptionLabels[component] || component} platform help`}
+                                      style={{
+                                        border: 'none',
+                                        background: 'transparent',
+                                        color: isDark ? '#73bcf7' : '#0066cc',
+                                        cursor: 'pointer',
+                                        fontWeight: 700,
+                                        padding: '0 2px',
+                                        lineHeight: 1
+                                      }}
+                                    >
+                                      ?
+                                    </button>
+                                  </Popover>
+                                </div>
+                                {!platformId && (
+                                  <div style={{ color: '#c9190b', fontSize: '12px', marginTop: '4px' }}>
+                                    {chosen.length > 1
+                                      ? 'This component is on more than one platform. Pick one.'
+                                      : 'Select a platform for this component.'}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </ExpandableSection>
                     </div>
                 </GridItem>
@@ -16043,48 +16960,51 @@ ${vaultYaml}
           </Card>
 
           {activeMainTab === 'core' && (
-            <>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {!installAapMode && (
+          <div style={{ order: wizardStepNumber('components') }}>
           <br />
 
           {renderActiveConfigPanel()}
+          </div>
+          )}
 
-
-
+          <div style={{ order: wizardStepNumber('git') }}>
           <br />
 
           <Card style={cardStyle} id="git-configuration">
             <CardBody>
               {renderWizardToggle(
-                3,
-                'Git Configuration',
+                wizardStepNumber('git'),
+                installAapMode
+                  ? 'Run Bootstrap to generate Ansible'
+                  : 'Git Configuration',
                 'git',
                 String(data.aap?.git_url || '').trim() ? 'Project Git source set' : 'Project Git source'
               )}
-              {expandedSteps.git && wizardUnlocked >= 3 && (
+              {expandedSteps.git && wizardUnlocked >= wizardStepNumber('git') && (
                 <>
                   {renderWizardRequired('git')}
                   {renderGitConfigurationContent()}
-                  <div style={{ marginTop: '16px' }}>
-                    <Button variant="primary" onClick={() => openWizard(4, 'aap')}>
-                      Continue to Ansible Automation Platform
-                    </Button>
-                  </div>
+                  {renderWizardContinue('git')}
                 </>
               )}
             </CardBody>
           </Card>
+          </div>
 
+          <div style={{ order: wizardStepNumber('aap') }}>
           <br />
 
           <Card style={cardStyle} id="aap-configuration">
             <CardBody>
               {renderWizardToggle(
-                4,
+                wizardStepNumber('aap'),
                 'Ansible Automation Platform Configuration',
                 'aap',
-                data.aap.enabled ? 'Using AAP' : 'Not using AAP'
+                installAapMode ? 'Install AAP' : (data.aap.enabled ? 'Using AAP' : 'Not using AAP')
               )}
-              {expandedSteps.aap && wizardUnlocked >= 4 && (
+              {expandedSteps.aap && wizardUnlocked >= wizardStepNumber('aap') && (
               <>
               {renderWizardRequired('aap')}
 
@@ -16139,6 +17059,7 @@ ${vaultYaml}
                   <div style={{ marginTop: '4px' }}>
                     <button
                       type="button"
+                      id="assistant-run-generated-playbooks"
                       onClick={async () => {
                         const next = !componentRunnerOpen;
                         setComponentRunnerOpen(next);
@@ -16154,11 +17075,17 @@ ${vaultYaml}
                         fontWeight: 600,
                         cursor: 'pointer',
                         fontSize: '14px',
-                        color: textColor,
+                        color: installAapMode && installAapBootstrapDone
+                          ? (isDark ? '#73bcf7' : '#0066cc')
+                          : textColor,
                         textAlign: 'left'
                       }}
                     >
-                      {componentRunnerOpen ? '−' : '+'} Run generated playbooks (no AAP)
+                      {componentRunnerOpen ? '−' : '+'}
+                      {' '}
+                      {installAapMode
+                        ? 'Run generated playbooks (Ansible)'
+                        : 'Run generated playbooks (no AAP)'}
                     </button>
                     {componentRunnerOpen && (
                       <div
@@ -16724,7 +17651,7 @@ ${vaultYaml}
                 </>
               )}
 
-              {expandedSteps.aap && wizardUnlocked >= 4 && (
+              {expandedSteps.aap && wizardUnlocked >= wizardStepNumber('aap') && (data.aap?.enabled !== false || installAapMode) && (
                 <>
                   <br />
                   <Tabs activeKey={activeAapConfigTab} onSelect={(_, key) => setActiveAapConfigTab(key)}>
@@ -17014,7 +17941,7 @@ ${vaultYaml}
                     <Grid hasGutter>
                       <GridItem span={12}>
                         <div style={{ color: mutedTextColor, fontSize: '13px', marginBottom: '8px' }}>
-                          Publish the <code>infra.ado</code> collection and/or push the ADO execution
+                          Publish the <code>infra.automation_development_office</code> collection and/or push the ADO execution
                           environment image into Private Automation Hub. Check General → Standalone AAP run
                           to apply Hub/Galaxy/Add authentication/Onboard without OpenShift/RHEL component playbooks.
                         </div>
@@ -17083,13 +18010,13 @@ ${vaultYaml}
                           <FormGroup label={labelWithHelp('Collections', (
                             <>
                               <p>Publish or refresh vendored collections in Private Automation Hub validated content.</p>
-                              <p><code>infra.ado</code> is separate from the additional playbook-requirement tarballs.</p>
-                              <p>Everything skips when the version already exists unless Force is checked for <code>infra.ado</code> only.</p>
+                              <p><code>infra.automation_development_office</code> is separate from the additional playbook-requirement tarballs.</p>
+                              <p>Everything skips when the version already exists unless Force is checked for <code>infra.automation_development_office</code> only.</p>
                             </>
                           ))}>
                             <Checkbox
                               label={labelWithHelp(
-                                'Install or update infra.ado collection in Hub validated content (optional)',
+                                'Install or update infra.automation_development_office collection in Hub validated content (optional)',
                                 aapHelp.hubPublishCollection
                               )}
                               isChecked={data.aap.hub_publish_ado_collection === true}
@@ -17098,7 +18025,7 @@ ${vaultYaml}
                             <div style={{ marginTop: '12px' }}>
                               <Checkbox
                                 label={labelWithHelp(
-                                  'Force infra.ado collection update if already installed',
+                                  'Force infra.automation_development_office collection update if already installed',
                                   aapHelp.hubForceCollectionUpdate
                                 )}
                                 isChecked={data.aap.hub_force_ado_collection_update}
@@ -17495,10 +18422,10 @@ ${vaultYaml}
                             }}
                           >
                             Contoller only installs project <code>collections/requirements.yml</code>{' '}
-                            (vendored <code>infra.ado</code>) when the organization already has Galaxy
+                            (vendored <code>infra.automation_development_office</code>) when the organization already has Galaxy
                             credentials attached. If they are already on the org in Contoller, leave
                             this off. Use this tab only to create/attach them. Stock EEs like{' '}
-                            <code>ee-supported-rhel9</code> do not ship <code>infra.ado</code>; ADO EE
+                            <code>ee-supported-rhel9</code> do not ship <code>infra.automation_development_office</code>; ADO EE
                             push is the other option.
                           </div>
                           <Checkbox
@@ -18569,14 +19496,13 @@ ${vaultYaml}
                   )}
                 </>
               )}
+              {renderWizardContinue('aap')}
               </>
               )}
             </CardBody>
           </Card>
-
-          <br />
-
-            </>
+          </div>
+            </div>
           )}
 
           <br />
@@ -18590,8 +19516,23 @@ ${vaultYaml}
                     id="assistant-run-bootstrap"
                     variant="primary"
                     onClick={runBootstrapInsideContainer}
-                    isDisabled={bootstrapStatus === 'running' || deployStatus === 'running'}
-                    style={{ borderRadius: '18px', fontWeight: 600 }}
+                    isDisabled={
+                      bootstrapStatus === 'running'
+                      || deployStatus === 'running'
+                      || (installAapMode && installAapBootstrapDone)
+                    }
+                    title={
+                      installAapMode && installAapBootstrapDone
+                        ? 'Bootstrap already ran for Install AAP — use Run generated playbooks (Ansible)'
+                        : undefined
+                    }
+                    style={{
+                      borderRadius: '18px',
+                      fontWeight: 600,
+                      ...(installAapMode && installAapBootstrapDone
+                        ? { opacity: 0.45, cursor: 'not-allowed' }
+                        : {})
+                    }}
                   >
                     ⊕ Run Bootstrap
                   </Button>
@@ -18885,7 +19826,7 @@ ${vaultYaml}
     <ControllerWorkflowPreview
       isOpen={workflowPreviewOpen}
       onClose={() => setWorkflowPreviewOpen(false)}
-      selectedComponents={Array.isArray(data.components) ? data.components : []}
+      selectedComponents={workflowPreviewKeys(data)}
       usingAap={data.aap?.enabled !== false}
       environment={data.environment || 'prod'}
       gitAutoPush={data.git?.auto_push === true}

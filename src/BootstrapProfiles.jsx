@@ -4,12 +4,12 @@ import { satelliteProfileOptions } from './profileSelection.mjs';
 
 export const profiles = {
   openshift: {
-    Core: ['openshift'],
-    'Platform Essentials': ['openshift', 'cert_manager', 'rhbk', 'grafana', 'oadp'],
-    DevSecOps: ['openshift', 'cert_manager', 'rhbk', 'acs', 'grafana', 'devspaces', 'dev_hub', 'gitops', 'quay'],
-    Virtualization: ['openshift', 'ocp_virtualization', 'oadp', 'grafana'],
-    Compliance: ['openshift', 'ocp_compliance', 'acs'],
-    'Full Platform': ['openshift', 'cert_manager', 'rhbk', 'grafana', 'oadp', 'acs', 'devspaces', 'dev_hub', 'gitops', 'quay', 'ocp_virtualization', 'acm', 'ocp_compliance']
+    Core: [],
+    'Platform Essentials': ['cert_manager', 'rhbk', 'grafana', 'oadp'],
+    DevSecOps: ['cert_manager', 'rhbk', 'acs', 'grafana', 'devspaces', 'dev_hub', 'gitops', 'quay'],
+    Virtualization: ['ocp_virtualization', 'oadp', 'grafana'],
+    Compliance: ['ocp_compliance', 'acs'],
+    'Full Platform': ['cert_manager', 'rhbk', 'grafana', 'oadp', 'acs', 'devspaces', 'dev_hub', 'gitops', 'quay', 'ocp_virtualization', 'acm', 'ocp_compliance']
   },
   rhel: {
     AAP: ['rhel', 'aap'],

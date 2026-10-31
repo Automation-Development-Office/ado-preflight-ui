@@ -1,28 +1,45 @@
 /**
  * View-only Contoller workflow catalog for preflight UI.
  * Mirrors bootstrap_controller/files/workflows seed graphs (not live AAP API).
- * componentKeys = UI / preflight component ids that keep a node when selected.
- * Empty componentKeys = always shown when parent path is active (converge sinks).
+ * A node is shown only when its job template would be generated.
  */
 
 /** @typedef {{ id: string, label: string, jobTemplate: string, componentKeys?: string[], kind?: 'jt'|'workflow' }} WfNode */
 /** @typedef {{ id: string, name: string, description: string, nodes: WfNode[], edges: { from: string, to: string }[] }} WfGraph */
 
-/** Map UI component → OpenShift workflow node id */
+/**
+ * Job-template keys that bootstrap_controller actually generates.
+ * These match bootstrap_generate_env_vars playbook selectors, not the
+ * OpenShift platform checkbox by itself.
+ */
+export const UI_OPENSHIFT_APPS = [
+  'aap', 'acs', 'acm', 'bookstack', 'cert_manager', 'console', 'devspaces',
+  'dev_hub', 'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio',
+  'netbox', 'oadp', 'ocp_compliance', 'ocp_virtualization', 'mtv', 'openshift',
+  'pega', 'quay', 'rhbk', 'openshift_networking', 'zabbix',
+];
+
+/** Present in stale imports. Generation ignores them unless a future UI selects them. */
+export const NON_UI_PLAYBOOK_APPS = ['gitlab_runner', 'web_terminal', 'ocp_descheduler'];
+
+/** Map workflow node id → component keys that cause its job template to be generated. */
 export const OPENSHIFT_NODE_COMPONENTS = {
-  'Enable Integrated Image Registry': ['openshift'],
-  'Create Admin HTPasswd User': ['console', 'openshift'],
-  'Configure LDAP in OpenShift': ['openshift'],
+  'Enable Integrated Image Registry': ['integrated_image_registry'],
+  'Create Admin HTPasswd User': ['admin_htpasswd'],
+  'Configure LDAP in OpenShift': ['openshift_ldap_auth'],
   'Configure Console Banner': ['console'],
   'Deploy ACM': ['acm'],
   'Deploy OpenShift Virtualization': ['ocp_virtualization'],
   'Deploy MTV': ['mtv'],
-  'Deploy Web Terminal': ['openshift'],
-  'Deploy OpenShift Descheduler': ['openshift'],
+  'Deploy Web Terminal': ['web_terminal'],
+  'Deploy OpenShift Descheduler': ['ocp_descheduler'],
   'Deploy OpenShift Compliance Operator': ['ocp_compliance'],
-  'Cert Manager Workflow': ['cert_manager', 'rhbk'],
+  'Install NFS CSI': ['nfs_csi_workflow'],
+  'Install Synology iSCSI CSI': ['iscsi_csi_workflow'],
+  'Update Pull Secret': ['pull_secret_workflow'],
+  'Cert Manager Workflow': ['cert_manager'],
   'RHBK Workflow': ['rhbk'],
-  'Configure OAuth/RHBK in OpenShift': ['rhbk'],
+  'Configure OAuth/RHBK in OpenShift': ['openshift_oauth_rhbk'],
   'Grafana Workflow': ['grafana'],
   'Deploy GitLab': ['gitlab'],
   'Deploy Kafka': ['kafka'],
@@ -40,9 +57,72 @@ export const OPENSHIFT_NODE_COMPONENTS = {
   'Deploy GitOps': ['gitops'],
   'Deploy OADP': ['oadp'],
   'Deploy Pega': ['pega'],
-  'Alt Routes Workflow': [],
-  'Print ADO Routes': [],
+  'Alt Routes Workflow': [
+    'openshift_print_alt_routes',
+    'openshift_add_alt_routes',
+    'openshift_add_ingress_with_route',
+  ],
+  'Print ADO Routes': ['openshift_discover_routes_print'],
 };
+
+function asList(value) {
+  return Array.isArray(value) ? value.map((item) => String(item).trim().toLowerCase()).filter(Boolean) : [];
+}
+
+/**
+ * Selectors that bootstrap uses for OpenShift workflow job templates.
+ * A platform checkbox of openshift with no apps and no options generates none of these nodes.
+ */
+export function workflowPreviewKeys(preflight = {}) {
+  const components = asList(preflight.components);
+  const all = components.includes('all');
+  const openshiftOn = all || components.includes('openshift');
+  const apps = asList(preflight.component_apps?.openshift);
+  const options = asList(preflight.component_options?.openshift);
+  const keys = new Set();
+
+  if (openshiftOn) {
+    const source = all ? UI_OPENSHIFT_APPS : apps;
+    for (const app of source) {
+      if (UI_OPENSHIFT_APPS.includes(app) && app !== 'openshift') keys.add(app);
+    }
+    if (options.includes('admin_htpasswd')) keys.add('admin_htpasswd');
+    if (options.includes('integrated_image_registry')) keys.add('integrated_image_registry');
+    if (options.includes('console_banner')) keys.add('console');
+    if (options.includes('ldap_auth')) keys.add('openshift_ldap_auth');
+    if (options.includes('oauth_rhbk')) keys.add('openshift_oauth_rhbk');
+    if (options.includes('discover_routes_print')) keys.add('openshift_discover_routes_print');
+    const altOn = options.includes('alternate_routes') || options.includes('discover_routes_alt');
+    const alt = preflight.openshift?.alternate_routes || {};
+    if (altOn && alt.print_alt_routes !== false) keys.add('openshift_print_alt_routes');
+    if (altOn && (alt.add_alt_routes != null ? alt.add_alt_routes !== false : options.includes('discover_routes_alt'))) {
+      keys.add('openshift_add_alt_routes');
+    }
+    if (altOn && alt.add_ingress_with_route === true) keys.add('openshift_add_ingress_with_route');
+    const openshiftCfg = preflight.openshift || {};
+    const storageOn = options.includes('storage_class');
+    if (storageOn && openshiftCfg.storage_class_nfs !== false && openshiftCfg.nfs_include_in_workflow === true) {
+      keys.add('nfs_csi_workflow');
+    }
+    if (storageOn && openshiftCfg.storage_class_iscsi === true && openshiftCfg.iscsi_include_in_workflow === true) {
+      keys.add('iscsi_csi_workflow');
+    }
+    if (options.includes('update_pull_secret') && openshiftCfg.pull_secret_include_in_workflow === true) {
+      keys.add('pull_secret_workflow');
+    }
+  }
+
+  if (preflight.component_config?.cert_manager?.update_default_ingress === true) {
+    keys.add('cert_manager');
+  }
+
+  for (const component of components) {
+    if (NON_UI_PLAYBOOK_APPS.includes(component)) continue;
+    if (UI_OPENSHIFT_APPS.includes(component) && component !== 'openshift') keys.add(component);
+  }
+
+  return [...keys];
+}
 
 /** @type {WfGraph} */
 export const OPENSHIFT_WORKFLOW = {
@@ -61,6 +141,9 @@ export const OPENSHIFT_WORKFLOW = {
     { id: 'Deploy Web Terminal', label: 'Deploy Web Terminal', jobTemplate: 'ADO | Deploy Web Terminal', kind: 'jt' },
     { id: 'Deploy OpenShift Descheduler', label: 'Deploy OpenShift Descheduler', jobTemplate: 'ADO | Deploy OpenShift Descheduler', kind: 'jt' },
     { id: 'Deploy OpenShift Compliance Operator', label: 'Deploy OpenShift Compliance Operator', jobTemplate: 'ADO | Deploy OpenShift Compliance Operator', kind: 'jt' },
+    { id: 'Install NFS CSI', label: 'Install NFS CSI', jobTemplate: 'ADO | Install NFS CSI Storage', kind: 'jt' },
+    { id: 'Install Synology iSCSI CSI', label: 'Install Synology iSCSI CSI', jobTemplate: 'ADO | Install Synology iSCSI CSI Storage', kind: 'jt' },
+    { id: 'Update Pull Secret', label: 'Update Pull Secret', jobTemplate: 'ADO | Update pull secret', kind: 'jt' },
     { id: 'Cert Manager Workflow', label: 'Cert Manager Workflow', jobTemplate: 'ADO | Cert Manager Workflow', kind: 'workflow' },
     { id: 'RHBK Workflow', label: 'RHBK Workflow', jobTemplate: 'ADO | RHBK Workflow', kind: 'workflow' },
     { id: 'Configure OAuth/RHBK in OpenShift', label: 'Configure OAuth/RHBK in OpenShift', jobTemplate: 'ADO | Configure OAuth/RHBK in OpenShift', kind: 'jt' },
@@ -97,6 +180,9 @@ export const OPENSHIFT_WORKFLOW = {
       'Deploy Web Terminal',
       'Deploy OpenShift Descheduler',
       'Deploy OpenShift Compliance Operator',
+      'Install NFS CSI',
+      'Install Synology iSCSI CSI',
+      'Update Pull Secret',
     ].flatMap((id) => [
       { from: id, to: 'Print ADO Routes' },
       { from: id, to: 'Alt Routes Workflow' },
@@ -159,7 +245,7 @@ export function buildBootstrapSteps(ctx = {}) {
   const org = String(ctx.aapOrganization || 'ADO').trim();
 
   const hubBits = [];
-  if (ctx.hubPublishAdo) hubBits.push('publish infra.ado');
+  if (ctx.hubPublishAdo) hubBits.push('publish infra.automation_development_office');
   if (ctx.hubPublishPreflight) hubBits.push('publish preflight collections');
   if (ctx.hubPushEe) hubBits.push('push execution environment');
   const hubOn = hubBits.length > 0 || hubOnly;
@@ -262,50 +348,20 @@ export const BOOTSTRAP_CHAIN = {
  */
 export function filterOpenShiftWorkflow(selectedComponents, opts = {}) {
   const selected = new Set(
-    (selectedComponents || []).map((c) => String(c).trim()).filter(Boolean)
+    (Array.isArray(selectedComponents) ? selectedComponents : workflowPreviewKeys(selectedComponents || {}))
+      .map((c) => String(c).trim())
+      .filter(Boolean)
   );
-  const all = selected.has('all');
-  const usingAap = opts.usingAap !== false;
 
   const nodeActive = (nodeId) => {
     const keys = OPENSHIFT_NODE_COMPONENTS[nodeId];
-    if (keys === undefined) return true;
-    if (!keys.length) return true; // sink nodes
-    if (all) return true;
+    if (!keys || !keys.length) return false;
     return keys.some((k) => selected.has(k));
   };
 
-  // Cert/RHBK spine: keep if any downstream app needs OAuth path or rhbk/cert selected
-  const appNodes = OPENSHIFT_WORKFLOW.nodes
-    .map((n) => n.id)
-    .filter((id) => {
-      const keys = OPENSHIFT_NODE_COMPONENTS[id] || [];
-      return keys.some((k) =>
-        ['grafana', 'gitlab', 'kafka', 'eck', 'quay', 'devspaces', 'dev_hub', 'zabbix',
-          'bookstack', 'minio', 'netbox', 'acs', 'aap', 'dirsrv', 'gitops', 'oadp', 'pega'].includes(k)
-      );
-    });
-  const anyApp = all || appNodes.some((id) => nodeActive(id));
-  const keepSpine = anyApp || nodeActive('RHBK Workflow') || nodeActive('Cert Manager Workflow');
-
-  let activeIds = new Set(
-    OPENSHIFT_WORKFLOW.nodes.map((n) => n.id).filter((id) => {
-      if (id === 'Cert Manager Workflow' || id === 'RHBK Workflow' || id === 'Configure OAuth/RHBK in OpenShift') {
-        return keepSpine && (all || nodeActive(id) || anyApp);
-      }
-      return nodeActive(id);
-    })
-  );
-
-  // Always keep sinks if anything else is active
-  if (activeIds.size > 0) {
-    activeIds.add('Print ADO Routes');
-    activeIds.add('Alt Routes Workflow');
-  }
-
-  if (!usingAap) {
-    // Still show graph but mark Contoller path as preview-only
-  }
+  const activeIds = opts.usingAap === false
+    ? new Set()
+    : new Set(OPENSHIFT_WORKFLOW.nodes.map((n) => n.id).filter((id) => nodeActive(id)));
 
   const nodes = OPENSHIFT_WORKFLOW.nodes.filter((n) => activeIds.has(n.id));
   const edges = OPENSHIFT_WORKFLOW.edges.filter(

@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const fs = require('fs');
 const http = require('http');
@@ -5,11 +6,28 @@ const https = require('https');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 const { URL } = require('url');
+const {
+  resolveGitUsername,
+  cleanGitRemoteUrl,
+  adoGitCredentialPaths,
+  writeAdoGitCredentials,
+  clearAdoGitCredentials,
+  redactSecretsForLog
+} = require('./git-username');
+const {
+  resolveGitSkipTls,
+  gitHttpSslVerifyValue,
+  gitCloneConfigArgs,
+  buildProcessTlsEnv,
+  ansibleTlsShellLines
+} = require('./git-tls');
+const { chooseArchive } = require('./collection-archive');
+const { safeAdoDocRelative, safePreflightDoc } = require('./doc-paths');
 
 process.env.NODE_OPTIONS = '--max-old-space-size=256';
 
 const app = express();
-const port = 8080;
+const port = Number(process.env.PORT) || 8080;
 
 const workRoot = '/workspace';
 const collectionDir = '/opt/ado-collections';
@@ -217,7 +235,7 @@ const orphanOpenShiftPlaybookApps = [
   'web_terminal',
   'ocp_descheduler'
 ];
-const rhelApps = ['rhel', 'satellite', 'idm', 'aap', 'dirsrv', 'eck', 'gitlab', 'grafana', 'kafka', 'rhbk', 'compliance', 'stig'];
+const rhelApps = ['rhel', 'satellite', 'idm', 'aap', 'dirsrv', 'eck', 'gitlab', 'grafana', 'kafka', 'rhbk', 'compliance', 'stig', 'rhel_system_roles'];
 const patchingApps = ['patching', 'satellite', 'idm'];
 const awsApps = ['ec2_ami_copy'];
 const provisionApps = ['aws_instance', 'openshift_virt'];
@@ -821,11 +839,9 @@ function capText(value, maxLength) {
 
 function redactLogText(text) {
   if (text == null) return text;
-  return String(text)
-    .replace(/("(?:oauth_token|oauthtoken|galaxy_hub_token|vault_controller_oauthtoken|controller_oauthtoken)"\s*:\s*")[^"]*(")/gi, '$1[redacted]$2')
-    .replace(/('(?:oauth_token|oauthtoken|galaxy_hub_token|vault_controller_oauthtoken|controller_oauthtoken)'\s*:\s*')[^']*(')/gi, '$1[redacted]$2')
-    .replace(/((?:vault_controller_oauthtoken|controller_oauthtoken|oauth_token|galaxy_hub_token)\s*:\s*)(\S+)/gi, '$1[redacted]')
-    .replace(/(Authorization:\s*Bearer\s+)\S+/gi, '$1[redacted]');
+  return redactSecretsForLog(String(text))
+    .replace(/("pullSecret"\s*:\s*")[^"]*(")/g, '$1[redacted]$2')
+    .replace(/("sshKey"\s*:\s*")[^"]*(")/g, '$1[redacted]$2');
 }
 
 function event(msg) {
@@ -1280,61 +1296,36 @@ function resolveAnsibleExtraArgs(data) {
   return base ? `${base} ${stateFlag}` : stateFlag;
 }
 
-function buildAnsibleEnv(skipTlsVerify = false, gitSkipTlsVerify = true) {
-  const ansibleEnv = {
-    ...process.env,
-    ANSIBLE_FORCE_COLOR: 'false',
-    ANSIBLE_HOST_KEY_CHECKING: 'false',
-    ANSIBLE_COLLECTIONS_PATH: '/workspace/collections:/usr/share/ansible/collections',
-    ANSIBLE_COLLECTIONS_PATHS: '/workspace/collections:/usr/share/ansible/collections',
-    CONTROLLER_VERIFY_SSL: 'false',
-    TOWER_VERIFY_SSL: 'false',
-    REQUESTS_CA_BUNDLE: '',
-    CURL_CA_BUNDLE: '',
-    PYTHONHTTPSVERIFY: '0',
-    GIT_TERMINAL_PROMPT: '0'
-  };
-
-  if (gitSkipTlsVerify) {
-    ansibleEnv.GIT_SSL_NO_VERIFY = 'true';
-  }
-
-  if (skipTlsVerify) {
-    ansibleEnv.ANSIBLE_TLS_VERIFY = 'false';
-  }
-
+function buildAnsibleEnv(skipTlsVerify = false, gitSkipTlsVerify = false) {
+  const ansibleEnv = buildProcessTlsEnv(process.env, {
+    controllerSkipTls: skipTlsVerify === true,
+    gitSkipTls: gitSkipTlsVerify === true
+  });
+  ansibleEnv.ANSIBLE_FORCE_COLOR = 'false';
+  ansibleEnv.ANSIBLE_HOST_KEY_CHECKING = 'false';
+  ansibleEnv.ANSIBLE_COLLECTIONS_PATH = '/workspace/collections:/usr/share/ansible/collections';
+  ansibleEnv.ANSIBLE_COLLECTIONS_PATHS = '/workspace/collections:/usr/share/ansible/collections';
+  ansibleEnv.GIT_TERMINAL_PROMPT = '0';
   return ansibleEnv;
-}
-
-function gitCredentialLine(repoUrl, token) {
-  const u = new URL(repoUrl);
-  const username = encodeURIComponent('oauth2');
-  const password = encodeURIComponent(token);
-  return `${u.protocol}//${username}:${password}@${u.host}\n`;
 }
 
 function usesBearerGitAuth(scmTool) {
   return String(scmTool || '').trim().toLowerCase() === 'bitbucket';
 }
 
-function defaultGitUsername(scmTool) {
-  return usesBearerGitAuth(scmTool) ? 'x-token-auth' : 'oauth2';
-}
+let gitAuthIncludePath = '';
 
-function authenticatedGitUrl(repoUrl, token, username) {
-  if (!token || !repoUrl) return String(repoUrl || '');
-  try {
-    const u = new URL(repoUrl);
-    u.username = username || defaultGitUsername('gitlab');
-    u.password = String(token);
-    return u.toString();
-  } catch {
-    return String(repoUrl);
+function gitBashAuthSetup(repoUrl) {
+  const remote = JSON.stringify(cleanGitRemoteUrl(repoUrl));
+  if (gitAuthIncludePath) {
+    const include = JSON.stringify(gitAuthIncludePath);
+    return `git config --local --unset-all http.extraHeader || true
+git config --local include.path ${include} || true
+git remote set-url origin ${remote}`;
   }
-}
-
-function gitBearerExtraHeader(token) {
-  return `Authorization: Bearer ${String(token || '').trim()}`;
+  const helper = JSON.stringify(`store --file ${adoGitCredentialPaths().credentials}`);
+  return `git config --local credential.helper ${helper} || true
+git remote set-url origin ${remote}`;
 }
 
 /** Ensure plaintext preflight JSON / vault pass never enter git commits. */
@@ -1376,17 +1367,18 @@ async function prepareGitAuthAndClone({
   repoDir,
   token,
   scmTool,
-  gitSkipTlsVerify = true,
+  gitUsername: gitUsernameOpt = '',
+  gitSkipTlsVerify = false,
   gitName = 'ADO Preflight UI',
   gitEmail = 'ado-preflight@localhost',
   cleanRepoDir = true
 }) {
   const tool = String(scmTool || 'gitlab').trim().toLowerCase();
   const gitUsesBearerAuth = usesBearerGitAuth(tool);
-  const gitUsername = defaultGitUsername(tool);
+  const gitUsername = resolveGitUsername(tool, gitUsernameOpt);
   const gitEnv = buildAnsibleEnv(false, gitSkipTlsVerify);
 
-  configureGitCredentials(repoUrl, token, tool);
+  configureGitCredentials(repoUrl, token, tool, gitUsername);
 
   if (cleanRepoDir) {
     event(`Cleaning repo directory ${repoDir}`);
@@ -1411,7 +1403,7 @@ async function prepareGitAuthAndClone({
   if (!gitUsesBearerAuth) {
     await runStream(
       'git',
-      ['config', '--global', 'credential.helper', 'store'],
+      ['config', '--global', 'credential.helper', `store --file ${adoGitCredentialPaths().credentials}`],
       workRoot,
       'Configuring Git credential helper'
     );
@@ -1423,16 +1415,12 @@ async function prepareGitAuthAndClone({
     );
   }
 
-  const cloneUrl = (!gitUsesBearerAuth && token)
-    ? authenticatedGitUrl(repoUrl, token, gitUsername)
-    : repoUrl;
+  const cloneUrl = cleanGitRemoteUrl(repoUrl);
 
   const cloneArgs = buildGitCloneArgs({
     repoUrl: cloneUrl,
     branch,
     repoDir,
-    token,
-    scmTool: tool,
     gitSkipTlsVerify
   });
 
@@ -1456,46 +1444,40 @@ async function prepareGitAuthAndClone({
 
   event('Git repository cloned');
 
-  if (gitSkipTlsVerify) {
-    await runStream(
-      'git',
-      ['config', '--local', 'http.sslVerify', 'false'],
-      repoDir,
-      'Disabling git SSL verify'
-    );
-  }
+  await runStream(
+    'git',
+    ['config', '--local', 'http.sslVerify', gitHttpSslVerifyValue(gitSkipTlsVerify)],
+    repoDir,
+    gitSkipTlsVerify ? 'Disabling git SSL verify' : 'Enabling git SSL verify'
+  );
 
-  if (gitUsesBearerAuth && token) {
+  if (token) {
     await runStream(
       'git',
       ['config', '--local', '--unset-all', 'http.extraHeader'],
       repoDir,
-      'Clearing previous Bitbucket Bearer headers'
+      'Clearing previous Bearer headers'
     );
+    if (gitAuthIncludePath) {
+      await runStream(
+        'git',
+        ['config', '--local', 'include.path', gitAuthIncludePath],
+        repoDir,
+        'Configuring local Bitbucket Bearer include file'
+      );
+    } else {
+      await runStream(
+        'git',
+        ['config', '--local', 'credential.helper', `store --file ${adoGitCredentialPaths().credentials}`],
+        repoDir,
+        'Configuring local Git credential helper'
+      );
+    }
     await runStream(
       'git',
-      ['config', '--local', 'http.extraHeader', gitBearerExtraHeader(token)],
+      ['remote', 'set-url', 'origin', cleanGitRemoteUrl(repoUrl)],
       repoDir,
-      'Configuring local Bitbucket Bearer auth for push'
-    );
-    await runStream(
-      'git',
-      ['remote', 'set-url', 'origin', repoUrl],
-      repoDir,
-      'Setting origin remote URL'
-    );
-  } else if (token) {
-    await runStream(
-      'git',
-      ['remote', 'set-url', 'origin', authenticatedGitUrl(repoUrl, token, gitUsername)],
-      repoDir,
-      'Setting authenticated origin remote URL'
-    );
-    await runStream(
-      'git',
-      ['config', '--local', 'credential.helper', 'store'],
-      repoDir,
-      'Configuring local Git credential helper'
+      `Setting origin remote URL (user=${gitUsername})`
     );
   }
 
@@ -1510,11 +1492,12 @@ async function gitCommitAndPush({
   commitMessage,
   token,
   scmTool,
-  gitSkipTlsVerify = true
+  gitUsername: gitUsernameOpt = '',
+  gitSkipTlsVerify = false
 }) {
   const tool = String(scmTool || 'gitlab').trim().toLowerCase();
-  const gitUsesBearerAuth = usesBearerGitAuth(tool);
-  const gitUsername = defaultGitUsername(tool);
+  const gitUsername = resolveGitUsername(tool, gitUsernameOpt);
+  configureGitCredentials(repoUrl, token, tool, gitUsername);
   const files = (Array.isArray(pathsToAdd) ? pathsToAdd : [pathsToAdd])
     .filter(Boolean)
     .map(file => JSON.stringify(file))
@@ -1525,13 +1508,8 @@ set -euo pipefail
 cd ${JSON.stringify(repoDir)}
 export GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS=true
-${gitSkipTlsVerify ? 'git config --local http.sslVerify false || true' : 'true'}
-${gitUsesBearerAuth && token
-  ? `git config --local --unset-all http.extraHeader || true
-git config --local http.extraHeader ${JSON.stringify(gitBearerExtraHeader(token))} || true
-git remote set-url origin ${JSON.stringify(repoUrl)}`
-  : `git config --local credential.helper store || true
-git remote set-url origin ${JSON.stringify(authenticatedGitUrl(repoUrl, token, gitUsername))}`}
+git config --local http.sslVerify ${gitHttpSslVerifyValue(gitSkipTlsVerify)} || true
+${gitBashAuthSetup(repoUrl)}
 
 # Drop any previously tracked plaintext preflight JSON / vault pass from the index.
 git ls-files -z -- 'ado-preflight-*.json' 'ado-extra-vars.json' '.vault_pass' 2>/dev/null \
@@ -1549,10 +1527,10 @@ else
   git -c user.email="ado-preflight@localhost" -c user.name="ADO Preflight UI" commit -m ${JSON.stringify(commitMessage)}
 fi
 
-git push origin ${JSON.stringify(`HEAD:${branch}`)}
+git -c http.sslVerify=${gitHttpSslVerifyValue(gitSkipTlsVerify)} push origin ${JSON.stringify(`HEAD:${branch}`)}
 echo "Pushed to origin/${branch}"
 
-git remote set-url origin ${JSON.stringify(repoUrl)} || true
+git remote set-url origin ${JSON.stringify(cleanGitRemoteUrl(repoUrl))} || true
 `], repoDir, 'Committing and pushing to Git', buildAnsibleEnv(false, gitSkipTlsVerify));
 
   return {
@@ -1563,33 +1541,24 @@ git remote set-url origin ${JSON.stringify(repoUrl)} || true
 }
 
 function redactGitArgsForLog(args) {
-  return args.map(arg => {
-    if (typeof arg !== 'string') return arg;
-    return arg
-      .replace(/Authorization:\s*Bearer\s+\S+/gi, 'Authorization: Bearer ***')
-      .replace(/:\/\/[^/@\s]+:[^/@\s]+@/g, '://***:***@');
-  });
+  return args.map(arg => (typeof arg === 'string' ? redactSecretsForLog(arg) : arg));
 }
 
 function buildGitCloneArgs({
   repoUrl,
   branch,
   repoDir,
-  token,
-  scmTool,
   gitSkipTlsVerify
 }) {
   const args = [];
 
-  if (gitSkipTlsVerify) {
-    args.push('-c', 'http.sslVerify=false');
+  args.push(...gitCloneConfigArgs(gitSkipTlsVerify));
+
+  if (gitAuthIncludePath) {
+    args.push('-c', `include.path=${gitAuthIncludePath}`);
   }
 
-  if (usesBearerGitAuth(scmTool) && token) {
-    args.push('-c', `http.extraHeader=${gitBearerExtraHeader(token)}`);
-  }
-
-  args.push('clone', '--branch', branch, '--single-branch', repoUrl, repoDir);
+  args.push('clone', '--branch', branch, '--single-branch', cleanGitRemoteUrl(repoUrl), repoDir);
   return args;
 }
 
@@ -1649,14 +1618,57 @@ async function prepareBootstrapGitRepo({
   branch,
   token,
   scmTool,
+  gitUsername: gitUsernameOpt = '',
   gitSkipTlsVerify,
   skipTlsVerify
 }) {
+  const tool = String(scmTool || 'gitlab').trim().toLowerCase();
+  const gitUsesBearerAuth = usesBearerGitAuth(tool);
+  const gitUsername = resolveGitUsername(tool, gitUsernameOpt);
+  const cloneUrl = cleanGitRemoteUrl(repoUrl);
+
   if (!recloneRepo && bootstrapRepoExists(repoDir)) {
     event(
       `Reusing existing bootstrap clone at ${repoDir} `
       + '(incremental git update; uncommitted pod edits preserved)'
     );
+    await runStream(
+      'git',
+      ['config', '--local', 'http.sslVerify', gitHttpSslVerifyValue(gitSkipTlsVerify)],
+      repoDir,
+      gitSkipTlsVerify
+        ? 'Disabling git SSL verify on existing clone'
+        : 'Enabling git SSL verify on existing clone'
+    );
+    if (token) {
+      await runStream(
+        'git',
+        ['remote', 'set-url', 'origin', cloneUrl],
+        repoDir,
+        `Refreshing origin (user=${gitUsername})`
+      );
+      if (gitAuthIncludePath) {
+        await runStream(
+          'git',
+          ['config', '--local', '--unset-all', 'http.extraHeader'],
+          repoDir,
+          'Clearing previous Bearer headers'
+        );
+        await runStream(
+          'git',
+          ['config', '--local', 'include.path', gitAuthIncludePath],
+          repoDir,
+          'Refreshing Bitbucket Bearer include file'
+        );
+      } else {
+        await runStream(
+          'git',
+          ['config', '--local', 'credential.helper', `store --file ${adoGitCredentialPaths().credentials}`],
+          repoDir,
+          'Refreshing Git credential helper'
+        );
+      }
+    }
     return 0;
   }
 
@@ -1665,11 +1677,11 @@ async function prepareBootstrapGitRepo({
   fs.mkdirSync(workRoot, { recursive: true });
 
   const cloneArgs = buildGitCloneArgs({
-    repoUrl,
+    repoUrl: cloneUrl,
     branch,
     repoDir,
     token,
-    scmTool,
+    scmTool: tool,
     gitSkipTlsVerify
   });
 
@@ -1677,9 +1689,9 @@ async function prepareBootstrapGitRepo({
     'git',
     cloneArgs,
     workRoot,
-    usesBearerGitAuth(scmTool)
+    gitUsesBearerAuth
       ? 'Cloning Git repository with Authorization Bearer header'
-      : 'Cloning Git repository',
+      : `Cloning Git repository (user=${gitUsername})`,
     buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify)
   );
 }
@@ -2039,7 +2051,18 @@ function defaultComponentConfig(component) {
       subscription_manifest_file: '',
       subscription_manifest_content_base64: '',
       rhn_username: '',
-      rhn_password: ''
+      rhn_password: '',
+      install_target: 'openshift',
+      standalone_hostname: '',
+      standalone_database_hostname: '',
+      aap_setup_containerized: true,
+      aap_setup_bundle_dir: '',
+      aap_setup_bundle_file: '',
+      aap_setup_ssh_user: '',
+      aap_setup_ssh_password: '',
+      aap_setup_ssh_private_key_secret: '',
+      aap_gateway_cert_path: '',
+      aap_gateway_key_path: ''
     });
   }
 
@@ -2534,7 +2557,7 @@ function normalizePreflightPayload(input) {
   }
 
   // Do not set component=all.
-  // infra.ado.bootstrap_generate_env_vars treats preflight.component as an exact component list
+  // infra.automation_development_office.bootstrap_generate_env_vars treats preflight.component as an exact component list
   // and will generate vars_all.yml instead of expanding platform=all.
   if (data.components.includes('all')) {
     delete data.component;
@@ -2552,15 +2575,18 @@ function normalizePreflightPayload(input) {
   if (!hubUpdateCollectionOnly && data.git.auto_push === undefined) {
     data.git.auto_push = true;
   }
-  if (data.git.skip_tls_verify === undefined) data.git.skip_tls_verify = true;
+  // Missing key keeps the historical skip. Explicit true or false is kept.
+  data.git.skip_tls_verify = resolveGitSkipTls(data.git.skip_tls_verify, { omittedSkips: true });
   if (data.git.overwrite_generated === undefined) data.git.overwrite_generated = false;
   if (data.git.vars_only === undefined) data.git.vars_only = false;
   normalizeGitOverrides(data.git);
   if (data.git.token === undefined) data.git.token = '';
   if (data.git.username === undefined) data.git.username = '';
 
-  // Normalize additional environments for survey choices (never create group_vars dirs).
+  // Survey choices for job templates. group_vars copies are opt-in.
   data.additional_environments = normalizeAdditionalEnvironments(data.additional_environments);
+  data.additional_environments_create_group_vars = data.additional_environments_create_group_vars === true
+    || data.additional_environments_create_group_vars === 'true';
 
   if (!data.vault) data.vault = {};
   if (data.vault.encrypt === undefined) data.vault.encrypt = true;
@@ -2667,7 +2693,7 @@ function normalizePreflightPayload(input) {
   const defaultControllerEeName = `${String(hubOrg).trim() || 'ADO'}-ee`;
   const defaultHubEeDescription =
     'ADO Contoller execution environment based on the supported RHEL 9 AAP EE. '
-    + 'Preloads Ansible collections used by infra.ado bootstrap and lab jobs '
+    + 'Preloads Ansible collections used by infra.automation_development_office bootstrap and lab jobs '
     + '(ansible.controller, ansible.posix, kubernetes.k8s, redhat.openshift, community.general, '
     + 'amazon.aws, and related dependencies) so Contoller can run disconnected without Galaxy pulls.';
   if (
@@ -2840,6 +2866,7 @@ function normalizePreflightPayload(input) {
   if (data.aap.machine_credential.ssh_key_unlock === undefined) data.aap.machine_credential.ssh_key_unlock = '';
   if (data.aap.machine_credential.become_method === undefined) data.aap.machine_credential.become_method = 'sudo';
   if (!data.aap.machine_credential.become_username) data.aap.machine_credential.become_username = 'root';
+  if (data.aap.machine_credential.become_password === undefined) data.aap.machine_credential.become_password = '';
   if (!data.aap.git_branch) data.aap.git_branch = 'main';
 
   if (!data.component_config) data.component_config = {};
@@ -3103,6 +3130,29 @@ function normalizePreflightPayload(input) {
   }
   if (preAap.rhn_username) data.component_config.aap.rhn_username = preAap.rhn_username;
   if (preAap.rhn_password) data.component_config.aap.rhn_password = preAap.rhn_password;
+  [
+    'install_target',
+    'standalone_hostname',
+    'standalone_database_hostname',
+    'aap_setup_bundle_dir',
+    'aap_setup_bundle_file',
+    'aap_setup_ssh_user',
+    'aap_setup_ssh_password',
+    'aap_setup_ssh_private_key_secret',
+    'aap_gateway_cert_path',
+    'aap_gateway_key_path'
+  ].forEach((key) => {
+    const current = data.component_config.aap[key];
+    if ((current === undefined || current === '') && preAap[key]) {
+      data.component_config.aap[key] = preAap[key];
+    }
+  });
+  if (
+    data.component_config.aap.aap_setup_containerized === undefined
+    && preAap.aap_setup_containerized !== undefined
+  ) {
+    data.component_config.aap.aap_setup_containerized = preAap.aap_setup_containerized;
+  }
 
   // Mirror agent summary into agent_installer when enabled
   if (data.pre_installs.openshift_agent_enabled) {
@@ -3447,7 +3497,7 @@ function normalizeAgentInstaller(input) {
   data.topology = data.topology || 'ha';
   data.cluster_name = data.cluster_name || 'ocp-dev';
   data.base_domain = data.base_domain || 'dev.rhlab';
-  data.openshift_version = data.openshift_version || '4.16';
+  data.openshift_version = data.openshift_version || '4.18';
   data.platform = data.platform || 'baremetal';
   data.publish = data.publish || 'External';
   data.network_type = data.network_type || 'OVNKubernetes';
@@ -3956,7 +4006,7 @@ function buildArchitectHostNode(node, index, machineCidr) {
  */
 function mapPreflightAgentToArchitectState(agentInput) {
   const config = normalizeAgentInstaller(agentInput);
-  const versionRaw = String(config.openshift_version || '4.16').trim() || '4.16';
+  const versionRaw = String(config.openshift_version || '4.18').trim() || '4.18';
   const channel = versionRaw.includes('.')
     ? versionRaw.split('.').slice(0, 2).join('.')
     : versionRaw;
@@ -4683,24 +4733,29 @@ function pruneSelectedPayload(data, selectedComponentApps) {
   return data;
 }
 
-function configureGitCredentials(repoUrl, token, scmTool = 'gitlab') {
+function configureGitCredentials(repoUrl, token, scmTool = 'gitlab', username = '') {
+  gitAuthIncludePath = '';
   if (!token) {
     event('No Git token provided; Git push will require existing credentials or anonymous push access');
     return;
   }
 
-  if (usesBearerGitAuth(scmTool)) {
-    event(`Configured Bitbucket Bearer token auth for ${new URL(repoUrl).host}`);
+  const remote = cleanGitRemoteUrl(repoUrl);
+  const home = process.env.HOME || '/tmp';
+  const written = writeAdoGitCredentials({
+    repoUrl: remote,
+    token,
+    username,
+    scmTool,
+    homeDir: home
+  });
+  if (written.kind === 'bearer') {
+    gitAuthIncludePath = written.path;
+    event(`Configured Bitbucket Bearer token auth for ${new URL(remote).host}`);
     return;
   }
-
-  const home = process.env.HOME || '/tmp';
-  const credPath = path.join(home, '.git-credentials');
-
-  fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(credPath, gitCredentialLine(repoUrl, token), { mode: 0o600 });
-
-  event(`Configured Git credentials for ${new URL(repoUrl).host}`);
+  const resolvedUser = resolveGitUsername(scmTool, username);
+  event(`Configured Git credentials for ${new URL(remote).host} (user=${resolvedUser})`);
 }
 
 function runStream(cmd, args, cwd, eventLabel, envOverrides = {}) {
@@ -4806,7 +4861,7 @@ function flushWorkspace({ wipeCollections = false } = {}) {
   // Drop staged collection copies at /workspace root (not under collections/).
   try {
     for (const name of fs.readdirSync(workRoot)) {
-      if (/^infra-ado-.*\.tar\.gz$/.test(name) || /^ado-.*\.tar\.gz$/.test(name)) {
+      if (/^infra-automation_development_office-.*\.tar\.gz$/.test(name) || /^ado-.*\.tar\.gz$/.test(name)) {
         targets.push(path.join(workRoot, name));
       }
     }
@@ -4824,15 +4879,14 @@ function flushWorkspace({ wipeCollections = false } = {}) {
     }
   }
 
-  // Git credential helper file written during bootstrap push mode.
-  const gitCreds = path.join(process.env.HOME || '/tmp', '.git-credentials');
+  // Explicit workspace flush removes ADO credential files only.
+  gitAuthIncludePath = '';
   try {
-    if (fs.existsSync(gitCreds)) {
-      fs.rmSync(gitCreds, { force: true });
-      removed.push(gitCreds);
+    for (const file of clearAdoGitCredentials(process.env.HOME || '/tmp')) {
+      removed.push(file);
     }
   } catch (err) {
-    noted.push(`failed to remove git credentials: ${err.message}`);
+    noted.push(`failed to remove ADO git credentials: ${err.message}`);
   }
 
   fs.mkdirSync(workRoot, { recursive: true });
@@ -4902,7 +4956,7 @@ function ensureStarterFiles(repoDir, envName) {
       when: (playbook_dir ~ '/' ~ item) is file
 
   roles:
-    - role: infra.ado.bootstrap_controller
+    - role: infra.automation_development_office.bootstrap_controller
 `);
 
   writeAlways(path.join(repoDir, '00-controller-bootstrap.yml'), `---
@@ -4920,7 +4974,7 @@ function ensureStarterFiles(repoDir, envName) {
     apply_aap_configs: "{{ apply_aap_configs | default(true) }}"
 
   roles:
-    - role: infra.ado.bootstrap_controller
+    - role: infra.automation_development_office.bootstrap_controller
 `);
 
   writeAlways(path.join(repoDir, 'inventory'), `localhost ansible_connection=local
@@ -5002,14 +5056,14 @@ function latestAdoCollectionArchive() {
 
     if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
       for (const fileName of fs.readdirSync(candidate)) {
-        if (/^infra-ado-.*\.tar\.gz$/.test(fileName)) {
+        if (/^infra-automation_development_office-.*\.tar\.gz$/.test(fileName)) {
           archives.push(path.join(candidate, fileName));
         }
       }
     }
   }
 
-  return archives.sort().pop() || '';
+  return chooseArchive(archives);
 }
 
 function ensureAdoCollectionExtracted() {
@@ -5311,7 +5365,7 @@ function buildBootstrapRecap(data, repoDir, selectedComponentApps, runtimeMs) {
       data?.aap?.hub_publish_ado_collection
       || data?.aap?.hub_publish_preflight_collections
         ? 'written (Hub/Galaxy names)'
-        : 'local type:dir for vendored infra.ado (org must already have Galaxy creds, or use ADO EE)'
+        : 'local type:dir for vendored infra.automation_development_office (org must already have Galaxy creds, or use ADO EE)'
     }`,
     `AAP Hub force update: ${data?.aap?.hub_force_ado_collection_update ? 'yes' : 'no'}`,
     `AAP standalone run: ${aapStandaloneRun(data) ? 'yes (AAP tabs only — skip component playbooks/full Contoller scaffolding)' : 'no'}`,
@@ -5482,7 +5536,7 @@ function resolveLocalComponentsRunner(repoDir) {
   // Prefer the collection copy so local/no-AAP runner fixes apply without requiring a
   // full re-bootstrap just to refresh the vendored script in the generated repo.
   const candidates = [
-    path.join('/workspace/collections/ansible_collections/infra/ado/roles/bootstrap_generate_playbook_repo/files/local_components.py'),
+    path.join('/workspace/collections/ansible_collections/infra/automation_development_office/roles/bootstrap_generate_playbook_repo/files/local_components.py'),
     path.join('/opt/ado-collections/extracted/roles/bootstrap_generate_playbook_repo/files/local_components.py'),
     path.join(__dirname, 'collections', 'ansible_collections', 'infra', 'ado', 'roles', 'bootstrap_generate_playbook_repo', 'files', 'local_components.py'),
     path.join(repoDir, 'local_components.py')
@@ -5789,18 +5843,18 @@ app.post('/api/components/run', async (req, res) => {
   latestDebug.result = null;
   res.status(202).json({ status: 'started' });
   try {
-    event('Refreshing infra.ado from baked /opt/ado-collections before component run');
+    event('Refreshing infra.automation_development_office from baked /opt/ado-collections before component run');
     const refreshCode = await runStream('bash', ['-lc', [
       'set -euo pipefail',
       'COLLECTION_DIR=/opt/ado-collections',
       'mkdir -p /workspace/collections',
-      'ado_archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name \'infra-ado-*.tar.gz\' | sort -V | tail -n 1)"',
-      'if [ -z "$ado_archive" ]; then echo "ERROR: no infra-ado-*.tar.gz in $COLLECTION_DIR"; exit 1; fi',
+      'ado_archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name \'infra-automation_development_office-*.tar.gz\' | sort -V | tail -n 1)"',
+      'if [ -z "$ado_archive" ]; then echo "ERROR: no infra-automation_development_office-*.tar.gz in $COLLECTION_DIR"; exit 1; fi',
       'echo "Installing $ado_archive"',
       'ansible-galaxy collection install "$ado_archive" -p /workspace/collections --force --no-deps'
-    ].join('\n')], context.repoDir, 'Refreshing infra.ado collection', context.env);
+    ].join('\n')], context.repoDir, 'Refreshing infra.automation_development_office collection', context.env);
     if (refreshCode !== 0) {
-      throw new Error(`Failed to refresh infra.ado collection (exit ${refreshCode})`);
+      throw new Error(`Failed to refresh infra.automation_development_office collection (exit ${refreshCode})`);
     }
     event('Running selected generated components in the pod');
     const code = await runStream('python3', [resolveLocalComponentsRunner(context.repoDir), '--repo', context.repoDir, '--request', request.file], context.repoDir, 'Running selected components', context.env);
@@ -6049,6 +6103,63 @@ app.get('/api/readme/known-bugs', (req, res) => {
   res.type('text/plain').send(result.text);
 });
 
+app.get('/api/readme/ado/doc', (req, res) => {
+  const relative = safeAdoDocRelative(req.query.path);
+  if (!relative) {
+    res.status(400).type('text/plain').send('# Invalid ADO documentation path');
+    return;
+  }
+  const checked = [];
+  for (const root of adoCollectionRoots()) {
+    const collectionRoot = path.resolve(root);
+    const candidate = path.resolve(collectionRoot, relative);
+    checked.push(candidate);
+    if (!candidate.startsWith(`${collectionRoot}${path.sep}`)) continue;
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      res.type('text/plain').send(fs.readFileSync(candidate, 'utf8'));
+      return;
+    }
+  }
+  event(`ADO doc not found (${relative}) in: ${checked.join(', ')}`);
+  res.status(404).type('text/plain').send(documentationFallback('ADO Documentation', checked));
+});
+
+app.get('/api/readme/preflight/doc', (req, res) => {
+  const relative = safePreflightDoc(req.query.path);
+  if (!relative) {
+    res.status(400).type('text/plain').send('# Invalid preflight documentation path');
+    return;
+  }
+  const candidate = path.resolve(__dirname, relative);
+  const root = path.resolve(__dirname);
+  if (!candidate.startsWith(`${root}${path.sep}`) && candidate !== root) {
+    res.status(400).type('text/plain').send('# Invalid preflight documentation path');
+    return;
+  }
+  if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) {
+    res.status(404).type('text/plain').send(`# Not found\n\n\`${relative}\` is not in this preflight image.`);
+    return;
+  }
+  res.type('text/plain').send(fs.readFileSync(candidate, 'utf8'));
+});
+
+app.get('/api/assistant/knowledge', (req, res) => {
+  const candidates = [
+    path.join(uiDir, 'assistant-knowledge.json'),
+    path.join(__dirname, 'public', 'assistant-knowledge.json'),
+    path.join(__dirname, 'dist', 'assistant-knowledge.json')
+  ];
+  const file = candidates.find(candidate => fs.existsSync(candidate));
+  if (!file) {
+    res.status(404).json({
+      error: 'Documentation bundle unavailable. Rebuild and restart preflight.',
+      documents: []
+    });
+    return;
+  }
+  res.type('application/json').send(fs.readFileSync(file));
+});
+
 app.get('/api/readme/ado/role/:roleName', (req, res) => {
   const roleName = String(req.params.roleName || '').trim();
 
@@ -6224,6 +6335,332 @@ app.post('/api/openshift/packagemanifests', async (req, res) => {
   }
 });
 
+let agentInstallJob = { running: false, action: '', code: null, dir: '' };
+
+function agentInstallBaseDir() {
+  const preferred = process.env.AGENT_INSTALL_DIR || path.join(workRoot, 'agent-install');
+  try {
+    fs.mkdirSync(preferred, { recursive: true });
+    return preferred;
+  } catch {
+    const fallback = '/tmp/ado-agent-install';
+    fs.mkdirSync(fallback, { recursive: true });
+    return fallback;
+  }
+}
+
+function resolveOpenshiftInstallBin() {
+  const candidates = [
+    process.env.OPENSHIFT_INSTALL_BIN,
+    '/usr/local/bin/openshift-install',
+    '/usr/bin/openshift-install'
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  try {
+    const found = execFileSync('bash', ['-lc', 'command -v openshift-install'], { encoding: 'utf8' }).trim();
+    if (found && fs.existsSync(found)) return found;
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function writeAgentInstallDir(generated, clusterName) {
+  const safe = String(clusterName || 'cluster').replace(/[^A-Za-z0-9._-]/g, '-') || 'cluster';
+  const dir = path.join(agentInstallBaseDir(), safe);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'install-config.yaml'), generated.installConfig);
+  fs.writeFileSync(path.join(dir, 'agent-config.yaml'), generated.agentConfig);
+  Object.entries(generated.additionalManifests || {}).forEach(([rel, content]) => {
+    const dest = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, content);
+  });
+  return dir;
+}
+
+async function runAgentInstallSequence(action, dir) {
+  const bin = resolveOpenshiftInstallBin();
+  if (!bin) {
+    append('\nopenshift-install was not found in this pod.\n');
+    append('Set OPENSHIFT_INSTALL_BIN or install the client that matches the OpenShift version, then run again.\n');
+    return 127;
+  }
+
+  const steps = action === 'image'
+    ? [['agent', 'create', 'image', '--dir', dir, '--log-level=debug']]
+    : action === 'pxe'
+      ? [['agent', 'create', 'pxe-files', '--dir', dir, '--log-level=debug']]
+      : [
+        ['agent', 'create', 'pxe-files', '--dir', dir, '--log-level=debug'],
+        ['agent', 'wait-for', 'bootstrap-complete', '--dir', dir, '--log-level=debug'],
+        ['agent', 'wait-for', 'install-complete', '--dir', dir, '--log-level=debug']
+      ];
+
+  for (const args of steps) {
+    const code = await runStream(bin, args, dir, `Agent install: ${args.slice(0, 3).join(' ')}`);
+    if (code !== 0) return code;
+  }
+  return 0;
+}
+
+function sha256Text(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function releaseChannel(version) {
+  const parts = String(version || '').trim().split('.');
+  if (parts.length >= 2 && parts[0] && parts[1]) return `${parts[0]}.${parts[1]}`;
+  return String(version || '').trim();
+}
+
+function exactRelease(version) {
+  const raw = String(version || '').trim();
+  if (/^\d+\.\d+$/.test(raw)) return `${raw}.0`;
+  return raw;
+}
+
+function registryUrlFromAgentConfig(config, explicit) {
+  const given = String(explicit || '').trim();
+  if (given) return given;
+  const sources = parseMaybeYamlList(config.disconnected_registry);
+  for (const source of sources) {
+    const mirror = Array.isArray(source.mirrors) ? source.mirrors[0] : '';
+    if (mirror) return String(mirror).trim();
+  }
+  return '';
+}
+
+function buildBundleImageSet(config, registryUrl) {
+  const version = exactRelease(config.openshift_version);
+  const channel = releaseChannel(version);
+  const lines = [
+    '---',
+    'apiVersion: mirror.openshift.io/v2alpha1',
+    'kind: ImageSetConfiguration',
+    'metadata:',
+    `  name: ${config.cluster_name}`,
+    'mirror:',
+    '  platform:',
+    '    channels:',
+    `      - name: stable-${channel}`,
+    '        type: ocp',
+    `        minVersion: ${version}`,
+    `        maxVersion: ${version}`,
+    '    graph: true',
+    '  operators: []',
+    '  additionalImages: []'
+  ];
+  if (registryUrl) {
+    lines.push(
+      'storageConfig:',
+      '  registry:',
+      `    imageURL: ${registryUrl.replace(/\/+$/, '')}/ocp-mirror`,
+      '    skipTLS: true'
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+function buildBundleFieldManual(config, registryUrl, mode) {
+  const release = exactRelease(config.openshift_version);
+  return [
+    `# Disconnected OpenShift install — ${config.cluster_name}.${config.base_domain}`,
+    '',
+    `Release: ${release}`,
+    `Registry mode: ${mode}`,
+    `Registry: ${registryUrl || '(unset)'}`,
+    '',
+    'The install-config.yaml and agent-config.yaml in this directory are authoritative.',
+    'Do not regenerate them. Milestone 1A only validates this bundle.',
+    'Mirroring and boot media are later stages of infra.automation_development_office.ocp_disconnected_install.',
+    '',
+    '```bash',
+    'ansible-playbook -i localhost, -c local \\',
+    '  playbooks/openshift/ado-validate-disconnected-install-bundle.yml \\',
+    '  -e ocp_disconnected_install_bundle_dir=$PWD',
+    '```',
+    ''
+  ].join('\n');
+}
+
+function yamlQuote(value) {
+  return JSON.stringify(String(value ?? ''));
+}
+
+function buildBundleManifest(config, extras) {
+  const release = exactRelease(config.openshift_version);
+  const channel = releaseChannel(release);
+  return [
+    '---',
+    'apiVersion: ado.infra/v1',
+    'kind: OpenShiftDisconnectedInstallBundle',
+    'schema_version: 1',
+    'cluster:',
+    `  name: ${yamlQuote(config.cluster_name)}`,
+    `  base_domain: ${yamlQuote(config.base_domain)}`,
+    'release:',
+    `  version: ${yamlQuote(release)}`,
+    `  channel: ${yamlQuote(`stable-${channel}`)}`,
+    '  architecture: amd64',
+    'install:',
+    '  method: agent',
+    `  media: ${extras.media === 'pxe' ? 'pxe' : 'iso'}`,
+    'registry:',
+    `  mode: ${extras.mode}`,
+    `  url: ${yamlQuote(extras.registryUrl)}`,
+    '  credential_file: credentials/pull-secret.json',
+    'artifacts:',
+    '  install_config: install-config.yaml',
+    '  agent_config: agent-config.yaml',
+    '  imageset_config: imageset-config.yaml',
+    '  manifests_dir: manifests',
+    '  field_manual: FIELD_MANUAL.md',
+    'checksums:',
+    `  install-config.yaml: >-`,
+    `    ${extras.checksums['install-config.yaml']}`,
+    `  agent-config.yaml: >-`,
+    `    ${extras.checksums['agent-config.yaml']}`,
+    `  imageset-config.yaml: >-`,
+    `    ${extras.checksums['imageset-config.yaml']}`,
+    'generated_by:',
+    '  component: ado-preflight-ui',
+    '  generator: openshift-agent',
+    ''
+  ].join('\n');
+}
+
+function resolveInstallationBundleDir(requested, clusterName) {
+  const root = process.env.OPENSHIFT_BUNDLE_DIR
+    || path.join(workRoot, 'openshift-install-bundles');
+  const safeCluster = String(clusterName || 'cluster').replace(/[^A-Za-z0-9._-]/g, '-') || 'cluster';
+  fs.mkdirSync(root, { recursive: true });
+  if (!requested) return path.join(root, safeCluster);
+  const resolved = path.resolve(String(requested));
+  const allowed = path.resolve(root);
+  if (resolved !== allowed && !resolved.startsWith(`${allowed}${path.sep}`)) {
+    throw new Error('bundle_dir must stay under OPENSHIFT_BUNDLE_DIR or the preflight bundle root.');
+  }
+  return resolved;
+}
+
+function writeBundleFile(filePath, contents, mode) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, contents);
+  if (mode) fs.chmodSync(filePath, mode);
+}
+
+function exportInstallationBundle(body) {
+  const input = extractAgentInstallerInput(body);
+  const generated = generateAgentInstallerFiles(input);
+  if (!generated.valid) return generated;
+  const config = validateAgentInstaller(input).config;
+  const mode = ['existing', 'direct', 'offline'].includes(body.registry_mode)
+    ? body.registry_mode
+    : 'existing';
+  const registryUrl = registryUrlFromAgentConfig(config, body.registry_url);
+  const imageset = buildBundleImageSet(config, registryUrl);
+  const manual = buildBundleFieldManual(config, registryUrl, mode);
+  const checksums = {
+    'install-config.yaml': sha256Text(generated.installConfig),
+    'agent-config.yaml': sha256Text(generated.agentConfig),
+    'imageset-config.yaml': sha256Text(imageset)
+  };
+  const bundleDir = resolveInstallationBundleDir(body.bundle_dir, config.cluster_name);
+  writeBundleFile(path.join(bundleDir, 'install-config.yaml'), generated.installConfig, 0o640);
+  writeBundleFile(path.join(bundleDir, 'agent-config.yaml'), generated.agentConfig, 0o640);
+  writeBundleFile(path.join(bundleDir, 'imageset-config.yaml'), imageset, 0o640);
+  writeBundleFile(path.join(bundleDir, 'FIELD_MANUAL.md'), manual, 0o640);
+  Object.entries(generated.additionalManifests || {}).forEach(([rel, content]) => {
+    const safeRel = String(rel).split('/').filter(part => part && part !== '.' && part !== '..').join('/');
+    if (!safeRel) return;
+    writeBundleFile(path.join(bundleDir, 'manifests', safeRel), content, 0o640);
+  });
+  const credentialDir = path.join(bundleDir, 'credentials');
+  fs.mkdirSync(credentialDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(credentialDir, 0o700);
+  writeBundleFile(
+    path.join(credentialDir, 'pull-secret.json'),
+    `${config.pull_secret}\n`,
+    0o600
+  );
+  writeBundleFile(
+    path.join(credentialDir, 'README.txt'),
+    'Local credentials only. Do not commit this directory.\n',
+    0o600
+  );
+  const manifest = buildBundleManifest(config, { mode, registryUrl, media: body.media, checksums });
+  writeBundleFile(path.join(bundleDir, 'manifest.yaml'), manifest, 0o640);
+  return {
+    valid: true,
+    errors: [],
+    warnings: generated.warnings || [],
+    bundle_dir: bundleDir,
+    schema_version: 1,
+    cluster: config.cluster_name,
+    release: exactRelease(config.openshift_version),
+    registry_mode: mode,
+    command: `ansible-playbook -i localhost, -c local validate-bundle.yml -e ocp_disconnected_install_bundle_dir=${bundleDir}`
+  };
+}
+
+app.post('/api/openshift-agent/export-bundle', (req, res) => {
+  try {
+    const result = exportInstallationBundle(req.body || {});
+    if (!result.valid) {
+      res.status(400).json(result);
+      return;
+    }
+    append(`Exported disconnected install bundle to ${result.bundle_dir}\n`);
+    res.status(200).json(result);
+  } catch (err) {
+    res.status(400).json({ valid: false, errors: [err.message], warnings: [] });
+  }
+});
+
+app.get('/api/openshift-agent/run', (_req, res) => {
+  res.json(agentInstallJob);
+});
+
+app.post('/api/openshift-agent/run', (req, res) => {
+  const action = String(req.body?.action || '').trim();
+  if (!['image', 'pxe', 'install'].includes(action)) {
+    res.status(400).json({ error: 'action must be image, pxe, or install.' });
+    return;
+  }
+  if (agentInstallJob.running || activeRunChild) {
+    res.status(409).json({ error: 'An install or bootstrap run is already in progress.' });
+    return;
+  }
+
+  const input = { ...(req.body || {}) };
+  delete input.action;
+  const generated = generateAgentInstallerFiles(input);
+  if (!generated.valid) {
+    res.status(400).json(generated);
+    return;
+  }
+
+  const dir = writeAgentInstallDir(generated, input.cluster_name);
+  latestLog = '';
+  latestEvents = '';
+  append(`Agent install directory: ${dir}\n`);
+  agentInstallJob = { running: true, action, code: null, dir };
+  res.status(202).json({ ok: true, action, dir });
+
+  runAgentInstallSequence(action, dir)
+    .then(code => {
+      agentInstallJob = { running: false, action, code, dir };
+    })
+    .catch(err => {
+      append(`\nAgent install failed: ${err.message}\n`);
+      agentInstallJob = { running: false, action, code: 1, dir };
+    });
+});
+
 app.post('/api/openshift-agent/validate', (req, res) => {
   const validation = validateAgentInstaller(req.body);
   res.json({
@@ -6381,11 +6818,11 @@ async function handlePublishEncryptedJsonRequest(req, res) {
 
   const data = normalizePreflightPayload(req.body || {});
   const envName = data.environment || 'prod';
-  const repoUrl = data?.aap?.git_url || data?.git?.url || '';
+  const repoUrl = cleanGitRemoteUrl(data?.aap?.git_url || data?.git?.url || '');
   const branch = String(data?.aap?.git_branch || data?.git?.branch || 'main').trim() || 'main';
   const gitToken = data?.git?.token || '';
   const vaultPassword = String(data?.aap?.vault_password || data.vault_password || '').trim();
-  const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
+  const gitSkipTlsVerify = data?.git?.skip_tls_verify === true;
   const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
 
   if (!repoUrl) {
@@ -6437,6 +6874,7 @@ async function handlePublishEncryptedJsonRequest(req, res) {
     repoDir,
     token: gitToken,
     scmTool,
+    gitUsername: data?.git?.username || '',
     gitSkipTlsVerify,
     gitName: data?.git?.name || 'ADO Preflight UI',
     gitEmail: data?.git?.email || 'ado-preflight@localhost',
@@ -6506,6 +6944,7 @@ async function handlePublishEncryptedJsonRequest(req, res) {
     commitMessage: `Add encrypted preflight JSON ${vaultFile}`,
     token: gitToken,
     scmTool,
+    gitUsername: data?.git?.username || '',
     gitSkipTlsVerify
   });
 
@@ -6565,7 +7004,7 @@ async function handleScaffoldingRequest(req, res) {
 
   const data = normalizePreflightPayload(req.body);
   const envName = data.environment || 'prod';
-  const repoUrl = data?.aap?.git_url;
+  const repoUrl = cleanGitRemoteUrl(data?.aap?.git_url || '');
 
   if (!repoUrl) {
     event('Bootstrap failed: missing Project Git Source URL');
@@ -6587,23 +7026,11 @@ async function handleScaffoldingRequest(req, res) {
 
   const gitToken = data?.git?.token || '';
   const gitUsername = String(data?.git?.username || '').trim();
-  const scmToolEarly = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
   const aapEnabled = data?.aap?.enabled !== false;
   const installAapDuringBootstrap = installAapFullRequested(data);
   const attachAapLicenseDuringBootstrap = attachAapLicenseRequested(data);
   // License-only attach must not skip Using AAP / controller configuration.
   const configureAap = aapEnabled && !installAapDuringBootstrap;
-
-  if (scmToolEarly === 'bitbucket' && configureAap && gitToken && !gitUsername) {
-    event('Bootstrap failed: Bitbucket needs git.username for Controller project sync');
-    return res.status(400).json({
-      status: 'failed',
-      exitCode: 2,
-      error:
-        'Bitbucket is selected — set Git Configuration → Bitbucket username '
-        + 'so Controller Source Control credentials use username + HTTP access token (not OAuth2).'
-    });
-  }
 
   const standaloneRun = aapStandaloneRun(data);
   const hubUpdateCollectionOnly = standaloneRun;
@@ -6671,7 +7098,7 @@ async function handleScaffoldingRequest(req, res) {
   }
 
   if (aapEnabled && !hubPublishRequested) {
-    event('Note: Hub collection update is off (optional). Contoller will use whatever infra.ado is already on Hub.');
+    event('Note: Hub collection update is off (optional). Contoller will use whatever infra.automation_development_office is already on Hub.');
   }
 
   const keycloakOidcEnabled = data?.aap?.auth?.keycloak_oidc?.enabled === true;
@@ -6864,7 +7291,7 @@ async function handleScaffoldingRequest(req, res) {
   const ansibleExtraArgsRaw = resolveAnsibleExtraArgs(data);
   const ansibleExtraArgsShell = formatAnsibleExtraArgsForShell(ansibleExtraArgsRaw);
   const skipTlsVerify = data?.aap?.skip_tls_verify === true;
-  const gitSkipTlsVerify = data?.git?.skip_tls_verify !== false;
+  const gitSkipTlsVerify = data?.git?.skip_tls_verify === true;
   const encryptVaultFiles = data?.vault?.encrypt !== false;
   const bootstrapEnv = buildAnsibleEnv(skipTlsVerify, gitSkipTlsVerify);
 
@@ -6875,6 +7302,7 @@ async function handleScaffoldingRequest(req, res) {
   append(`Overwrite Generated Content (legacy all): ${overrideAll}\n`);
   append(`Git overrides: group_vars=${overrideGroupVarsEnv} job_workflow=${overrideJtWf} all=${overrideAll}\n`);
   append(`Additional Environments: ${(data.additional_environments || []).join(' ') || 'none'}\n`);
+  append(`Create additional group_vars: ${data.additional_environments_create_group_vars === true}\n`);
   append(`Ansible Verbosity: ${ansibleVerbosity} ${ansibleVerbosityFlag}\n`);
   append(`Ansible Extra Args: ${ansibleExtraArgsRaw || '(none)'}\n`);
   append(`Skip TLS Verification: ${skipTlsVerify}\n`);
@@ -6934,7 +7362,9 @@ async function handleScaffoldingRequest(req, res) {
   const scmTool = String(data?.scm_tool || 'gitlab').trim().toLowerCase();
   const gitUsesBearerAuth = usesBearerGitAuth(scmTool);
 
-  configureGitCredentials(repoUrl, gitToken, scmTool);
+  const gitUsernameResolved = resolveGitUsername(scmTool, gitUsername);
+  configureGitCredentials(repoUrl, gitToken, scmTool, gitUsernameResolved);
+  event(`Git auth user for clone/push/Controller SCM: ${gitUsernameResolved}`);
 
   const repoDir = path.join(workRoot, 'bootstrap-sample');
   const preflightFile = `ado-preflight-${envName}.json`;
@@ -6986,11 +7416,11 @@ ls -l "$COLLECTION_DIR" || true
 
 echo ""
 echo "=== Installing ADO Collection ==="
-ado_archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name 'infra-ado-*.tar.gz' | sort -V | tail -n 1)"
+ado_archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name 'infra-automation_development_office-*.tar.gz' | sort -V | tail -n 1)"
 if [ -z "$ado_archive" ]; then
   legacy_archive="$(find "$COLLECTION_DIR" -maxdepth 1 -name 'ado-*.tar.gz' | sort -V | tail -n 1)"
   if [ -z "$legacy_archive" ]; then
-    echo "ERROR: No infra-ado or legacy ado collection tarball found in $COLLECTION_DIR."
+    echo "ERROR: No infra-automation_development_office or legacy ado collection tarball found in $COLLECTION_DIR."
     exit 1
   fi
   echo "Installing $legacy_archive"
@@ -7037,7 +7467,7 @@ install_latest_collection kubernetes-core 1 "kubernetes.core"
 install_latest_collection redhat-openshift 1 "redhat.openshift"
 install_latest_collection community-kubernetes 0 "community.kubernetes"
 
-# infra.ado galaxy.yml dependencies (must be present for role imports)
+# infra.automation_development_office galaxy.yml dependencies (must be present for role imports)
 install_latest_collection community-crypto 1 "community.crypto"
 install_latest_collection community-general 0 "community.general"
 install_latest_collection community-grafana 0 "community.grafana"
@@ -7073,7 +7503,7 @@ else
   echo "WARN: \$APPLY_AAP_SRC missing — hub-only may skip Contoller org create"
 fi
 if [ -f "\$SKIP_EE_SRC" ]; then
-  find /workspace/collections -type d -path '*/infra/ado/roles/bootstrap_controller/tasks' -print -exec cp -f "\$SKIP_EE_SRC" {}/skip_existing_execution_environments.yml \\;
+  find /workspace/collections -type d -path '*/infra/automation_development_office/roles/bootstrap_controller/tasks' -print -exec cp -f "\$SKIP_EE_SRC" {}/skip_existing_execution_environments.yml \\;
 else
   echo "WARN: \$SKIP_EE_SRC missing — existing EE PATCH 403 may stop bootstrap"
 fi
@@ -7091,7 +7521,7 @@ APPLY_GALAXY_SRC="\${APPLY_GALAXY_HUB_CREDS_OVERLAY:-/opt/ado-ee/apply_galaxy_hu
 if [ -f "\$APPLY_GALAXY_SRC" ]; then
   find /workspace/collections -type f -name 'apply_galaxy_hub_credentials.yml' -print -exec cp -f "\$APPLY_GALAXY_SRC" {} \\;
   # Ensure file exists even if older collection tarball lacked it
-  DEST_DIR=\$(find /workspace/collections -type d -path '*/infra/ado/roles/bootstrap_controller/tasks' | head -n 1)
+  DEST_DIR=\$(find /workspace/collections -type d -path '*/infra/automation_development_office/roles/bootstrap_controller/tasks' | head -n 1)
   if [ -n "\$DEST_DIR" ] && [ ! -f "\$DEST_DIR/apply_galaxy_hub_credentials.yml" ]; then
     cp -f "\$APPLY_GALAXY_SRC" "\$DEST_DIR/apply_galaxy_hub_credentials.yml"
     echo "\$DEST_DIR/apply_galaxy_hub_credentials.yml"
@@ -7215,7 +7645,7 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
   if (!gitUsesBearerAuth) {
     await runStream(
       'git',
-      ['config', '--global', 'credential.helper', 'store'],
+      ['config', '--global', 'credential.helper', `store --file ${adoGitCredentialPaths().credentials}`],
       workRoot,
       'Configuring Git credential helper'
     );
@@ -7236,6 +7666,7 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
     branch: data.aap.git_branch,
     token: gitToken,
     scmTool,
+    gitUsername: gitUsernameResolved,
     gitSkipTlsVerify,
     skipTlsVerify
   });
@@ -7253,22 +7684,28 @@ for generated_file in ('MANIFEST.json', 'FILES.json'):
 
   event(bootstrapRepoExists(repoDir) ? 'Git repository ready' : 'Git repository cloned');
 
-  if (gitUsesBearerAuth && gitToken) {
+  if (gitAuthIncludePath) {
     await runStream(
       'git',
-      ['config', '--local', 'http.extraHeader', gitBearerExtraHeader(gitToken)],
+      ['config', '--local', '--unset-all', 'http.extraHeader'],
       repoDir,
-      'Configuring local Bitbucket Bearer auth for push'
+      'Clearing previous Bearer headers'
+    );
+    await runStream(
+      'git',
+      ['config', '--local', 'include.path', gitAuthIncludePath],
+      repoDir,
+      'Configuring local Bitbucket Bearer include file'
     );
   }
 
   ensureStarterFiles(repoDir, envName);
 
   // Playbook-adjacent collections/ wins over ANSIBLE_COLLECTIONS_PATH in Ansible
-  // 2.15+, so a vendored infra.ado from git would shadow the bootstrap tarball.
+  // 2.15+, so a vendored infra.automation_development_office from git would shadow the bootstrap tarball.
   const vendoredAdo = path.join(repoDir, 'collections', 'ansible_collections', 'infra', 'ado');
   if (fs.existsSync(vendoredAdo)) {
-    event(`Removing vendored infra.ado that shadows bootstrap collection: ${vendoredAdo}`);
+    event(`Removing vendored infra.automation_development_office that shadows bootstrap collection: ${vendoredAdo}`);
     fs.rmSync(vendoredAdo, { recursive: true, force: true });
   }
 
@@ -7338,26 +7775,16 @@ export ANSIBLE_COLLECTIONS_PATH=/workspace/collections:/usr/share/ansible/collec
 export ANSIBLE_COLLECTIONS_PATHS=/workspace/collections:/usr/share/ansible/collections
 export ANSIBLE_HOST_KEY_CHECKING=false
 export ANSIBLE_FORCE_COLOR=false
-${skipTlsVerify ? 'export ANSIBLE_TLS_VERIFY=false' : ''}
-export CONTROLLER_VERIFY_SSL=false
-export TOWER_VERIFY_SSL=false
-export REQUESTS_CA_BUNDLE=
-export CURL_CA_BUNDLE=
-export PYTHONHTTPSVERIFY=0
-${gitSkipTlsVerify ? 'export GIT_SSL_NO_VERIFY=true' : 'unset GIT_SSL_NO_VERIFY || true'}
+${ansibleTlsShellLines({ controllerSkipTls: skipTlsVerify, gitSkipTls: gitSkipTlsVerify })}
 
 cd ${repoDir}
 export ANSIBLE_VAULT_PASSWORD_FILE=.vault_pass
 
-${gitSkipTlsVerify
-  ? 'git config --local http.sslVerify false || true'
-  : 'git config --local http.sslVerify true || true'}
-${gitUsesBearerAuth && gitToken
-  ? `git config --local http.extraHeader ${JSON.stringify(gitBearerExtraHeader(gitToken))} || true`
-  : ''}
+git config --local http.sslVerify ${gitHttpSslVerifyValue(gitSkipTlsVerify)} || true
+${gitToken ? gitBashAuthSetup(repoUrl) : ''}
 
 echo ""
-echo "=== Remove playbook-adjacent vendored infra.ado (shadows /workspace/collections) ==="
+echo "=== Remove playbook-adjacent vendored infra.automation_development_office (shadows /workspace/collections) ==="
 rm -rf collections/ansible_collections/infra/ado
 
 echo ""
@@ -7420,13 +7847,9 @@ ansible-playbook \\
   -e generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\
   -e bootstrap_generate_playbook_repo_git_mode=${autoGitPush ? 'push' : 'manual'} \\
   -e generate_playbook_repo_git_url=${JSON.stringify(repoUrl)} \\
-  -e bootstrap_generate_playbook_repo_git_url=${JSON.stringify(repoUrl)}${gitToken ? ` \\
-  -e generate_playbook_repo_git_token=${JSON.stringify(gitToken)} \\
-  -e bootstrap_generate_playbook_repo_git_token=${JSON.stringify(gitToken)}` : ''} \\
+  -e bootstrap_generate_playbook_repo_git_url=${JSON.stringify(repoUrl)} \\
   -e generate_playbook_repo_git_ssl_verify=${gitSkipTlsVerify ? 'false' : 'true'} \\
   -e bootstrap_generate_playbook_repo_git_ssl_verify=${gitSkipTlsVerify ? 'false' : 'true'} \\
-  -e generate_playbook_repo_git_auth_mode=${gitUsesBearerAuth ? 'bearer' : 'basic'} \\
-  -e bootstrap_generate_playbook_repo_git_auth_mode=${gitUsesBearerAuth ? 'bearer' : 'basic'} \\
   -e generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e bootstrap_generate_playbook_repo_git_branch="${data.aap.git_branch}" \\
   -e generate_playbook_repo_git_commit_message="Generate ADO bootstrap content for ${envName}" \\

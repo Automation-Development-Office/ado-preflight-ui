@@ -5,10 +5,10 @@ Operational issues seen in the lab that are not always fixed yet. Click a title 
 ## Index
 
 - [Hub large-collection publish timeout](#hub-large-collection-publish-timeout) —
-  **Fixed in `infra.ado` 1.3.16+** (longer pulp waits; large tarballs get ~20m).
+  **Fixed in `infra.automation_development_office` 1.3.16+** (longer pulp waits; large tarballs get ~20m).
   Older preflight images may still hit the old ~3 min timeout.
 - [Hub EE skopeo 502 during layer upload](#hub-ee-skopeo-502-during-layer-upload) —
-  **Mitigated in `infra.ado` 1.3.16+** (skopeo + Ansible retries). Persistent
+  **Mitigated in `infra.automation_development_office` 1.3.16+** (skopeo + Ansible retries). Persistent
   gateway/proxy outages can still fail after retries.
 
 ---
@@ -16,7 +16,7 @@ Operational issues seen in the lab that are not always fixed yet. Click a title 
 ## Hub large-collection publish timeout
 
 **Status:** Fixed in collection (`bootstrap_controller` pulp wait knobs). Redeploy
-preflight with a rebuilt `infra-ado-*.tar.gz` to pick it up.
+preflight with a rebuilt `infra-automation_development_office-*.tar.gz` to pick it up.
 
 **Where it showed up**
 

@@ -107,6 +107,15 @@
   font-weight: 600;
 }
 .ado-assistant.dark .ado-assistant-readme-block summary { color: #73bcf7; }
+.ado-assistant-follow-up { margin: 8px 0 0; padding: 8px 10px; background: #f0f7ff; border-left: 3px solid #06c; }
+.ado-assistant.dark .ado-assistant-follow-up { background: #1a2836; }
+.ado-assistant-command { margin-top: 8px; }
+.ado-assistant-command-label { font-size: 12px; font-weight: 700; }
+.ado-assistant-command pre { margin: 4px 0; }
+.ado-assistant-sources { margin-top: 8px; }
+.ado-assistant-source { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; color: #06c; cursor: pointer; overflow-wrap: anywhere; }
+.ado-assistant.dark .ado-assistant-source { color: #73bcf7; }
+.ado-assistant header { gap: 8px; }
 .ado-assistant-highlight { outline: 3px solid #06c !important; outline-offset: 5px; scroll-margin: 110px; }
 @media (min-width: 1000px) { .ado-assistant-open > .pf-v6-c-page__main-container { margin-right: 420px; } }
 @media (max-width: 999px) { .ado-assistant { width: min(420px, 94vw); } }

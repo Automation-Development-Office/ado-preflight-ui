@@ -5,7 +5,7 @@ test.describe('preflight UI smoke', () => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: /Ansible Automation Pre-Flight/i })).toBeVisible();
     await expect(page.getByRole('tab', { name: 'Core Environment' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Core Environment Information' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Step 1\.\s+Core Environment/ })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Upload JSON' })).toBeVisible();
   });
 
