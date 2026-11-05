@@ -2605,6 +2605,7 @@ function normalizePreflightPayload(input) {
     data.aap.hub_publish_preflight_collection_names = data.aap.hub_publish_preflight_collections
       ? [
         'kubernetes.core',
+        'ansible.eda',
         'redhat.openshift',
         'redhat.satellite',
         'redhat.rhel_idm',

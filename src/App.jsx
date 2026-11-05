@@ -1820,6 +1820,7 @@ const HUB_EE_BAKED_SOURCE = 'docker-archive:/opt/ado-ee/ado-ee.docker.tar';
 /** Preflight Hub collections (excludes infra.automation_development_office — that has its own checkbox). */
 const PREFLIGHT_HUB_COLLECTION_OPTIONS = [
   'kubernetes.core',
+  'ansible.eda',
   'redhat.openshift',
   'redhat.satellite',
   'redhat.rhel_idm',
