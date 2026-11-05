@@ -238,7 +238,7 @@ export { playbookFromArgv, parseExtraVars };
 
 function roleReadme(documents, role) {
   if (!role || !Array.isArray(documents)) return [];
-  const path = `infra.ado/roles/${role}/README.md`;
+  const path = `infra.automation_development_office/roles/${role}/README.md`;
   const doc = documents.find(d => d.path.toLowerCase() === path.toLowerCase());
   return doc ? [doc] : [];
 }

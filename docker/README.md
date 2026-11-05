@@ -1,6 +1,6 @@
 # Preflight UI overlays (non-ado only)
 
-Bootstrap Contoller logic ships in the `infra-ado-*.tar.gz` under `collections/`.
+Bootstrap Contoller logic ships in the `infra-automation_development_office-*.tar.gz` under `collections/`.
 Do **not** add `bootstrap_controller` task forks here.
 
 Kept here only because they patch **infra.aap_configuration** (AAP 2.7 rejects

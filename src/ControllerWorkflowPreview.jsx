@@ -256,7 +256,7 @@ export default function ControllerWorkflowPreview({
 
         <div className="ado-wf-footer">
           <span>
-            Seeded from infra.ado Contoller workflow YAML — not a live AAP API poll.
+            Seeded from infra.automation_development_office Contoller workflow YAML — not a live AAP API poll.
           </span>
           <button type="button" className="pf-v5-c-button pf-m-secondary" onClick={onClose}>
             Close

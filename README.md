@@ -479,13 +479,13 @@ remain org-scoped (`ADO-ee` / `ORG-ee`) as a separate field.
 
 When job templates use a stock EE (`ee-supported-rhel9`) instead of ADO EE,
 Contoller only installs `collections/requirements.yml` (including the local
-`type: dir` vendored `infra.ado`) if the **organization already has Galaxy
+`type: dir` vendored `infra.automation_development_office`) if the **organization already has Galaxy
 credentials** attached in Contoller.
 
 Quick start: attach Galaxy credentials once (preflight Galaxy tab, or Contoller
 UI). You do **not** need to re-check the Galaxy tab on every bootstrap if they
 are already on the org. Push ADO EE is the other option when you want
-`infra.ado` baked into the EE.
+`infra.automation_development_office` baked into the EE.
 
 ### IDM
 
@@ -499,7 +499,7 @@ IDM configuration includes:
 - Optional AD Trust settings (forest/realm, AD admin password, one-way or
   two-way trust, and AD group mapping for SSH/sudo)
 
-Selecting IdM AD Trust drives collection role `infra.ado.idm_ad_trust` and the
+Selecting IdM AD Trust drives collection role `infra.automation_development_office.idm_ad_trust` and the
 `ADO | IdM Manage AD Trust` job template.
 
 ### Compliance and STIG
@@ -582,7 +582,7 @@ The `X` button in the credential tab removes that credential.
 The UI includes one checkbox:
 
 ```text
-Add infra.ado collection to validated content in AAP Hub
+Add infra.automation_development_office collection to validated content in AAP Hub
 ```
 
 When enabled, generated vars target the ADO collection at validated content. The current UI writes the needed intent and generated variables. Actual hub publish/import behavior still depends on having the hub endpoint and credentials available to the automation.
@@ -1077,7 +1077,7 @@ Enable skip TLS for the relevant system:
 - Job and workflow templates are generated only for selected components.
 - RHEL and Satellite do not need storage values.
 - OpenShift-style components can still use storage classes.
-- The UI prefers the unified `infra.ado` collection when present.
+- The UI prefers the unified `infra.automation_development_office` collection when present.
 
 ---
 

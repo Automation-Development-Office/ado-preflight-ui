@@ -1,74 +1,72 @@
 # AGENTS.md — ado-preflight-ui
 
-Containerized questionnaire + runner that turns operator answers into preflight JSON and invokes `infra.ado` bootstrap behavior.
+Containerized questionnaire + runner that turns operator answers into a bootstrap
+repo via `infra.automation_development_office`. This repo is the **form**; bootstrap logic lives in `ado`.
 
-**This repo is the form/runner. Portable bootstrap semantics live in `ado` / `infra.ado`.**
+## Always-on reminder
 
-## Product source-of-truth rule
+Committed copy (ado): `../ado/docs/ADO-LAB-RESET.md` (or `ado/docs/ADO-LAB-RESET.md`).
 
-For a product capability:
+```text
+ADO lab: say "ADO-LAB Reset" to reload context. Read each open repo's AGENTS.md.
+Lab rules: /home/chelliot/openshift/git/github-ado/.cursor/rules/local/
+Do not ask for passwords — use lab-creds + ~/Downloads/ado-preflight-*.json.
+Fix code not Controller. User runs restart_pod.sh / preflight / sync / relaunch.
+```
 
-1. verify/implement environment-agnostic, repeatable behavior in `infra.ado` first;
-2. then expose/configure that capability through preflight UI as needed;
-3. verify generated bootstrap output;
-4. never make UI-only logic the sole implementation of bootstrap semantics.
+## Lab context reload
 
-## Environment agnostic + repeatable
+When the user says **`ADO-LAB Reset`** (any casing), treat it as a full context reload.
+Do not ask them to paste the checklist — the phrase **is** the checklist.
 
-- Do not hard-code Chad's lab URLs, domains, clusters, namespaces, credentials, storage classes, orgs, SCM endpoints, or other local values into reusable UI defaults/normalization.
-- Use established payload fields and configuration inputs.
-- Import/export of the same desired-state JSON must be stable.
-- UI and CLI execution of equivalent intent must remain equivalent.
-- Preserve disconnected operation; no new internet dependency without explicit approval/documentation.
+1. Re-read `../.cursor/rules/local/` (`chad-lab-ado.mdc`, `lab-creds.mdc`, `agent-reset.mdc`)
+2. Re-read `.cursor/rules/local/chad-lab-preflight.mdc` in this repo
+3. Skim portal / lab-tools local rules if the task touches them
+4. Load newest matching `~/Downloads/ado-preflight-*.json`
+5. Confirm baked `collections/infra-automation_development_office-*.tar.gz` matches `ado/galaxy.yml`
+6. **Fix code, not Controller** — agent builds/copies tarball; user redeploys this UI and re-bootstraps
 
-## Hard rules
+`.cursor/` is gitignored. Never commit preflight JSON exports or secrets.
+
+## Canonical path
+
+`/home/chelliot/openshift/git/github-ado/ado-preflight-ui` — **not** `…/git/ado-preflight-ui`.
+
+## Cross-repo map
+
+```text
+ado/                    → infra.automation_development_office collection source
+ado-preflight-ui/       → this repo — form + server.js + baked tarball
+bootstrap-sample/       → generated bootstrap output (Controller SCM)
+ado-cluster-portal/     → lab portal (links to this UI)
+lab-tools-dont-delete/  → IdM / VPN / Satellite ops (separate Controller project)
+```
+
+## Hard rules (this repo)
 
 | Do | Do not |
-|---|---|
-| Keep UI = CLI for the same preflight JSON + equivalent `-e` flags | Put bootstrap semantics only in `server.js` / `App.jsx` |
-| Keep async bootstrap: `POST /api/bootstrap` -> 202, then poll logs/result | Drop async/recap behavior or replace it with a synchronous route |
-| Let form values override imported JSON only where the existing contract says so | Invent new payload keys without updating ADO contract |
-| Schema changes: update `server.js` + `src/App.jsx` **and** `ado` env generation/contract | Change payload shape in UI only |
-| After collection fixes, rebuild/copy the collection tarball used by this container | Assume neighboring live `ado` checkout is what the runtime executes |
-| Add/update `.changeset/*` for user-visible UI behavior | Hand-wave release/change documentation |
-| OpenShift Apps Domain autofills as `apps.<Base Infrastructure Domain>` and routed hostnames as `<prefix>.<apps_domain>`, but both stay editable. A custom value sets `apps_domain_manual` / `hostname_manual` | Lock those fields read-only, or overwrite a typed override on the next domain change |
-| Quay **Use existing MinIO** shows API host, port, namespace, bucket, access key, and secret key on the Quay tab. It does not select or deploy MinIO | Hide those fields, or add Deploy MinIO because the Quay option is checked |
-| Every password/token/secret field has Show/Hide and remasks after 30 seconds (`SECRET_REVEAL_MS`) | Ship a bare `type="password"` input with no Show button or no auto-hide |
+|----|--------|
+| Keep UI ≡ CLI for the same preflight JSON + `-e` flags | Put bootstrap semantics only in `server.js` / `App.jsx` |
+| Keep async bootstrap: `POST /api/bootstrap` → **202**, poll logs/result | `git checkout` the completion path; drop async/recap |
+| Form values override imported JSON for runtime (verbosity, etc.) | Treat browser `Unexpected token '<'` as ansible failure (often route timeout) |
+| Schema changes: update `server.js` + `src/App.jsx` **and** `ado` env gen | Change payload shape in UI only |
+| After UI-only fixes: `npm run build` + `./restart_pod.sh` | Assume live git checkout of `ado` is what the container runs |
 
-Preflight executes the baked `collections/infra-ado-*.tar.gz` inside the container.
+Preflight runs the collection from `collections/infra-automation_development_office-*.tar.gz` inside the container.
 
-## Before editing
+## Deploy
 
-1. Read this file and `../ado/docs/ADO_DEVELOPMENT_MODEL.md`.
-2. Inspect the related `infra.ado` role/schema/generator first.
-3. Inspect current `server.js` normalization and `src/App.jsx` payload creation.
-4. State the existing pattern being reused.
-5. Decide whether the requested change belongs in ADO first.
+| Target | How |
+|--------|-----|
+| Local | `./restart_pod.sh` → http://127.0.0.1:8080 |
+| OpenShift | Image push → `ado-portal` → rollout → hard refresh |
 
-## Validation
+Smoke when idle: `GET /api/bootstrap/result` returns JSON (not HTML).
 
-For UI changes, run the repository's existing build/test/lint workflow. At minimum, when applicable:
+## After `ado` collection fixes
 
 ```bash
-npm run build
+cd ../ado && ansible-galaxy collection build -o /tmp
+cp /tmp/infra-automation_development_office-*.tar.gz ../ado-preflight-ui/collections/
+# User: ./restart_pod.sh → import JSON → bootstrap → push → Controller sync → relaunch
 ```
-
-Also run any repo-defined test/lint scripts in `package.json` and CI for the changed surface. For schema/bootstrap changes, validation is incomplete until the matching `infra.ado` lint/Molecule checks pass and the rebuilt collection tarball is tested by Preflight.
-
-After `ado` collection changes:
-
-```bash
-cd ../ado
-ansible-galaxy collection build -o /tmp
-cp /tmp/infra-ado-*.tar.gz ../ado-preflight-ui/collections/
-```
-
-Then exercise the normal preflight path with a saved JSON payload and verify `/api/bootstrap/result` returns JSON rather than HTML when idle.
-
-## Release discipline
-
-User-visible changes use Changesets under `.changeset/`. Preserve the repository's established release workflow and GHCR tagging semantics.
-
-## ADO-LAB Reset
-
-When the user says `ADO-LAB Reset`, read `../ado/docs/ADO-LAB-RESET.md`, then read local uncommitted agent rules if present. Never commit `.cursor/`, secrets, or preflight JSON exports.

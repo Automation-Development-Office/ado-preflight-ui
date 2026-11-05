@@ -74,6 +74,6 @@ oc -n aap patch ansibleautomationplatform aap --type=merge -p '{
 Do **not** restart shared `aap-postgres-15` for Hub-only issues anymore.
 
 ## Collection role
-`infra.ado.ocp_aap_hub_harden` pins CR settings and installs/updates
+`infra.automation_development_office.ocp_aap_hub_harden` pins CR settings and installs/updates
 `aap-hub-stability`. Defaults assume dedicated Hub Postgres pod
 `aap-hub-dedicated-postgres-0`.
