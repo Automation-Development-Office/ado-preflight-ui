@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   applyRhbkOidcClientPreset,
   autoAddRhbkClientPresets,
@@ -638,4 +639,39 @@ test('mixed Grafana OpenShift BookStack MinIO auto-add honors Grafana disable', 
   assert.deepEqual(ids(copy), ['OpenshiftDev', 'bookstack', 'minio']);
   assert.ok(!ids(copy).includes('grafana-client'));
   assert.ok(!ids(copy).includes('gitlab'));
+});
+
+test('389ds + Grafana + RHBK auto-add gives Grafana a client and 389ds none', () => {
+  const presets = [
+    preset('openshift', 'OpenshiftDev', 'https://oauth-openshift.apps.example.test'),
+    preset('grafana', 'grafana-client', 'https://grafana.apps.example.test')
+  ];
+  const state = {
+    components: ['openshift'],
+    component_apps: { openshift: ['rhbk', 'grafana', 'dirsrv'] },
+    component_options: { rhbk: ['client'], grafana: ['oidc'] },
+    openshift: { oauth_rhbk: { client_id: 'OpenshiftDev' } },
+    component_config: {
+      rhbk: { clients: [{ id: '', name: '', redirect_uris: '', web_origins: '' }] },
+      grafana: { oidc: { enabled: true } },
+      dirsrv: { hostname: 'dirsrv.apps.example.test' }
+    }
+  };
+  const { copy } = autoAddRhbkClientPresets(state, presets);
+  assert.deepEqual(ids(copy), ['OpenshiftDev', 'grafana-client']);
+  assert.equal(copy.component_config.grafana.oidc.client_id, 'grafana-client');
+  assert.ok(!ids(copy).some(id => /dirsrv|389ds|389|ldap/i.test(id)));
+  assert.equal(copy.component_config.dirsrv.oidc_client_id, undefined);
+});
+
+test('buildRhbkOidcClientPresets in App.jsx does not offer a 389ds client', () => {
+  const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const start = app.indexOf('function buildRhbkOidcClientPresets');
+  assert.notEqual(start, -1);
+  const end = app.indexOf('\nfunction ', start + 1);
+  const fn = app.slice(start, end);
+  assert.match(fn, /key: 'grafana'/);
+  assert.equal(fn.includes("key: 'dirsrv'"), false);
+  assert.equal(fn.includes("source: 'dirsrv'"), false);
+  assert.equal(fn.includes('389ds'), false);
 });
