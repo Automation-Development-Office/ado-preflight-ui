@@ -22,6 +22,7 @@ const {
   ansibleTlsShellLines
 } = require('./git-tls');
 const { chooseArchive } = require('./collection-archive');
+const { checkOpenShiftVerifySsl } = require('./verify-ssl');
 const { safeAdoDocRelative, safePreflightDoc } = require('./doc-paths');
 
 process.env.NODE_OPTIONS = '--max-old-space-size=256';
@@ -2997,7 +2998,12 @@ function normalizePreflightPayload(input) {
   }
   if (data.openshift.oauth_rhbk.client_id === undefined) data.openshift.oauth_rhbk.client_id = '';
   if (data.openshift.oauth_rhbk.keycloak_hostname === undefined) data.openshift.oauth_rhbk.keycloak_hostname = '';
-  if (data.openshift.oauth_rhbk.realm === undefined) data.openshift.oauth_rhbk.realm = 'rhlab';
+  // No lab realm default: empty inherits the RHBK realm, or must be set for an existing Keycloak.
+  if (data.openshift.oauth_rhbk.realm === undefined) data.openshift.oauth_rhbk.realm = '';
+  if (data.openshift.oauth_rhbk.admin_user === undefined) data.openshift.oauth_rhbk.admin_user = '';
+  if (data.openshift.oauth_rhbk.admin_password === undefined) data.openshift.oauth_rhbk.admin_password = '';
+  // verify_ssl is left as sent: absent/blank means "verify" (the role default), and an
+  // existing explicit value in the bootstrap repo is not overwritten by a default.
   if (data.openshift.oauth_rhbk.extra_scopes === undefined) data.openshift.oauth_rhbk.extra_scopes = 'groups';
   if (data.openshift.oauth_rhbk.mapping_method === undefined) data.openshift.oauth_rhbk.mapping_method = 'claim';
   if (data.openshift.oauth_rhbk.fetch_client_secret === undefined) {
@@ -6818,6 +6824,11 @@ async function handlePublishEncryptedJsonRequest(req, res) {
   event('Publish encrypted JSON started');
 
   const data = normalizePreflightPayload(req.body || {});
+  const verifySslProblem = checkOpenShiftVerifySsl(data);
+  if (verifySslProblem) {
+    event('Publish failed: invalid openshift.oauth_rhbk.verify_ssl');
+    return res.status(400).json({ error: verifySslProblem });
+  }
   const envName = data.environment || 'prod';
   const repoUrl = cleanGitRemoteUrl(data?.aap?.git_url || data?.git?.url || '');
   const branch = String(data?.aap?.git_branch || data?.git?.branch || 'main').trim() || 'main';
@@ -7004,6 +7015,11 @@ async function handleScaffoldingRequest(req, res) {
   event('Bootstrap started');
 
   const data = normalizePreflightPayload(req.body);
+  const verifySslProblem = checkOpenShiftVerifySsl(data);
+  if (verifySslProblem) {
+    event('Bootstrap failed: invalid openshift.oauth_rhbk.verify_ssl');
+    return res.status(400).json({ error: verifySslProblem });
+  }
   const envName = data.environment || 'prod';
   const repoUrl = cleanGitRemoteUrl(data?.aap?.git_url || '');
 
