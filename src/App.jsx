@@ -21,6 +21,24 @@ import {
 } from './profileSelection.mjs';
 import { explainLocalPlaybookCommand } from './playbookExplain.mjs';
 import { localCollectionDoc } from './localCollectionDoc.mjs';
+import {
+  applyRhbkOidcClientPreset,
+  autoAddRhbkClientPresets,
+  formatRhbkClientErrors,
+  rhbkOidcPresetShouldAutoAdd,
+  normalizeDevHubClientFields,
+  openShiftVerifySsl,
+  openshiftOauthRedirectUri,
+  removeRhbkClientAt,
+  resolveOpenShiftOauthSettings,
+  resolveOpenShiftOidcClientId,
+  resolveOpenShiftOidcIdpName,
+  rhbkClientIsManaged,
+  updateRhbkClientField,
+  validateOidcInputs,
+  validateOpenShiftOauthSettings,
+  validateRhbkClientReferences
+} from './rhbkClients.mjs';
 import { applyImportedGitSkipTls, gitTlsStage } from '../git-tls.js';
 import {
   Page,
@@ -440,32 +458,10 @@ function rhbkEnvClientLabel(env, product) {
   return `${product}${suffix}`;
 }
 
-/** Upsert a Keycloak client row; replace a blank row when present. */
-function upsertRhbkClientRow(clients, next) {
-  const list = Array.isArray(clients) ? clients.map(c => ({ ...c })) : [];
-  const id = String(next.id || '').trim();
-  const existingIdx = list.findIndex(c => String(c.id || '').trim() === id && id);
-  if (existingIdx >= 0) {
-    list[existingIdx] = { ...list[existingIdx], ...next };
-    return list;
-  }
-  const emptyIdx = list.findIndex(
-    c => !String(c.id || '').trim()
-      && !String(c.name || '').trim()
-      && !String(c.redirect_uris || '').trim()
-      && !String(c.web_origins || '').trim()
-  );
-  if (emptyIdx >= 0) {
-    list[emptyIdx] = { id: '', name: '', redirect_uris: '', web_origins: '', ...next };
-    return list;
-  }
-  list.push({ id: '', name: '', redirect_uris: '', web_origins: '', ...next });
-  return list;
-}
-
 /**
  * Build Keycloak OIDC client presets from selected apps / hostnames already on
- * the form (apps domain, Grafana, GitLab, BookStack, NetBox, Quay, MinIO, Dev Hub).
+ * the form (apps domain, Grafana, BookStack, NetBox, Quay, MinIO, Dev Hub).
+ * GitLab is omitted: no GitLab OIDC role consumes a Keycloak client.
  */
 function buildRhbkOidcClientPresets(source) {
   const env = source?.environment || '';
@@ -485,7 +481,7 @@ function buildRhbkOidcClientPresets(source) {
       client: {
         id: label,
         name: label,
-        redirect_uris: `${oauthOrigin}/oauth2callback/Keycloak/*`,
+        redirect_uris: openshiftOauthRedirectUri(apps, resolveOpenShiftOidcIdpName(source)),
         web_origins: oauthOrigin,
         source: 'openshift'
       }
@@ -516,24 +512,6 @@ function buildRhbkOidcClientPresets(source) {
         redirect_uris: `${origin}/login/generic_oauth,${origin}/*`,
         web_origins: origin,
         source: 'grafana'
-      }
-    });
-  }
-
-  const gitlabHost = resolveComponentHostname(source, 'gitlab')
-    || (isComponentSelectedInForm(source, 'gitlab') ? grafanaDefaults.gitlab : '');
-  if (gitlabHost) {
-    const origin = httpsOriginFromHost(gitlabHost);
-    presets.push({
-      key: 'gitlab',
-      label: 'GitLab',
-      hint: gitlabHost,
-      client: {
-        id: 'gitlab',
-        name: rhbkEnvClientLabel(env, 'GitLab'),
-        redirect_uris: `${origin}/users/auth/openid_connect/callback`,
-        web_origins: origin,
-        source: 'gitlab'
       }
     });
   }
@@ -640,83 +618,6 @@ function buildRhbkOidcClientPresets(source) {
   return presets;
 }
 
-/** Apply a preset client into rhbk.clients and mirror matching app OIDC client IDs. */
-function applyRhbkOidcClientPreset(copy, presetClient) {
-  if (!copy.component_config) copy.component_config = {};
-  if (!copy.component_config.rhbk) copy.component_config.rhbk = {};
-  const rhbk = copy.component_config.rhbk;
-  rhbk.clients = upsertRhbkClientRow(rhbk.clients, {
-    id: presetClient.id,
-    name: presetClient.name,
-    redirect_uris: presetClient.redirect_uris,
-    web_origins: presetClient.web_origins
-  });
-
-  if (presetClient.source === 'openshift') {
-    rhbk.client = presetClient.id;
-    rhbk.client_name = presetClient.name;
-    rhbk.client_redirect_uris = presetClient.redirect_uris;
-    rhbk.client_web_origins = presetClient.web_origins;
-    rhbk.openshift_oidc_client_id = presetClient.id;
-  }
-
-  if (presetClient.source === 'grafana') {
-    if (!copy.component_config.grafana) copy.component_config.grafana = {};
-    if (!copy.component_config.grafana.oidc) copy.component_config.grafana.oidc = {};
-    copy.component_config.grafana.oidc.client_id = presetClient.id;
-    if (copy.component_config.grafana.oidc.enabled === undefined) {
-      copy.component_config.grafana.oidc.enabled = true;
-    }
-  }
-
-  if (presetClient.source === 'bookstack') {
-    if (!copy.component_config.bookstack) copy.component_config.bookstack = {};
-    copy.component_config.bookstack.oidc_client_id = presetClient.id;
-    if (copy.component_config.bookstack.oidc_enabled === undefined) {
-      copy.component_config.bookstack.oidc_enabled = true;
-    }
-  }
-
-  if (presetClient.source === 'netbox') {
-    if (!copy.component_config.netbox) copy.component_config.netbox = {};
-    copy.component_config.netbox.oidc_client_id = presetClient.id;
-    if (copy.component_config.netbox.oidc_enabled === undefined) {
-      copy.component_config.netbox.oidc_enabled = true;
-    }
-  }
-
-  if (presetClient.source === 'gitlab') {
-    if (!copy.component_config.gitlab) copy.component_config.gitlab = {};
-    copy.component_config.gitlab.oidc_client_id = presetClient.id;
-    if (copy.component_config.gitlab.oidc_enabled === undefined) {
-      copy.component_config.gitlab.oidc_enabled = true;
-    }
-  }
-
-  if (presetClient.source === 'quay') {
-    if (!copy.component_config.quay) copy.component_config.quay = {};
-    copy.component_config.quay.oidc_client_id = presetClient.id;
-    if (copy.component_config.quay.oidc_enabled === undefined) {
-      copy.component_config.quay.oidc_enabled = true;
-    }
-  }
-
-  if (presetClient.source === 'minio') {
-    if (!copy.component_config.minio) copy.component_config.minio = {};
-    copy.component_config.minio.oidc_client_id = presetClient.id;
-    if (copy.component_config.minio.oidc_enabled === undefined) {
-      copy.component_config.minio.oidc_enabled = true;
-    }
-  }
-
-  if (presetClient.source === 'dev_hub') {
-    if (!copy.component_config.dev_hub) copy.component_config.dev_hub = {};
-    copy.component_config.dev_hub.oidc_client_id = presetClient.id;
-  }
-
-  return copy;
-}
-
 function syncDevHubGitlabTokenFromGit(source, { force = false } = {}) {
   const copy = source;
   const gitToken = String(copy?.git?.token || '').trim();
@@ -743,6 +644,29 @@ function isGrafanaSelected(source) {
   const openshiftApps = source?.component_apps?.openshift || [];
   const rhelApps = source?.component_apps?.rhel || [];
   return openshiftApps.includes('grafana') || rhelApps.includes('grafana');
+}
+
+/** Active OIDC integrations whose Keycloak client is missing (blocks bootstrap, not export). */
+function rhbkClientReferenceErrors(source) {
+  return validateRhbkClientReferences(source, {
+    isSelected: key => (key === 'rhbk' ? isRhbkSelected(source) : isComponentSelectedInForm(source, key))
+  });
+}
+
+function oidcSelection(source) {
+  return {
+    isSelected: key => (key === 'rhbk' ? isRhbkSelected(source) : isComponentSelectedInForm(source, key))
+  };
+}
+
+/** OpenShift OIDC connection problems (Keycloak host, realm, admin credentials). */
+function openShiftOauthErrors(source) {
+  return validateOpenShiftOauthSettings(source, oidcSelection(source));
+}
+
+/** Everything that blocks a bootstrap run: client references plus OpenShift OIDC inputs. */
+function oidcInputErrors(source) {
+  return validateOidcInputs(source, oidcSelection(source));
 }
 
 function defaultRhbkRealm(source) {
@@ -2674,7 +2598,11 @@ const defaults = {
       idp_name: 'Keycloak',
       client_id: '',
       keycloak_hostname: '',
-      realm: 'rhlab',
+      // Empty = inherit from RHBK when it is part of the run; required otherwise.
+      realm: '',
+      admin_user: '',
+      admin_password: '',
+      verify_ssl: true,
       extra_scopes: 'groups',
       mapping_method: 'claim',
       fetch_client_secret: true
@@ -3443,20 +3371,14 @@ function App() {
     const rhbkOpts = data.component_options?.rhbk || [];
     if (!rhbkOpts.includes('client')) return;
     setData(prev => {
-      let copy = JSON.parse(JSON.stringify(prev));
-      const existing = new Set(
-        (copy.component_config?.rhbk?.clients || [])
-          .map(row => String(row?.id || '').trim())
-          .filter(Boolean)
+      const clone = JSON.parse(JSON.stringify(prev));
+      // Forget a removal only when the app is no longer offered (component deselected);
+      // with no apps domain nothing is offered, so keep dismissals as they are.
+      const { copy, changed } = autoAddRhbkClientPresets(
+        clone,
+        buildRhbkOidcClientPresets(clone),
+        { prune: Boolean(resolveAppsDomain(clone)) }
       );
-      let changed = false;
-      buildRhbkOidcClientPresets(copy).forEach(preset => {
-        const id = String(preset.client?.id || '').trim();
-        if (!id || existing.has(id)) return;
-        copy = applyRhbkOidcClientPreset(copy, preset.client);
-        existing.add(id);
-        changed = true;
-      });
       return changed ? copy : prev;
     });
   }, [
@@ -3468,8 +3390,10 @@ function App() {
     data.component_config?.quay?.hostname,
     data.component_config?.minio?.console_hostname,
     data.component_config?.grafana?.hostname,
+    data.component_config?.grafana?.oidc?.enabled,
     data.component_config?.gitlab?.hostname,
-    data.component_config?.dev_hub?.hostname
+    data.component_config?.dev_hub?.hostname,
+    data.openshift?.oauth_rhbk?.idp_name
   ]);
 
   useEffect(() => {
@@ -4512,6 +4436,7 @@ function App() {
       delete merged.component_config.idm.storage;
     }
     merged = hydrateSelectedComponentConfigs(merged);
+    merged = normalizeDevHubClientFields(merged);
     if (!merged.component_options) merged.component_options = {};
     if (Array.isArray(merged.component_options.openshift)) {
       // Legacy nfs_csi / iscsi_csi options → Storage class parent + driver toggles.
@@ -4881,6 +4806,7 @@ function App() {
 
   const buildPreflightPayload = () => {
     const payload = hydrateSelectedComponentConfigs(pruneInactiveComponentApps(data));
+    normalizeDevHubClientFields(payload);
     syncPlatformInstallOptions(payload);
     if (!payload.component_config) payload.component_config = {};
     foldHostnameIntoHostList(payload.component_config.patching);
@@ -6990,6 +6916,18 @@ function App() {
         setBootstrapStatus('failed');
         return;
       }
+      const rhbkClientErrors = oidcInputErrors(data);
+      if (rhbkClientErrors.length) {
+        setImportStatus('Fix OIDC settings');
+        setPreview(
+          'ERROR: Bootstrap blocked. An enabled OIDC integration is missing a Keycloak client or connection setting.\n'
+          + `${formatRhbkClientErrors(rhbkClientErrors)}\n`
+          + 'Nothing was generated. The form is unchanged and can still be edited or exported.\n'
+        );
+        setActiveTab('logs');
+        setBootstrapStatus('failed');
+        return;
+      }
       setComponentPlan(null);
       setComponentCommandPreview('');
       setComponentPreviewCommands([]);
@@ -7787,7 +7725,7 @@ function App() {
     realm: 'Realm name. Example: openshift or ADO.',
     client: 'Client ID. Example: openshift-console.',
     clientName: 'Human-readable client name. Example: OpenShift Console.',
-    redirectUris: 'Allowed redirect URIs. Example: https://oauth-openshift.apps.ocp.prod.rhlab/oauth2callback/*.',
+    redirectUris: 'Allowed redirect URIs. Most apps use https://<hostname>/*. OpenShift oauth-server requires the exact callback https://oauth-openshift.<apps_domain>/oauth2callback/<IdP name> with no trailing /*.',
     webOrigins: 'Allowed browser origins. Example: https://console-openshift-console.apps.ocp.prod.rhlab.',
     idpName: 'Display name for the identity provider. Example: GitLab.',
     idpAlias: 'Identity provider alias used in URLs. Example: gitlab.',
@@ -9055,29 +8993,16 @@ replace: console=tty0`}</pre>
         const clients = data.component_config?.rhbk?.clients || [];
         const presets = buildRhbkOidcClientPresets(data);
         const updateClient = (index, key, value) => {
-          setData(prev => {
-            const copy = JSON.parse(JSON.stringify(prev));
-            if (!copy.component_config.rhbk.clients) copy.component_config.rhbk.clients = [];
-            copy.component_config.rhbk.clients[index] = {
-              ...(copy.component_config.rhbk.clients[index] || {}),
-              [key]: value
-            };
-            if (index === 0 && key === 'id') copy.component_config.rhbk.client = value;
-            return copy;
-          });
+          setData(prev => updateRhbkClientField(
+            JSON.parse(JSON.stringify(prev)),
+            index,
+            key,
+            value,
+            presets.map(preset => preset.client.id)
+          ));
         };
         const removeRhbkClient = index => {
-          setData(prev => {
-            const copy = JSON.parse(JSON.stringify(prev));
-            if (!copy.component_config?.rhbk?.clients) return copy;
-            const list = copy.component_config.rhbk.clients.filter((_, i) => i !== index);
-            copy.component_config.rhbk.clients = list.length
-              ? list
-              : [{ id: '', name: '', redirect_uris: '', web_origins: '' }];
-            const firstClient = copy.component_config.rhbk.clients[0];
-            copy.component_config.rhbk.client = firstClient?.id || '';
-            return copy;
-          });
+          setData(prev => removeRhbkClientAt(JSON.parse(JSON.stringify(prev)), index));
         };
         const addBlankClient = () => {
           setData(prev => {
@@ -9097,6 +9022,7 @@ replace: console=tty0`}</pre>
           setData(prev => {
             let copy = JSON.parse(JSON.stringify(prev));
             buildRhbkOidcClientPresets(copy).forEach(preset => {
+              if (!rhbkOidcPresetShouldAutoAdd(preset, copy)) return;
               copy = applyRhbkOidcClientPreset(copy, preset.client);
             });
             return copy;
@@ -9107,10 +9033,35 @@ replace: console=tty0`}</pre>
             <GridItem span={12}>
               <p style={{ margin: 0, color: mutedTextColor, fontSize: '14px' }}>
                 Add Keycloak OIDC clients for apps you already selected. Hostnames come from
-                OpenShift apps domain / Grafana / GitLab / BookStack / NetBox / Quay / MinIO /
-                Dev Hub fields on this form. Quay here is UI login, not MinIO S3.
+                OpenShift apps domain / Grafana / BookStack / NetBox / Quay / MinIO /
+                Dev Hub fields on this form. GitLab is not added automatically: no GitLab
+                OIDC role consumes a Keycloak client. Grafana is not added automatically
+                when Grafana OIDC is disabled. OpenShift redirect URIs use the
+                exact callback /oauth2callback/&lt;IdP name&gt; from the OpenShift
+                OIDC IdP name (default Keycloak). Quay here is UI login, not MinIO S3.
+                Create/manage Keycloak client defaults to Yes (ADO creates or updates the
+                client). Set it to No to use an existing client with this ID: the application
+                is still configured for OIDC, but ADO will not create, update, or delete the
+                Keycloak client.
               </p>
             </GridItem>
+            {rhbkClientReferenceErrors(data).length > 0 && (
+              <GridItem span={12}>
+                <div
+                  role="alert"
+                  style={{ border: '1px solid #c9190b', borderRadius: '6px', padding: '10px 12px', color: '#c9190b', fontSize: '13px' }}
+                >
+                  <div style={{ fontWeight: 700 }}>
+                    Keycloak client missing for an enabled OIDC integration. Bootstrap is blocked until this is fixed; you can still edit and export the form.
+                  </div>
+                  {rhbkClientReferenceErrors(data).map(error => (
+                    <div key={`${error.component}-${error.kind}`} style={{ marginTop: '4px' }}>
+                      {error.message}
+                    </div>
+                  ))}
+                </div>
+              </GridItem>
+            )}
             {clients.map((client, index) => (
               <GridItem span={12} key={`rhbk-client-${index}`}>
                 <div style={{ border: `1px solid ${borderColor}`, padding: '12px', borderRadius: '6px' }}>
@@ -9126,6 +9077,23 @@ replace: console=tty0`}</pre>
                     <GridItem span={3}><FormGroup label="Client Name"><TextInput value={client.name || ''} onChange={(_, v) => updateClient(index, 'name', v)} /></FormGroup></GridItem>
                     <GridItem span={3}><FormGroup label="Redirect URIs"><TextInput value={client.redirect_uris || ''} onChange={(_, v) => updateClient(index, 'redirect_uris', v)} /></FormGroup></GridItem>
                     <GridItem span={3}><FormGroup label="Web Origins"><TextInput value={client.web_origins || ''} onChange={(_, v) => updateClient(index, 'web_origins', v)} /></FormGroup></GridItem>
+                    <GridItem span={12}>
+                      <FormGroup label={labelWithHelp(
+                        'Create/manage Keycloak client',
+                        'Yes (default): ADO creates or updates this client in Keycloak. '
+                        + 'No: use an existing client with this ID. The application is still '
+                        + 'configured for OIDC; ADO will not create, update, or delete the client.'
+                      )}>
+                        <Checkbox
+                          id={`rhbk-client-create-${index}`}
+                          label={rhbkClientIsManaged(client)
+                            ? 'Yes — create or update this client'
+                            : 'No — use an existing client'}
+                          isChecked={rhbkClientIsManaged(client)}
+                          onChange={(_, v) => updateClient(index, 'create_client', v)}
+                        />
+                      </FormGroup>
+                    </GridItem>
                   </Grid>
                 </div>
               </GridItem>
@@ -9160,7 +9128,7 @@ replace: console=tty0`}</pre>
                   ))}
                   {presets.length === 0 && (
                     <DropdownItem key="none" isDisabled>
-                      No selected apps with hostnames yet — set apps domain / select Grafana, GitLab, Quay, …
+                      No selected apps with hostnames yet — set apps domain / select Grafana, BookStack, Quay, …
                     </DropdownItem>
                   )}
                   {presets.length > 1 && (
@@ -13128,37 +13096,32 @@ replace: console=tty0`}</pre>
   const renderOpenShiftOAuthRhbkConfig = () => {
     const oauth = data.openshift?.oauth_rhbk || {};
     const rhbk = data.component_config?.rhbk || {};
-    const appsDomain = String(data.openshift?.apps_domain || '').trim();
-    const defaultHost = String(
-      rhbk.hostname
-      || (appsDomain ? `keycloak.${appsDomain}` : '')
-      || ''
-    ).replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    const defaultRealm = String(rhbk.realm || oauth.realm || 'rhlab');
-    const defaultClient = String(
-      oauth.client_id
-      || rhbk.client
-      || rhbk.openshift_oidc_client_id
-      || ''
-    );
-    const prepopulateFromRhbk = () => {
+    const settings = resolveOpenShiftOauthSettings(data, oidcSelection(data));
+    const external = settings.mode === 'external';
+    const oauthErrors = [
+      ...openShiftOauthErrors(data),
+      ...rhbkClientReferenceErrors(data).filter(error => error.component === 'openshift')
+    ];
+    const passwordSourceLabel = {
+      openshift: 'this tab',
+      rhbk: 'the RHBK section',
+      '': 'not set'
+    }[settings.adminPasswordSource];
+    // Fill the OpenShift client from the RHBK client list. Host, realm and admin
+    // credentials are inherited automatically while RHBK is part of the run, so
+    // they are not copied here (a copy would go stale when RHBK changes).
+    const useRhbkClient = () => {
       setData(prev => {
         const copy = JSON.parse(JSON.stringify(prev));
         if (!copy.openshift) copy.openshift = {};
         if (!copy.openshift.oauth_rhbk) copy.openshift.oauth_rhbk = {};
         const cfg = copy.openshift.oauth_rhbk;
         const r = copy.component_config?.rhbk || {};
-        const domain = String(copy.openshift?.apps_domain || '').trim();
         cfg.idp_name = cfg.idp_name || 'Keycloak';
-        cfg.keycloak_hostname = String(
-          r.hostname || (domain ? `keycloak.${domain}` : '') || ''
-        ).replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-        cfg.realm = String(r.realm || cfg.realm || 'rhlab');
         cfg.client_id = String(
-          r.client || r.openshift_oidc_client_id || cfg.client_id || ''
+          r.openshift_oidc_client_id || resolveOpenShiftOidcClientId(copy) || cfg.client_id || ''
         );
         if (!String(cfg.extra_scopes || '').trim()) cfg.extra_scopes = 'groups';
-        cfg.fetch_client_secret = true;
         cfg.mapping_method = cfg.mapping_method || 'claim';
         return copy;
       });
@@ -13166,25 +13129,75 @@ replace: console=tty0`}</pre>
 
     return (
       <>
-        <p style={{ color: mutedTextColor, marginBottom: '12px' }}>
-          Configure the OpenShift OAuth OIDC IdP against Keycloak/RHBK.
-          This tab needs the <strong>RHBK</strong> section filled first
-          (hostname, realm, admin user/password, and the OpenShift client id).
-          Use <strong>Prepopulate from RHBK settings</strong> after those fields
-          are set. The job fetches the client secret from Keycloak when
-          <strong>Fetch client secret from Keycloak</strong> is on.
-        </p>
-        <Grid hasGutter>
-          <GridItem span={12}>
-            <Button variant="secondary" onClick={prepopulateFromRhbk}>
-              Prepopulate from RHBK settings
-            </Button>
-            <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
-              Uses RHBK hostname/realm/OpenShift client when RHBK is configured
-              (defaults: {defaultHost || 'keycloak.&lt;apps_domain&gt;'}, realm {defaultRealm}
-              {defaultClient ? `, client ${defaultClient}` : ''}).
+        <div
+          style={{
+            border: `1px solid ${borderColor}`,
+            borderRadius: '6px',
+            padding: '10px 12px',
+            marginBottom: '12px',
+            color: mutedTextColor,
+            fontSize: '13px'
+          }}
+        >
+          {external ? (
+            <>
+              <strong>Existing Keycloak.</strong> RHBK is not part of this run, so
+              everything below is required: hostname, realm, OpenShift client ID, admin
+              user and admin password. The job only <em>reads</em> the client secret with
+              those admin credentials. It does not create or change the Keycloak client,
+              which must already exist in the realm.
+            </>
+          ) : (
+            <>
+              <strong>RHBK is part of this run.</strong> Hostname, realm and admin
+              credentials are inherited from the RHBK section
+              ({settings.inheritedHostname || 'hostname not set'}, realm{' '}
+              {rhbk.realm || 'not set'}). Fill a field here only to point OpenShift at a
+              different Keycloak or realm. The client must exist in that realm; this job does not
+              create it.
+            </>
+          )}
+          <div style={{ marginTop: '6px' }}>
+            Effective: {settings.hostname || '(no hostname)'} / realm {settings.realm || '(none)'} /
+            client {settings.clientId || '(none)'} / admin {settings.adminUser || '(none)'} (password
+            from {passwordSourceLabel}).
+          </div>
+        </div>
+        {oauthErrors.length > 0 && (
+          <div
+            role="alert"
+            style={{
+              border: '1px solid #c9190b',
+              borderRadius: '6px',
+              padding: '10px 12px',
+              marginBottom: '12px',
+              color: '#c9190b',
+              fontSize: '13px'
+            }}
+          >
+            <div style={{ fontWeight: 700 }}>
+              OpenShift OIDC is incomplete. Bootstrap is blocked until this is fixed; you can still
+              edit and export the form.
             </div>
-          </GridItem>
+            {oauthErrors.map(error => (
+              <div key={`${error.kind}-${error.message}`} style={{ marginTop: '4px' }}>
+                {error.message}
+              </div>
+            ))}
+          </div>
+        )}
+        <Grid hasGutter>
+          {!external && (
+            <GridItem span={12}>
+              <Button variant="secondary" onClick={useRhbkClient}>
+                Use the RHBK OpenShift client
+              </Button>
+              <div style={{ color: mutedTextColor, fontSize: '13px', marginTop: '6px' }}>
+                Fills the OpenShift OIDC client ID from the RHBK client list. It never falls back to the
+                first Keycloak client.
+              </div>
+            </GridItem>
+          )}
           {renderTextField(
             'OAuth IdP display name',
             'openshift.oauth_rhbk.idp_name',
@@ -13192,22 +13205,42 @@ replace: console=tty0`}</pre>
             'Identity provider name in OAuth cluster config. Example: Keycloak, RH-SSO.'
           )}
           {renderTextField(
-            'Keycloak hostname',
+            external ? 'Keycloak hostname (required)' : 'Keycloak hostname (optional override)',
             'openshift.oauth_rhbk.keycloak_hostname',
             'text',
-            `Keycloak route host (no https://). Example: ${defaultHost || 'keycloak.apps.ocp.prod.rhlab'}`
+            external
+              ? 'Keycloak route host, no https://. Example: keycloak.example.com'
+              : `Leave empty to use ${settings.inheritedHostname || 'the RHBK hostname'}.`
           )}
           {renderTextField(
-            'Realm',
+            external ? 'Realm (required)' : 'Realm (optional override)',
             'openshift.oauth_rhbk.realm',
             'text',
-            `Keycloak realm. Default: ${defaultRealm}`
+            external
+              ? 'Keycloak realm that holds the OpenShift client.'
+              : `Leave empty to use the RHBK realm${rhbk.realm ? ` (${rhbk.realm})` : ''}.`
           )}
           {renderTextField(
             'OpenShift OIDC client ID',
             'openshift.oauth_rhbk.client_id',
             'text',
-            'Confidential client in the realm used by OpenShift OAuth. Example: OpenshiftDev.'
+            'Existing confidential client in the realm used by OpenShift OAuth. It is not created here.'
+          )}
+          {renderTextField(
+            external ? 'Keycloak admin user (required)' : 'Keycloak admin user (optional override)',
+            'openshift.oauth_rhbk.admin_user',
+            'text',
+            external
+              ? 'Used only to read the client secret.'
+              : `Leave empty to use the RHBK admin user (${settings.adminUser || 'admin'}).`
+          )}
+          {renderTextField(
+            external ? 'Keycloak admin password (required)' : 'Keycloak admin password (optional override)',
+            'openshift.oauth_rhbk.admin_password',
+            'password',
+            external
+              ? 'Stored in the generated vault file, never in the vars files.'
+              : 'Leave empty to use the RHBK admin password. Required when the hostname above is a different Keycloak.'
           )}
           {renderTextField(
             'Extra scopes',
@@ -13230,9 +13263,18 @@ replace: console=tty0`}</pre>
           </GridItem>
           <GridItem span={12}>
             <Checkbox
+              id="oauth-rhbk-verify-ssl"
+              label="Verify the Keycloak TLS certificate"
+              description="On by default. For an internal CA, add that CA to the execution environment's trust store or set ocp_oidc_auth_ca_pem; turn off only to accept the risk."
+              isChecked={openShiftVerifySsl(oauth)}
+              onChange={(_, v) => set('openshift.oauth_rhbk.verify_ssl', v === true)}
+            />
+          </GridItem>
+          <GridItem span={12}>
+            <Checkbox
               id="oauth-rhbk-fetch-secret"
               label="Fetch client secret from Keycloak (automation)"
-              description="Contoller job uses RHBK admin credentials to read the client secret — leave on unless you must paste a secret."
+              description="The job always reads the client secret with the admin credentials above; pasting a secret is not supported. Turn this off only when the OpenShift client already exists in the realm and is not in the RHBK client list: it then skips the client-list check, and admin credentials are still required."
               isChecked={oauth.fetch_client_secret !== false}
               onChange={(_, v) => set('openshift.oauth_rhbk.fetch_client_secret', v === true)}
             />

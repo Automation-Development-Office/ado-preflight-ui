@@ -17,6 +17,7 @@ test('every local module required by server.js loads', () => {
   assert.match(result.stdout, /ok \.\/git-tls/);
   assert.match(result.stdout, /ok \.\/collection-archive/);
   assert.match(result.stdout, /ok \.\/doc-paths/);
+  assert.match(result.stdout, /ok \.\/verify-ssl/);
 });
 
 test('Containerfile copies every local module server.js requires', () => {

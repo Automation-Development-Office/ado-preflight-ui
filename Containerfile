@@ -40,7 +40,7 @@ COPY public/assistant-knowledge.json ./public/assistant-knowledge.json
 RUN npm install -g npm@11 && hash -r && npm install --omit=dev
 
 COPY server.js ./
-COPY git-username.js git-tls.js collection-archive.js doc-paths.js ./
+COPY git-username.js git-tls.js collection-archive.js doc-paths.js verify-ssl.js ./
 COPY scripts/check-server-modules.js ./scripts/check-server-modules.js
 COPY deploy ./deploy
 COPY --from=build /opt/app-root/src/dist ./dist
