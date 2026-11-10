@@ -23,6 +23,7 @@ const {
 } = require('./git-tls');
 const { chooseArchive } = require('./collection-archive');
 const { safeAdoDocRelative, safePreflightDoc } = require('./doc-paths');
+const { defaultShiftOnShiftConfig, shiftOnShiftPayload } = require('./shift-on-shift');
 
 process.env.NODE_OPTIONS = '--max-old-space-size=256';
 
@@ -228,7 +229,7 @@ const openshiftApps = [
   'aap', 'acs', 'acm', 'bookstack', 'cert_manager', 'console', 'devspaces', 'dev_hub',
   'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio', 'mtv', 'netbox',
   'oadp', 'ocp_compliance', 'ocp_virtualization', 'openshift', 'pega', 'quay', 'rhbk',
-  'zabbix'
+  'shift_on_shift', 'zabbix'
 ];
 const orphanOpenShiftPlaybookApps = [
   'gitlab_runner',
@@ -1871,6 +1872,9 @@ function pruneInactiveComponentApps(data) {
 }
 
 function defaultComponentConfig(component) {
+  if (component === 'shift_on_shift') {
+    return defaultShiftOnShiftConfig();
+  }
   if (component === 'aws') {
     return {
       profile: '',
@@ -2872,6 +2876,10 @@ function normalizePreflightPayload(input) {
 
   if (!data.component_config) data.component_config = {};
   hydrateSelectedComponentConfigs(data);
+  // Same normalization as the form; ocp_hcp_kubevirt_* validates again.
+  if (data.component_config.shift_on_shift) {
+    data.component_config.shift_on_shift = shiftOnShiftPayload(data.component_config.shift_on_shift);
+  }
   if (installAapRequested(data)) stripAutoSelectedAapComponent(data);
   const selectedComponentApps = selectedComponentAppsFrom(data);
 

@@ -115,6 +115,159 @@ const PLAYBOOK_EXPLAIN = {
     ],
     selectionKeys: 'ocp_virtualization'
   },
+  'playbooks/shift_on_shift/ado-shift-on-shift-validate-bootstrap.yml': {
+    title: 'Shift on Shift: validate prerequisites',
+    role: 'ocp_hcp_kubevirt_prereqs',
+    summary:
+      'Read-only check of the management cluster for hosted control planes on OpenShift Virtualization: version and health, bare metal, workers and capacity, OVN-Kubernetes, MCE/HyperShift, OpenShift Virtualization, storage and live migration, wildcard routes, MetalLB, permissions, pull secrets, and the 4.22 support matrix.',
+    varsFiles: [
+      'group_vars/all/<env>/infra_config_vars.yml',
+      'group_vars/all/<env>/vault_openshift.yml',
+      'group_vars/all/<env>/vault_shift_on_shift.yml',
+      'group_vars/all/<env>/vars_shift_on_shift.yml'
+    ],
+    formSources: [
+      'OpenShift Apps → shift_on_shift (Shift on Shift tab)',
+      'Run Bootstrap writes hosted cluster definitions to vars_shift_on_shift.yml and pasted pull secrets to vault_shift_on_shift.yml'
+    ],
+    commandExtras: [
+      'env — group_vars environment directory',
+      'shift_on_shift_cluster_name — optional; empty checks every hosted cluster'
+    ],
+    selectionKeys: 'shift_on_shift'
+  },
+  'playbooks/shift_on_shift/ado-shift-on-shift-deploy-bootstrap.yml': {
+    title: 'Shift on Shift: deploy hosted clusters',
+    role: 'ocp_hcp_kubevirt_cluster',
+    summary:
+      'Installs missing prerequisites when Set up missing prerequisites is on (multicluster engine Operator, OpenShift Virtualization, MetalLB, wildcard routes), validates, then creates missing HostedCluster/NodePool resources (KubeVirt platform) and waits for readiness. Existing hosted clusters are never re-applied or recreated; immutable differences are reported. state is ignored.',
+    varsFiles: [
+      'group_vars/all/<env>/infra_config_vars.yml',
+      'group_vars/all/<env>/vault_openshift.yml',
+      'group_vars/all/<env>/vault_shift_on_shift.yml',
+      'group_vars/all/<env>/vars_shift_on_shift.yml'
+    ],
+    formSources: [
+      'OpenShift Apps → shift_on_shift (Shift on Shift tab)',
+      'Run Bootstrap writes hosted cluster definitions to vars_shift_on_shift.yml and pasted pull secrets to vault_shift_on_shift.yml'
+    ],
+    commandExtras: [
+      'env — group_vars environment directory',
+      'shift_on_shift_cluster_name — optional; empty deploys every hosted cluster'
+    ],
+    selectionKeys: 'shift_on_shift'
+  },
+  'playbooks/shift_on_shift/ado-shift-on-shift-status-bootstrap.yml': {
+    title: 'Shift on Shift: hosted cluster status',
+    role: 'ocp_hcp_kubevirt_cluster',
+    summary:
+      'Read-only HostedCluster and NodePool conditions, version, API URL, live migration status, and drift.',
+    varsFiles: [
+      'group_vars/all/<env>/infra_config_vars.yml',
+      'group_vars/all/<env>/vault_openshift.yml',
+      'group_vars/all/<env>/vault_shift_on_shift.yml',
+      'group_vars/all/<env>/vars_shift_on_shift.yml'
+    ],
+    formSources: [
+      'OpenShift Apps → shift_on_shift (Shift on Shift tab)',
+      'Run Bootstrap writes hosted cluster definitions to vars_shift_on_shift.yml and pasted pull secrets to vault_shift_on_shift.yml'
+    ],
+    commandExtras: [
+      'env — group_vars environment directory',
+      'shift_on_shift_cluster_name — optional'
+    ],
+    selectionKeys: 'shift_on_shift'
+  },
+  'playbooks/shift_on_shift/ado-shift-on-shift-scale-bootstrap.yml': {
+    title: 'Shift on Shift: scale node pool',
+    role: 'ocp_hcp_kubevirt_cluster',
+    summary:
+      'Day-2: sets NodePool replicas or autoscaling for one hosted cluster. Without values it changes nothing. Not auto-selected.',
+    varsFiles: [
+      'group_vars/all/<env>/infra_config_vars.yml',
+      'group_vars/all/<env>/vault_openshift.yml',
+      'group_vars/all/<env>/vault_shift_on_shift.yml',
+      'group_vars/all/<env>/vars_shift_on_shift.yml'
+    ],
+    formSources: [
+      'OpenShift Apps → shift_on_shift (Shift on Shift tab)',
+      'Run Bootstrap writes hosted cluster definitions to vars_shift_on_shift.yml and pasted pull secrets to vault_shift_on_shift.yml'
+    ],
+    commandExtras: [
+      'env — group_vars environment directory',
+      'shift_on_shift_cluster_name — required',
+      'shift_on_shift_replicas, or shift_on_shift_autoscaling_min / _max',
+      'shift_on_shift_nodepool_name — optional'
+    ],
+    selectionKeys: 'shift_on_shift'
+  },
+  'playbooks/shift_on_shift/ado-shift-on-shift-update-bootstrap.yml': {
+    title: 'Shift on Shift: update hosted cluster',
+    role: 'ocp_hcp_kubevirt_cluster',
+    summary:
+      'Day-2: channel, autoRepair, control plane release, then node pool release, checked against the support matrix and skew policy. Release changes need shift_on_shift_confirm_update=true. Not auto-selected.',
+    varsFiles: [
+      'group_vars/all/<env>/infra_config_vars.yml',
+      'group_vars/all/<env>/vault_openshift.yml',
+      'group_vars/all/<env>/vault_shift_on_shift.yml',
+      'group_vars/all/<env>/vars_shift_on_shift.yml'
+    ],
+    formSources: [
+      'OpenShift Apps → shift_on_shift (Shift on Shift tab)',
+      'Run Bootstrap writes hosted cluster definitions to vars_shift_on_shift.yml and pasted pull secrets to vault_shift_on_shift.yml'
+    ],
+    commandExtras: [
+      'env — group_vars environment directory',
+      'shift_on_shift_cluster_name — required',
+      'shift_on_shift_target_release_image / shift_on_shift_target_version',
+      'shift_on_shift_update_nodepools, shift_on_shift_confirm_update'
+    ],
+    selectionKeys: 'shift_on_shift'
+  },
+  'playbooks/shift_on_shift/ado-shift-on-shift-access-bootstrap.yml': {
+    title: 'Shift on Shift: access details',
+    role: 'ocp_hcp_kubevirt_cluster',
+    summary:
+      'Day-2: API URL, console URL, and the admin kubeconfig / kubeadmin secret names. Secret contents are never printed. Not auto-selected.',
+    varsFiles: [
+      'group_vars/all/<env>/infra_config_vars.yml',
+      'group_vars/all/<env>/vault_openshift.yml',
+      'group_vars/all/<env>/vault_shift_on_shift.yml',
+      'group_vars/all/<env>/vars_shift_on_shift.yml'
+    ],
+    formSources: [
+      'OpenShift Apps → shift_on_shift (Shift on Shift tab)',
+      'Run Bootstrap writes hosted cluster definitions to vars_shift_on_shift.yml and pasted pull secrets to vault_shift_on_shift.yml'
+    ],
+    commandExtras: [
+      'env — group_vars environment directory',
+      'shift_on_shift_cluster_name — required'
+    ],
+    selectionKeys: 'shift_on_shift'
+  },
+  'playbooks/shift_on_shift/ado-shift-on-shift-delete-bootstrap.yml': {
+    title: 'Shift on Shift: delete hosted cluster',
+    role: 'ocp_hcp_kubevirt_cluster',
+    summary:
+      'Destructive: deletes one hosted cluster after the name is typed again in shift_on_shift_confirm_delete. Never auto-selected.',
+    varsFiles: [
+      'group_vars/all/<env>/infra_config_vars.yml',
+      'group_vars/all/<env>/vault_openshift.yml',
+      'group_vars/all/<env>/vault_shift_on_shift.yml',
+      'group_vars/all/<env>/vars_shift_on_shift.yml'
+    ],
+    formSources: [
+      'OpenShift Apps → shift_on_shift (Shift on Shift tab)',
+      'Run Bootstrap writes hosted cluster definitions to vars_shift_on_shift.yml and pasted pull secrets to vault_shift_on_shift.yml'
+    ],
+    commandExtras: [
+      'env — group_vars environment directory',
+      'shift_on_shift_cluster_name — required',
+      'shift_on_shift_confirm_delete — must equal the cluster name',
+      'shift_on_shift_delete_namespace — optional'
+    ],
+    selectionKeys: 'shift_on_shift'
+  },
   'playbooks/mtv/ado-deploy-bootstrap.yml': {
     title: 'Deploy Migration Toolkit for Virtualization',
     role: 'ocp_mtv',

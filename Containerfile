@@ -7,6 +7,8 @@ COPY public ./public
 # /opt/app-root/src, and src/ is copied underneath it, so the file must
 # sit next to package.json for that relative import to resolve.
 COPY git-tls.js ./git-tls.js
+# App.jsx and src/ShiftOnShiftConfig.jsx import ../shift-on-shift.js.
+COPY shift-on-shift.js ./shift-on-shift.js
 COPY src ./src
 # npm 10.8.2 in this image crashes on peer resolution (edgesOut). npm 11 does not.
 # hash -r drops the shell's cached /usr/bin/npm from the line above.
@@ -40,7 +42,7 @@ COPY public/assistant-knowledge.json ./public/assistant-knowledge.json
 RUN npm install -g npm@11 && hash -r && npm install --omit=dev
 
 COPY server.js ./
-COPY git-username.js git-tls.js collection-archive.js doc-paths.js ./
+COPY git-username.js git-tls.js collection-archive.js doc-paths.js shift-on-shift.js ./
 COPY scripts/check-server-modules.js ./scripts/check-server-modules.js
 COPY deploy ./deploy
 COPY --from=build /opt/app-root/src/dist ./dist

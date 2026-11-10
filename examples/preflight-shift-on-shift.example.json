@@ -1,0 +1,126 @@
+{
+  "environment": "prod",
+  "domain": "example.com",
+  "additional_environments": "",
+  "components": [
+    "openshift"
+  ],
+  "component_apps": {
+    "openshift": [
+      "shift_on_shift"
+    ],
+    "rhel": [],
+    "patching": [],
+    "provision": []
+  },
+  "selected_component_apps": [
+    "shift_on_shift"
+  ],
+  "component_options": {
+    "openshift": []
+  },
+  "component_config": {
+    "shift_on_shift": {
+      "install_prerequisites": true,
+      "metallb_address_pools": [],
+      "manage_wildcard_route_admission": false,
+      "allow_unsupported_platform": false,
+      "load_balancer_check": "metallb",
+      "validate_before_deploy": true,
+      "verify_hosted_api": true,
+      "clusters": [
+        {
+          "name": "tenant-a",
+          "namespace": "clusters",
+          "release_image": "quay.io/openshift-release-dev/ocp-release:4.22.0-multi",
+          "hosted_version": "",
+          "pull_secret_source": "management_cluster",
+          "controller_availability_policy": "HighlyAvailable",
+          "api_publishing": "LoadBalancer",
+          "base_domain": "",
+          "cluster_network_cidr": "10.132.0.0/14",
+          "service_network_cidr": "172.31.0.0/16",
+          "worker_count": 3,
+          "worker_cores": 4,
+          "worker_memory": "16Gi",
+          "root_volume_size": "64Gi",
+          "root_volume_storage_class": "CHANGE_ME_RWX_BLOCK_STORAGE_CLASS",
+          "etcd_storage_class": "CHANGE_ME_LVM_STORAGE_CLASS",
+          "etcd_storage_size": "8Gi",
+          "require_live_migration": true,
+          "network_multiqueue": "Enable",
+          "qos_class": "Burstable",
+          "channel": "stable-4.22",
+          "fips": false,
+          "capabilities_disabled": [],
+          "disconnected": {
+            "enabled": false
+          }
+        },
+        {
+          "name": "tenant-b",
+          "namespace": "clusters",
+          "release_image": "quay.io/openshift-release-dev/ocp-release:4.22.0-multi",
+          "pull_secret_source": "vault",
+          "pull_secret": "CHANGE_ME_PULL_SECRET_JSON",
+          "controller_availability_policy": "SingleReplica",
+          "api_publishing": "LoadBalancer",
+          "base_domain": "tenants.example.com",
+          "cluster_network_cidr": "10.132.0.0/14",
+          "service_network_cidr": "172.31.0.0/16",
+          "worker_count": 2,
+          "worker_cores": 4,
+          "worker_memory": "16Gi",
+          "root_volume_size": "64Gi",
+          "root_volume_storage_class": "",
+          "etcd_storage_class": "",
+          "require_live_migration": false,
+          "disconnected": {
+            "enabled": false
+          }
+        }
+      ]
+    }
+  },
+  "openshift": {
+    "api_host": "https://api.mgmt.example.com:6443",
+    "apps_domain": "apps.mgmt.example.com",
+    "token": "CHANGE_ME_OPENSHIFT_TOKEN",
+    "skip_tls_verify": false
+  },
+  "aap": {
+    "enabled": true,
+    "hostname": "https://aap.apps.prod.rhlab",
+    "version": "27",
+    "organization": "ADO",
+    "inventory": "ADO-inventory",
+    "project": "ADO-project",
+    "execution_environment": "ADO-ee",
+    "vault_credential_name": "ADO-vault",
+    "admin_username": "admin",
+    "admin_password": "CHANGE_ME",
+    "skip_tls_verify": true,
+    "vault_password": "CHANGE_ME"
+  },
+  "git": {
+    "scm_tool": "github",
+    "url": "https://github.com/example/ado-bootstrap.git",
+    "branch": "main",
+    "token": "",
+    "auto_push": false
+  },
+  "pre_installs": {
+    "install_aap": false,
+    "attach_aap_license": false,
+    "aap": {
+      "license_mode": "none"
+    }
+  },
+  "vault": {
+    "encrypt": true
+  },
+  "overwrite_generated": true,
+  "ansible": {
+    "extra_args": ""
+  }
+}

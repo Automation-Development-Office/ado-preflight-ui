@@ -12,6 +12,7 @@ const STOP = new Set([
 
 const SYNONYM_GROUPS = [
   ['virtualization', 'virt', 'ocp_virtualization', 'kubevirt', 'cnv', 'ocp_wait_operator', 'csv', 'ansibleunicode'],
+  ['shift_on_shift', 'shift', 'hypershift', 'hosted', 'hostedcluster', 'nodepool', 'hcp', 'ocp_hcp_kubevirt_cluster', 'ocp_hcp_kubevirt_prereqs'],
   ['gitlab', 'saml', 'oauth2', 'git.username', 'username', 'pat', 'x-token-auth'],
   ['inventory', 'timeout', 'timed', 'request_timeout', 'organizations', 'bootstrap_controller'],
   ['vault', 'ansible_vars_enabled', 'source_vars', 'group_vars', 'decrypt', 'ado-vault', 'ado-inventory'],

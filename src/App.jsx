@@ -5,6 +5,7 @@ import PodTerminal from './PodTerminal.jsx';
 import BootstrapProfiles from './BootstrapProfiles.jsx';
 import AdoAssistant from './AdoAssistant.jsx';
 import ControllerWorkflowPreview from './ControllerWorkflowPreview.jsx';
+import ShiftOnShiftConfig from './ShiftOnShiftConfig.jsx';
 import { workflowPreviewKeys } from './controllerWorkflowCatalog.mjs';
 import {
   RHEL_SYSTEM_ROLES,
@@ -22,6 +23,11 @@ import {
 import { explainLocalPlaybookCommand } from './playbookExplain.mjs';
 import { localCollectionDoc } from './localCollectionDoc.mjs';
 import { applyImportedGitSkipTls, gitTlsStage } from '../git-tls.js';
+import {
+  defaultShiftOnShiftConfig,
+  shiftOnShiftPayload,
+  validateShiftOnShiftConfig
+} from '../shift-on-shift.js';
 import {
   Page,
   PageSection,
@@ -61,7 +67,7 @@ import adoLogo from '../ado-logo-redhat.png';
 const openshiftApps = [
   'aap','acs','acm','bookstack','cert_manager','console','devspaces','dev_hub',
   'dirsrv','eck','gitops','gitlab','grafana','kafka','minio','mtv','netbox',
-  'oadp','ocp_compliance','ocp_virtualization','openshift','pega','quay','rhbk','zabbix'
+  'oadp','ocp_compliance','ocp_virtualization','openshift','pega','quay','rhbk','shift_on_shift','zabbix'
 ];
 
 // Collection playbook apps not exposed as UI checkboxes. Stale imports leave
@@ -1497,6 +1503,7 @@ const componentOptionLabels = {
   minio: 'MinIO',
   zabbix: 'Zabbix',
   ocp_virtualization: 'OpenShift Virtualization',
+  shift_on_shift: 'Shift on Shift (Hosted Control Planes on OpenShift Virtualization)',
   mtv: 'Migration Toolkit for Virtualization (MTV)',
   openshift_virt: 'OpenShift Virt VM',
   ec2_ami_copy: 'EC2 AMI Copy'
@@ -2489,6 +2496,7 @@ const defaults = {
       channel: 'stable',
       enable_kube_secondary_dns: false
     },
+    shift_on_shift: defaultShiftOnShiftConfig(),
     mtv: {
       channel: 'release-v2.12',
       namespace: 'openshift-mtv'
@@ -4281,7 +4289,7 @@ function App() {
       return JSON.parse(JSON.stringify(defaults.component_config.aws));
     }
 
-    const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching', 'aap_hub_harden', 'rhel_system_roles'];
+    const noReplicaComponents = ['rhel', 'satellite', 'idm', 'compliance', 'stig', 'patching', 'aap_hub_harden', 'rhel_system_roles', 'shift_on_shift'];
     const fallback = noReplicaComponents.includes(component)
       ? (component === 'patching' || component === 'rhel' ? { hostname: '', hosts: [] } : { hostname: '' })
       : { hostname: '', storage: '', replicas: 1 };
@@ -4884,6 +4892,9 @@ function App() {
     syncPlatformInstallOptions(payload);
     if (!payload.component_config) payload.component_config = {};
     foldHostnameIntoHostList(payload.component_config.patching);
+    if (payload.component_config.shift_on_shift) {
+      payload.component_config.shift_on_shift = shiftOnShiftPayload(payload.component_config.shift_on_shift);
+    }
     if (payload.deployment_mode !== 'connected') {
       disablePublicGalaxyCredential(payload.aap);
     }
@@ -6990,6 +7001,20 @@ function App() {
         setBootstrapStatus('failed');
         return;
       }
+      if (selectedComponentAppsFrom(pruneInactiveComponentApps(data)).includes('shift_on_shift')) {
+        const sosErrors = validateShiftOnShiftConfig(data.component_config?.shift_on_shift);
+        if (sosErrors.length > 0) {
+          setImportStatus('Shift on Shift has input problems');
+          setPreview(
+            'ERROR: Fix the Shift on Shift tab before running bootstrap:\n'
+            + sosErrors.map(e => `  - ${e.cluster ? `${e.cluster}: ` : ''}${e.message}`).join('\n')
+            + '\n'
+          );
+          setActiveTab('logs');
+          setBootstrapStatus('failed');
+          return;
+        }
+      }
       setComponentPlan(null);
       setComponentCommandPreview('');
       setComponentPreviewCommands([]);
@@ -7997,6 +8022,7 @@ replace: console=tty0`}</pre>
       <>
         <p>Delete <code>group_vars/all/&lt;current env&gt;</code> in the pod git repo and regenerate vars/vault with force overwrite.</p>
         <p>Other environments, playbooks, and configs are preserved.</p>
+        <p>Not needed after changing clusters: the OpenShift connection (<code>infra_config_vars.yml</code>) always follows this form.</p>
       </>
     ),
     overrideJobWorkflowTemplates: (
@@ -12795,6 +12821,22 @@ replace: console=tty0`}</pre>
     </>
   );
 
+  const renderShiftOnShiftConfig = () => (
+    <ShiftOnShiftConfig
+      config={data.component_config?.shift_on_shift}
+      onChange={next => set('component_config.shift_on_shift', next)}
+      openshift={data.openshift || {}}
+      labelWithHelp={labelWithHelp}
+      storageClasses={storageClassLookup.classes || []}
+      storageLookupLoading={!!storageClassLookup.loading}
+      storageLookupError={storageClassLookup.error || ''}
+      onLookupStorageClasses={() => lookupStorageClasses()}
+      lookupReady={openshiftLookupReady}
+      mutedTextColor={mutedTextColor}
+      isDark={isDark}
+    />
+  );
+
   const renderOcpVirtualizationConfig = () => {
     const ocpApps = data.component_apps?.openshift || [];
     const mtvOn = ocpApps.includes('mtv');
@@ -15365,6 +15407,8 @@ replace: console=tty0`}</pre>
         return renderDevHubConfig();
       case 'ocp_virtualization':
         return renderOcpVirtualizationConfig();
+      case 'shift_on_shift':
+        return renderShiftOnShiftConfig();
       case 'acm':
         return renderAcmConfig();
       case 'mtv':
@@ -15635,7 +15679,7 @@ ${vaultYaml}
         }
       });
       (data.component_apps?.openshift || []).forEach(app => {
-        if (['acm', 'acs', 'devspaces', 'dev_hub', 'cert_manager', 'quay', 'minio', 'mtv', 'ocp_virtualization', 'ocp_compliance'].includes(app) && !tabs.includes(app)) {
+        if (['acm', 'acs', 'devspaces', 'dev_hub', 'cert_manager', 'quay', 'minio', 'mtv', 'ocp_virtualization', 'ocp_compliance', 'shift_on_shift'].includes(app) && !tabs.includes(app)) {
           tabs.push(app);
         }
         if (simpleComponents.includes(app) && !tabs.includes(app)) {
@@ -15696,6 +15740,7 @@ ${vaultYaml}
     if (tab === 'alternate_routes') return 'Alternate Routes';
     if (tab === 'acm') return 'ACM';
     if (tab === 'mtv') return 'MTV';
+    if (tab === 'shift_on_shift') return 'Shift on Shift';
     if (tab === 'acs') return 'ACS';
     if (tab === 'devspaces') return 'Dev Spaces';
     if (tab === 'dev_hub') return 'Dev Hub';

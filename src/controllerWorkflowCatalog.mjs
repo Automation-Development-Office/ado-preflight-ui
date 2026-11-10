@@ -16,7 +16,7 @@ export const UI_OPENSHIFT_APPS = [
   'aap', 'acs', 'acm', 'bookstack', 'cert_manager', 'console', 'devspaces',
   'dev_hub', 'dirsrv', 'eck', 'gitops', 'gitlab', 'grafana', 'kafka', 'minio',
   'netbox', 'oadp', 'ocp_compliance', 'ocp_virtualization', 'mtv', 'openshift',
-  'pega', 'quay', 'rhbk', 'openshift_networking', 'zabbix',
+  'pega', 'quay', 'rhbk', 'openshift_networking', 'shift_on_shift', 'zabbix',
 ];
 
 /** Present in stale imports. Generation ignores them unless a future UI selects them. */

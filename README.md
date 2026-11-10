@@ -292,6 +292,7 @@ OpenShift includes platform and application components such as:
 - PEGA
 - Quay
 - RHBK
+- Shift on Shift (hosted OpenShift clusters on OpenShift Virtualization)
 
 ### Patching Components
 
@@ -449,6 +450,44 @@ Actions on the tab:
 This generator is intentionally separate from the normal bootstrap run. It is
 used to prepare OpenShift installer input files. Future work can add ISO
 generation, PXE export, hardware inventory import, and GitOps export.
+
+### Shift on Shift
+
+Deploys independent OpenShift clusters on the selected OpenShift cluster with
+hosted control planes (HyperShift) on the KubeVirt platform: control planes run
+as pods, worker nodes run as OpenShift Virtualization VMs. The tab configures
+one or more hosted clusters:
+
+- name, namespace, release image (and version for digest-pinned images)
+- worker VM count or autoscaling, vCPU, memory, root disk size and StorageClass,
+  live migration (ReadWriteMany Block), etcd StorageClass and size
+- control plane availability, API endpoint (LoadBalancer or NodePort), default
+  ingress or your own base domain, pod/service/machine networks, channel
+- pull secret: copied from the management cluster, pasted (vault file only),
+  or an existing secret
+- optional disconnected settings: mirror sources, registry CA bundle, OLM
+  catalog placement and images
+
+The management cluster connection is the OpenShift API host and token. The tab
+validates input as you type and shows a review summary; Run Bootstrap stops if
+Shift on Shift input is invalid.
+
+*Set up missing prerequisites* is on by default: the deploy job installs what
+the cluster is missing (multicluster engine Operator with hosted control
+planes, OpenShift Virtualization, MetalLB with the *MetalLB address pool* you
+enter, wildcard route admission) and reuses what is there. **Validate
+prerequisites** shows these as WILL INSTALL. Storage is not installed (the
+cluster needs a default StorageClass), and nothing is installed when something
+that cannot be installed is missing. With the setting off, prerequisites are
+only validated and *Allow wildcard route admission* is the only cluster-wide
+change.
+
+Generated job templates: Validate prerequisites, Deploy hosted clusters, Hosted
+cluster status, Scale node pool, Update hosted cluster, Access details, Delete
+hosted cluster (typed confirmation). Without AAP, the local runner recommends
+only validate, deploy, and status. See `docs/SHIFT_ON_SHIFT.md` in
+infra.automation_development_office and
+`examples/preflight-shift-on-shift.example.json`.
 
 ### Grafana
 
